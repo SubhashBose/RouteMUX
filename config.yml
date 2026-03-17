@@ -1,0 +1,22 @@
+global:
+  listen:          # IP or interface (e.g. 192.168.1.10, eth0, lo). Empty = all interfaces.
+  port: 8080
+  # tls-cert: /path/to/cert.pem
+  # tls-key:  /path/to/key.pem
+  # global-auth: ["admin", "s3cr3t"]   # HTTP Basic Auth for all routes
+
+routes:
+  /api/:
+    dest: http://localhost:3000/v1/
+    timeout: 30s
+    # noTLSverify: true
+    # auth: ["apiuser", "apipass"]   # overrides global-auth for this route
+
+  /app/:
+    dest: http://localhost:8000/
+    timeout: 120s
+
+  # Public route — explicitly disables auth even when global-auth is set:
+  # /public/:
+  #   dest: http://localhost:9000/
+  #   auth: []
