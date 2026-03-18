@@ -97,6 +97,14 @@ func serveWebSocket(w http.ResponseWriter, r *http.Request, destURL *url.URL, ro
 		}
 		outHeaders[k] = vals
 	}
+	// Set X-Forwarded-For (IP only, no port) mirroring the HTTP proxy path.
+	if clientIP, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		if prior, ok := outHeaders["X-Forwarded-For"]; ok {
+			outHeaders.Set("X-Forwarded-For", strings.Join(prior, ", ")+", "+clientIP)
+		} else {
+			outHeaders.Set("X-Forwarded-For", clientIP)
+		}
+	}
 	// If proxy auth is active, strip Authorization so proxy credentials never
 	// reach upstream. The add/delete loop below runs after, so add-header or
 	// delete-header for Authorization still work normally.
@@ -157,4 +165,3 @@ func serveWebSocket(w http.ResponseWriter, r *http.Request, destURL *url.URL, ro
 	<-done
 	<-done
 }
-

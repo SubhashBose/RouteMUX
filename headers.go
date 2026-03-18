@@ -65,6 +65,7 @@ func applyDeleteHeaders(h http.Header, deleteList []string, hasWild bool) {
 		delete(h, key)
 	}
 }
+
 // xffRoundTripper wraps an http.RoundTripper to fix X-Forwarded-For handling.
 //
 // Go's ReverseProxy always appends the client IP after the Director returns,

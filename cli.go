@@ -12,22 +12,23 @@ import (
 // CLI args take precedence over config file.
 func parseAll(args []string) (*Config, error) {
 	// --- 1. Find config file path from args (first pass) ---
-	configPath := "<none>"
-
-	for i := 0; i < len(args); i++ {  // Skip reading config file if --help
-		if args[i] == "--help" || args[i] == "-h" {
-			configPath = ""
-			break
+	// Scan args once to find --config and detect --help early.
+	explicitConfig := false
+	configPath := ""
+	skipConfig := false
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--help", "-h":
+			skipConfig = true
+		case "--config":
+			if i+1 < len(args) {
+				configPath = args[i+1]
+				explicitConfig = true
+				i++
+			}
 		}
 	}
-
-	for i := 0; i < len(args)-1; i++ {
-		if args[i] == "--config" {
-			configPath = args[i+1]
-			break
-		}
-	}
-	if configPath == "<none>" {
+	if !skipConfig && !explicitConfig {
 		configPath = findDefaultConfig()
 	}
 
@@ -36,19 +37,11 @@ func parseAll(args []string) (*Config, error) {
 	if configPath != "" {
 		var err error
 		base, err = loadConfigFile(configPath)
-		if err != nil && configPath != "" {
-			// Only error if user explicitly specified --config
-			explicitConfig := false
-			for i := 0; i < len(args)-1; i++ {
-				if args[i] == "--config" {
-					explicitConfig = true
-					break
-				}
-			}
+		if err != nil {
 			if explicitConfig {
 				return nil, fmt.Errorf("reading config file %q: %w", configPath, err)
 			}
-			// Default path not found — start fresh
+			// Default path suddenly unreadable — start fresh.
 			base = &Config{Port: 8080, Routes: map[string]*RouteConfig{}}
 		}
 	}
