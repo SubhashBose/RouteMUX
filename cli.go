@@ -259,6 +259,9 @@ func applyCLI(cfg *Config, rawArgs []string) error {
 				return fmt.Errorf("--delete-header requires a value")
 			}
 			curRoute.DeleteHeaders = append(curRoute.DeleteHeaders, args[i+1])
+			if strings.Contains(args[i+1], "*") {
+				curRoute.DeleteHasWildcard = true
+			}
 			i += 2
 		case "--timeout":
 			if curRoute == nil {
@@ -318,6 +321,7 @@ Route options (must follow --route PATH):
   --timeout DURATION  Upstream timeout (e.g. 30s, 2m)
   --add-header K:V    Add/overwrite a header on upstream request (repeatable)
   --delete-header K   Delete a header from the upstream request (repeatable)
+                      Can take wildcards (e.g. --delete-header *cookie*)
 
 Config file (config.yml):
   global:
@@ -333,5 +337,11 @@ Config file (config.yml):
       noTLSverify: false
       auth: ["USER", "PASSWORD"]
       timeout: 30s
+	  add-header:
+		User-Agent: RouteMUX
+		X-Internal-Token: TOKEN
+	  delete-header:
+		- *cookie*
+		- Authorization
 `)
 }

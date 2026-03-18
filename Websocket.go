@@ -103,12 +103,7 @@ func serveWebSocket(w http.ResponseWriter, r *http.Request, destURL *url.URL, ro
 	if effectiveAuth != nil {
 		outHeaders.Del("Authorization")
 	}
-	for _, name := range rc.DeleteHeaders {
-		if strings.EqualFold(name, "host") {
-			continue // already handled above
-		}
-		outHeaders.Del(name)
-	}
+	applyDeleteHeaders(outHeaders, rc.DeleteHeaders, rc.DeleteHasWildcard)
 	for name, val := range rc.AddHeaders {
 		if strings.EqualFold(name, "host") {
 			continue // already handled above
@@ -162,3 +157,4 @@ func serveWebSocket(w http.ResponseWriter, r *http.Request, destURL *url.URL, ro
 	<-done
 	<-done
 }
+

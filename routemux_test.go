@@ -784,17 +784,15 @@ func TestRouteHandler_DeleteHostHeader_FallsBackToUpstream(t *testing.T) {
 	}
 }
 
-func TestRouteHandler_ClientHostNotLeaked(t *testing.T) {
-	// Without any host manipulation, the proxy should send the upstream host,
-	// NOT the client's original Host header (e.g. "127.0.0.1:PORT").
+func TestRouteHandler_ClientHostPassedThrough(t *testing.T) {
+	// Without any host manipulation, the client's Host header passes through
+	// to the upstream unchanged.
 	var gotHost string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotHost = r.Host
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer backend.Close()
-
-	backendURL, _ := url.Parse(backend.URL)
 
 	cfg := &Config{
 		Port:   8080,
@@ -804,10 +802,264 @@ func TestRouteHandler_ClientHostNotLeaked(t *testing.T) {
 	ts := httptest.NewServer(srv.mux)
 	defer ts.Close()
 
-	http.Get(ts.URL + "/api/")
+	// The client sends Host: myapp.example.com
+	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
+	req.Host = "myapp.example.com"
+	http.DefaultClient.Do(req)
 
-	// Default behaviour: upstream receives its own host, not the proxy's address.
-	if gotHost != backendURL.Host {
-		t.Errorf("Host = %q, want upstream host %q", gotHost, backendURL.Host)
+	if gotHost != "myapp.example.com" {
+		t.Errorf("Host = %q, want client host myapp.example.com", gotHost)
+	}
+}
+
+// ---- Authorization header passthrough tests ----
+
+func TestRouteHandler_ProxyAuthStripsAuthorization(t *testing.T) {
+	// When proxy auth is active, the client's Authorization header must NOT
+	// reach the upstream (it contained the proxy credentials).
+	var gotAuth string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := &Config{
+		Port:       8080,
+		GlobalAuth: &Auth{"admin", "secret"},
+		Routes:     map[string]*RouteConfig{"/api/": {Dest: backend.URL + "/"}},
+	}
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.mux)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
+	req.SetBasicAuth("admin", "secret")
+	http.DefaultClient.Do(req)
+
+	if gotAuth != "" {
+		t.Errorf("Authorization should be stripped by proxy, but upstream got: %q", gotAuth)
+	}
+}
+
+func TestRouteHandler_NoProxyAuthPassesAuthorization(t *testing.T) {
+	// When no proxy auth is active, the client's Authorization header must
+	// pass through to upstream untouched.
+	var gotAuth string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := &Config{
+		Port:   8080,
+		Routes: map[string]*RouteConfig{"/api/": {Dest: backend.URL + "/"}},
+	}
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.mux)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
+	req.Header.Set("Authorization", "Bearer mytoken123")
+	http.DefaultClient.Do(req)
+
+	if gotAuth != "Bearer mytoken123" {
+		t.Errorf("Authorization should pass through, got: %q", gotAuth)
+	}
+}
+
+func TestRouteHandler_ProxyAuthWithAddHeaderAuthOverride(t *testing.T) {
+	// When proxy auth is active but user also sets add-header: Authorization,
+	// the user-supplied value should be sent (not stripped, not the proxy creds).
+	var gotAuth string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := &Config{
+		Port:       8080,
+		GlobalAuth: &Auth{"admin", "secret"},
+		Routes: map[string]*RouteConfig{
+			"/api/": {
+				Dest:       backend.URL + "/",
+				AddHeaders: map[string]string{"Authorization": "Bearer upstream-token"},
+			},
+		},
+	}
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.mux)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
+	req.SetBasicAuth("admin", "secret")
+	http.DefaultClient.Do(req)
+
+	if gotAuth != "Bearer upstream-token" {
+		t.Errorf("Authorization should be user-supplied value, got: %q", gotAuth)
+	}
+}
+
+func TestRouteHandler_NoProxyAuthDeleteAuthorization(t *testing.T) {
+	// No proxy auth, but user explicitly deletes Authorization — it should be gone.
+	var gotAuth string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := &Config{
+		Port: 8080,
+		Routes: map[string]*RouteConfig{
+			"/api/": {
+				Dest:          backend.URL + "/",
+				DeleteHeaders: []string{"Authorization"},
+			},
+		},
+	}
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.mux)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
+	req.Header.Set("Authorization", "Bearer mytoken123")
+	http.DefaultClient.Do(req)
+
+	if gotAuth != "" {
+		t.Errorf("Authorization should be deleted, got: %q", gotAuth)
+	}
+}
+
+// ---- Wildcard delete-header tests ----
+
+func TestDeleteHeader_WildcardPrefix(t *testing.T) {
+	var gotHeaders http.Header
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeaders = r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := &Config{
+		Port: 8080,
+		Routes: map[string]*RouteConfig{
+			"/api/": {
+				Dest:             backend.URL + "/",
+				DeleteHeaders:    []string{"CF-*"},
+				DeleteHasWildcard: true,
+			},
+		},
+	}
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.mux)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
+	req.Header.Set("CF-Ray", "abc123")
+	req.Header.Set("CF-Connecting-IP", "1.2.3.4")
+	req.Header.Set("X-Keep-Me", "yes")
+	http.DefaultClient.Do(req)
+
+	if gotHeaders.Get("Cf-Ray") != "" {
+		t.Error("CF-Ray should be deleted")
+	}
+	if gotHeaders.Get("Cf-Connecting-Ip") != "" {
+		t.Error("CF-Connecting-IP should be deleted")
+	}
+	if gotHeaders.Get("X-Keep-Me") != "yes" {
+		t.Error("X-Keep-Me should be untouched")
+	}
+}
+
+func TestDeleteHeader_WildcardSuffix(t *testing.T) {
+	var gotHeaders http.Header
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeaders = r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := &Config{
+		Port: 8080,
+		Routes: map[string]*RouteConfig{
+			"/api/": {
+				Dest:             backend.URL + "/",
+				DeleteHeaders:    []string{"*-Secret"},
+				DeleteHasWildcard: true,
+			},
+		},
+	}
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.mux)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
+	req.Header.Set("X-Secret", "gone")
+	req.Header.Set("Api-Secret", "gone")
+	req.Header.Set("X-Public", "kept")
+	http.DefaultClient.Do(req)
+
+	if gotHeaders.Get("X-Secret") != "" {
+		t.Error("X-Secret should be deleted")
+	}
+	if gotHeaders.Get("Api-Secret") != "" {
+		t.Error("Api-Secret should be deleted")
+	}
+	if gotHeaders.Get("X-Public") != "kept" {
+		t.Error("X-Public should be untouched")
+	}
+}
+
+func TestDeleteHeader_NoWildcard_FastPath(t *testing.T) {
+	// Verify that exact-match delete still works and the wildcard flag is false.
+	rc := &RouteConfig{
+		Dest:             "http://x/",
+		DeleteHeaders:    []string{"Cookie", "Authorization"},
+		DeleteHasWildcard: false,
+	}
+	if rc.DeleteHasWildcard {
+		t.Error("DeleteHasWildcard should be false for exact patterns")
+	}
+
+	h := http.Header{
+		"Cookie":        []string{"session=abc"},
+		"Authorization": []string{"Bearer tok"},
+		"X-Keep":        []string{"yes"},
+	}
+	applyDeleteHeaders(h, rc.DeleteHeaders, rc.DeleteHasWildcard)
+
+	if h.Get("Cookie") != "" {
+		t.Error("Cookie should be deleted")
+	}
+	if h.Get("Authorization") != "" {
+		t.Error("Authorization should be deleted")
+	}
+	if h.Get("X-Keep") != "yes" {
+		t.Error("X-Keep should be untouched")
+	}
+}
+
+func TestDeleteHeader_WildcardHostProtected(t *testing.T) {
+	// Even with a wildcard that matches "Host", it must not be deleted.
+	h := http.Header{
+		"Host":   []string{"example.com"},
+		"X-Misc": []string{"val"},
+	}
+	applyDeleteHeaders(h, []string{"*"}, true)
+
+	if h.Get("Host") != "example.com" {
+		t.Error("Host must never be deleted by applyDeleteHeaders")
+	}
+}
+
+func TestHasWildcard(t *testing.T) {
+	if hasWildcard([]string{"Cookie", "Authorization"}) {
+		t.Error("no wildcard expected")
+	}
+	if !hasWildcard([]string{"Cookie", "CF-*"}) {
+		t.Error("wildcard expected")
 	}
 }

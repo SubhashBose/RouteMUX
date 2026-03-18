@@ -31,7 +31,8 @@ type RouteConfig struct {
 	AuthExplicit bool   // true when auth was set explicitly (even as empty)
 	Timeout       string            // e.g. "30s", "2m"
 	AddHeaders    map[string]string  // headers to add/overwrite on upstream request
-	DeleteHeaders []string           // headers to remove from upstream request
+	DeleteHeaders    []string           // headers to remove from upstream request
+	DeleteHasWildcard bool              // true if any DeleteHeaders entry contains '*'
 }
 
 func (c *Config) validate() error {
@@ -138,8 +139,9 @@ func loadConfigFile(path string) (*Config, error) {
 			NoTLSVerify:   fr.NoTLSVerify,
 			Timeout:       fr.Timeout,
 			AuthExplicit:  fr.authPresent,
-			AddHeaders:    fr.AddHeaders,
-			DeleteHeaders: fr.DeleteHeaders,
+			AddHeaders:       fr.AddHeaders,
+			DeleteHeaders:    fr.DeleteHeaders,
+			DeleteHasWildcard: hasWildcard(fr.DeleteHeaders),
 		}
 		if fr.authPresent {
 			if len(fr.Auth) == 2 {

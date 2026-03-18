@@ -142,17 +142,15 @@ func (s *server) buildRouteHandler(routePath string, destURL *url.URL, rc *Route
 
 			// --- User-defined header manipulation ---
 			// Delete first, then add/overwrite, so add always wins.
-			// NOTE: Go's HTTP stack ignores req.Header["Host"] entirely —
-			// the outgoing Host header is always taken from req.Host (or
-			// req.URL.Host if req.Host is empty). We must manipulate req.Host
-			// directly; req.Header.Set/Del("Host", ...) has no effect.
+			// Host is special: Go ignores req.Header["Host"] — it reads req.Host.
+			// We handle Host separately here, then delegate the rest to
+			// applyDeleteHeaders which takes the fast or wildcard path as needed.
 			for _, name := range rc.DeleteHeaders {
 				if strings.EqualFold(name, "host") {
-					req.Host = ""
-					continue
+					req.Host = "" // fall back to req.URL.Host (upstream address)
 				}
-				req.Header.Del(name)
 			}
+			applyDeleteHeaders(req.Header, rc.DeleteHeaders, rc.DeleteHasWildcard)
 			for name, val := range rc.AddHeaders {
 				if strings.EqualFold(name, "host") {
 					req.Host = val
