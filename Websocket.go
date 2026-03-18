@@ -36,7 +36,7 @@ func dialUpstream(destURL *url.URL, noTLSVerify bool) (net.Conn, error) {
 }
 
 // serveWebSocket tunnels a WebSocket upgrade request to the upstream.
-func serveWebSocket(w http.ResponseWriter, r *http.Request, destURL *url.URL, routePath string, rc *RouteConfig) {
+func serveWebSocket(w http.ResponseWriter, r *http.Request, destURL *url.URL, routePath string, rc *RouteConfig, effectiveAuth *Auth) {
 	// --- 1. Hijack the client connection ---
 	hj, ok := w.(http.Hijacker)
 	if !ok {
@@ -69,23 +69,50 @@ func serveWebSocket(w http.ResponseWriter, r *http.Request, destURL *url.URL, ro
 		upstreamPath += "?" + r.URL.RawQuery
 	}
 
+	// Determine the Host to send upstream.
+	// Default: pass client Host through unchanged.
+	// delete-header:Host → use upstream host instead.
+	// add-header:Host    → use user-supplied value.
+	outHost := r.Host
+	for _, name := range rc.DeleteHeaders {
+		if strings.EqualFold(name, "host") {
+			outHost = destURL.Host
+		}
+	}
+	for name, val := range rc.AddHeaders {
+		if strings.EqualFold(name, "host") {
+			outHost = val
+		}
+	}
+
 	fmt.Fprintf(upstreamConn, "GET %s HTTP/1.1\r\n", upstreamPath)
-	fmt.Fprintf(upstreamConn, "Host: %s\r\n", destURL.Host)
-	// Build the header set: start from client headers, apply delete then add.
+	fmt.Fprintf(upstreamConn, "Host: %s\r\n", outHost)
+
+	// Build remaining headers: copy client headers (skip Host — written above),
+	// then apply delete and add rules for non-Host headers.
 	outHeaders := make(http.Header)
 	for k, vals := range r.Header {
 		if strings.EqualFold(k, "Host") {
-			continue // Host is written explicitly above
+			continue
 		}
 		outHeaders[k] = vals
 	}
+	// If proxy auth is active, strip Authorization so proxy credentials never
+	// reach upstream. The add/delete loop below runs after, so add-header or
+	// delete-header for Authorization still work normally.
+	if effectiveAuth != nil {
+		outHeaders.Del("Authorization")
+	}
 	for _, name := range rc.DeleteHeaders {
 		if strings.EqualFold(name, "host") {
-			continue // never suppress Host
+			continue // already handled above
 		}
 		outHeaders.Del(name)
 	}
 	for name, val := range rc.AddHeaders {
+		if strings.EqualFold(name, "host") {
+			continue // already handled above
+		}
 		outHeaders.Set(name, val)
 	}
 	for k, vals := range outHeaders {
@@ -135,4 +162,3 @@ func serveWebSocket(w http.ResponseWriter, r *http.Request, destURL *url.URL, ro
 	<-done
 	<-done
 }
-

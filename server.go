@@ -90,12 +90,13 @@ func (s *server) buildRouteHandler(routePath string, destURL *url.URL, rc *Route
 		clientTimeout = d
 	}
 
-	// -- Reverse proxy --
-	// Capture routePath for use in websocket handler via context.
-	handleWS := func(w http.ResponseWriter, r *http.Request) {
-		serveWebSocket(w, r, destURL, routePath, rc)
+	// -- Effective auth for this route (used in Director closure and WS handler) --
+	effectiveAuth := s.cfg.GlobalAuth
+	if rc.AuthExplicit {
+		effectiveAuth = rc.Auth // may be nil (no auth)
 	}
 
+	// -- Reverse proxy --
 	proxy := &httputil.ReverseProxy{
 		Transport: transport,
 		Director: func(req *http.Request) {
@@ -106,15 +107,15 @@ func (s *server) buildRouteHandler(routePath string, destURL *url.URL, rc *Route
 			if !strings.HasSuffix(destPath, "/") {
 				destPath += "/"
 			}
-			// Save original client Host before we clear it (used for X-Forwarded-Host).
+			// Save original client Host for X-Forwarded-Host and default passthrough.
 			originalHost := req.Host
 			req.URL.Scheme = destURL.Scheme
 			req.URL.Host = destURL.Host
 			req.URL.Path = destPath + stripped
-			// Clear req.Host so Go uses req.URL.Host (the upstream address).
-			// Without this, the client's original Host header leaks through.
-			// add-header:Host below can still override this explicitly.
-			//req.Host = ""   #I think this is not needed. this is causing the Host header to be stripped even if no Host manimoulation ser in the route config
+			// Keep client Host by default (req.Host stays as-is).
+			// delete-header:Host → use upstream host (req.Host = "")
+			// add-header:Host   → use user-supplied value (req.Host = val)
+			// Both are handled in the add/delete loop below.
 			// Preserve raw query
 			if destURL.RawQuery != "" && req.URL.RawQuery != "" {
 				req.URL.RawQuery = destURL.RawQuery + "&" + req.URL.RawQuery
@@ -131,14 +132,22 @@ func (s *server) buildRouteHandler(routePath string, destURL *url.URL, rc *Route
 			}
 			req.Header.Set("X-Forwarded-Host", originalHost)
 			req.Header.Set("X-Forwarded-Proto", schemeOf(req))
-			// Delete headers first, then add/overwrite.
+			// If proxy auth is active, strip Authorization so the proxy credentials
+			// never reach the upstream. The user-defined add/delete loop below runs
+			// afterwards, so add-header:Authorization or delete-header:Authorization
+			// in the config still work as normal — no special casing needed.
+			if effectiveAuth != nil {
+				req.Header.Del("Authorization")
+			}
+
+			// --- User-defined header manipulation ---
+			// Delete first, then add/overwrite, so add always wins.
 			// NOTE: Go's HTTP stack ignores req.Header["Host"] entirely —
 			// the outgoing Host header is always taken from req.Host (or
 			// req.URL.Host if req.Host is empty). We must manipulate req.Host
 			// directly; req.Header.Set/Del("Host", ...) has no effect.
 			for _, name := range rc.DeleteHeaders {
 				if strings.EqualFold(name, "host") {
-					// Reset req.Host so Go falls back to req.URL.Host (the upstream).
 					req.Host = ""
 					continue
 				}
@@ -146,7 +155,6 @@ func (s *server) buildRouteHandler(routePath string, destURL *url.URL, rc *Route
 			}
 			for name, val := range rc.AddHeaders {
 				if strings.EqualFold(name, "host") {
-					// Must set req.Host, not req.Header["Host"].
 					req.Host = val
 					continue
 				}
@@ -159,10 +167,9 @@ func (s *server) buildRouteHandler(routePath string, destURL *url.URL, rc *Route
 		},
 	}
 
-	// Determine effective auth for this route.
-	effectiveAuth := s.cfg.GlobalAuth
-	if rc.AuthExplicit {
-		effectiveAuth = rc.Auth // may be nil (no auth)
+	// handleWS uses effectiveAuth which is declared above.
+	handleWS := func(w http.ResponseWriter, r *http.Request) {
+		serveWebSocket(w, r, destURL, routePath, rc, effectiveAuth)
 	}
 
 	var h http.Handler = proxy
