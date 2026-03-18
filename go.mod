@@ -1,4 +1,4 @@
-module github.com/user/routemux
+module routemux
 
 go 1.22
 

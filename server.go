@@ -91,6 +91,11 @@ func (s *server) buildRouteHandler(routePath string, destURL *url.URL, rc *Route
 	}
 
 	// -- Reverse proxy --
+	// Capture routePath for use in websocket handler via context.
+	handleWS := func(w http.ResponseWriter, r *http.Request) {
+		serveWebSocket(w, r, destURL, routePath, rc.NoTLSVerify)
+	}
+
 	proxy := &httputil.ReverseProxy{
 		Transport: transport,
 		Director: func(req *http.Request) {
@@ -157,6 +162,25 @@ func (s *server) buildRouteHandler(routePath string, destURL *url.URL, rc *Route
 			inner.ServeHTTP(w, r)
 		})
 	}
+
+	// Wrap: intercept WebSocket upgrades before auth/timeout middleware.
+	finalHandler := h
+	h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isWebSocketUpgrade(r) {
+			// Apply auth check for WebSocket too, then tunnel.
+			if effectiveAuth != nil {
+				user, pass, ok := r.BasicAuth()
+				if !ok || user != effectiveAuth.User || pass != effectiveAuth.Password {
+					w.Header().Set("WWW-Authenticate", `Basic realm="routemux"`)
+					http.Error(w, "Unauthorized", http.StatusUnauthorized)
+					return
+				}
+			}
+			handleWS(w, r)
+			return
+		}
+		finalHandler.ServeHTTP(w, r)
+	})
 
 	return h, nil
 }

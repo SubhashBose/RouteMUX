@@ -1,0 +1,61 @@
+name: Release Go Binaries
+
+on:
+  push:
+    paths:
+      - '**.go'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    outputs:
+      tagname: ${{ steps.create_tag.outputs.tag }}
+    steps:
+      - name: Create tag
+        id: create_tag
+        run: |
+          tag=$(date +%Y-%m-%d_%H%M%S)
+          echo "tag=$tag" >> $GITHUB_OUTPUT
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.create_tag.outputs.tag }}
+
+  releases-matrix:
+    name: Release Go Binary
+    runs-on: ubuntu-latest
+    needs: create-release
+    strategy:
+      matrix:
+        goos: [linux, windows, freebsd, darwin]
+        goarch: ["386", amd64, arm64, arm]
+        exclude:
+          - goarch: "386"
+            goos: darwin
+          - goarch: "arm"
+            goos: darwin
+        include:
+          - goarch: "riscv64"
+            goos: linux
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        uses: wangyoucao577/go-release-action@v1
+        env: 
+          CGO_ENABLED: 0
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          goos: ${{ matrix.goos }}
+          goarch: ${{ matrix.goarch }}
+          goversion: "1.23"
+          ldflags: "-w -s -buildid="
+          md5sum: false
+          release_tag: ${{ needs.create-release.outputs.tagname }}
+          asset_name: "routemux-${{ matrix.goos }}-${{ matrix.goarch }}"
+          compress_assets: OFF
+          #binary_name: "http-helloworld_${{ matrix.goos }}-${{ matrix.goarch }}"
