@@ -1071,3 +1071,214 @@ func TestHasWildcard(t *testing.T) {
 		t.Error("wildcard expected")
 	}
 }
+// ---- Variable resolution tests ----
+
+func TestResolveHeaderValue_PlainValue(t *testing.T) {
+	orig := http.Header{"User-Agent": []string{"TestBrowser"}}
+	got := resolveHeaderValue("plain-value", "1.2.3.4", "54321", "https", "/path?q=1", orig)
+	if got != "plain-value" {
+		t.Errorf("got %q, want plain-value", got)
+	}
+}
+
+func TestResolveHeaderValue_EscapedDollar(t *testing.T) {
+	orig := http.Header{}
+	got := resolveHeaderValue(`\$remote_addr`, "1.2.3.4", "54321", "https", "/", orig)
+	if got != "$remote_addr" {
+		t.Errorf("got %q, want literal $remote_addr", got)
+	}
+}
+
+func TestResolveHeaderValue_RemoteAddr(t *testing.T) {
+	orig := http.Header{}
+	got := resolveHeaderValue("$remote_addr", "1.2.3.4", "54321", "https", "/", orig)
+	if got != "1.2.3.4" {
+		t.Errorf("got %q, want 1.2.3.4", got)
+	}
+}
+
+func TestResolveHeaderValue_RemotePort(t *testing.T) {
+	orig := http.Header{}
+	got := resolveHeaderValue("$remote_port", "1.2.3.4", "54321", "https", "/", orig)
+	if got != "54321" {
+		t.Errorf("got %q, want 54321", got)
+	}
+}
+
+func TestResolveHeaderValue_Scheme(t *testing.T) {
+	orig := http.Header{}
+	got := resolveHeaderValue("$scheme", "1.2.3.4", "54321", "https", "/", orig)
+	if got != "https" {
+		t.Errorf("got %q, want https", got)
+	}
+}
+
+func TestResolveHeaderValue_RequestURI(t *testing.T) {
+	orig := http.Header{}
+	got := resolveHeaderValue("$request_uri", "1.2.3.4", "54321", "http", "/path?foo=bar", orig)
+	if got != "/path?foo=bar" {
+		t.Errorf("got %q, want /path?foo=bar", got)
+	}
+}
+
+func TestResolveHeaderValue_HeaderVar(t *testing.T) {
+	orig := http.Header{"User-Agent": []string{"TestBrowser/1.0"}}
+	got := resolveHeaderValue("$header.User-Agent", "1.2.3.4", "54321", "http", "/", orig)
+	if got != "TestBrowser/1.0" {
+		t.Errorf("got %q, want TestBrowser/1.0", got)
+	}
+}
+
+func TestResolveHeaderValue_HeaderVarMissing(t *testing.T) {
+	orig := http.Header{}
+	got := resolveHeaderValue("$header.X-Missing", "1.2.3.4", "54321", "http", "/", orig)
+	if got != "" {
+		t.Errorf("got %q, want empty string for missing header", got)
+	}
+}
+
+func TestResolveHeaderValue_UnknownVar(t *testing.T) {
+	orig := http.Header{}
+	got := resolveHeaderValue("$unknown_var", "1.2.3.4", "54321", "http", "/", orig)
+	if got != "$unknown_var" {
+		t.Errorf("got %q, want literal $unknown_var", got)
+	}
+}
+
+func TestRouteHandler_VarRemoteAddr(t *testing.T) {
+	var gotHeader string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeader = r.Header.Get("X-Real-IP")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := &Config{
+		Port: 8080,
+		Routes: map[string]*RouteConfig{
+			"/api/": {
+				Dest:       backend.URL + "/",
+				AddHeaders: map[string]string{"X-Real-IP": "$remote_addr"},
+				AddHasVars: true,
+			},
+		},
+	}
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.mux)
+	defer ts.Close()
+
+	http.Get(ts.URL + "/api/")
+
+	if gotHeader == "" {
+		t.Error("X-Real-IP should be set to client IP")
+	}
+	// Should be a valid IP (no port)
+	if strings.Contains(gotHeader, ":") {
+		t.Errorf("X-Real-IP should be IP only (no port), got %q", gotHeader)
+	}
+}
+
+func TestRouteHandler_VarHeaderCopiedAfterDelete(t *testing.T) {
+	// Even if User-Agent is deleted, $header.User-Agent should still pass
+	// the original value because we snapshot headers before modification.
+	var gotUA, gotUACopy string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUA = r.Header.Get("User-Agent")
+		gotUACopy = r.Header.Get("X-Original-UA")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := &Config{
+		Port: 8080,
+		Routes: map[string]*RouteConfig{
+			"/api/": {
+				Dest:          backend.URL + "/",
+				DeleteHeaders: []string{"User-Agent"},
+				AddHeaders:    map[string]string{"X-Original-UA": "$header.User-Agent"},
+				AddHasVars:    true,
+			},
+		},
+	}
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.mux)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
+	req.Header.Set("User-Agent", "MyTestClient/2.0")
+	http.DefaultClient.Do(req)
+
+	if gotUA != "" {
+		t.Errorf("User-Agent should be deleted, got %q", gotUA)
+	}
+	if gotUACopy != "MyTestClient/2.0" {
+		t.Errorf("X-Original-UA should contain original UA, got %q", gotUACopy)
+	}
+}
+
+func TestRouteHandler_VarScheme(t *testing.T) {
+	var gotScheme string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotScheme = r.Header.Get("X-Scheme")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := &Config{
+		Port: 8080,
+		Routes: map[string]*RouteConfig{
+			"/api/": {
+				Dest:       backend.URL + "/",
+				AddHeaders: map[string]string{"X-Scheme": "$scheme"},
+				AddHasVars: true,
+			},
+		},
+	}
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.mux)
+	defer ts.Close()
+
+	http.Get(ts.URL + "/api/")
+
+	if gotScheme != "http" {
+		t.Errorf("X-Scheme = %q, want http", gotScheme)
+	}
+}
+
+func TestRouteHandler_EscapedDollar(t *testing.T) {
+	var gotHeader string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeader = r.Header.Get("X-Literal")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := &Config{
+		Port: 8080,
+		Routes: map[string]*RouteConfig{
+			"/api/": {
+				Dest:       backend.URL + "/",
+				AddHeaders: map[string]string{"X-Literal": `\$remote_addr`},
+				AddHasVars: true,
+			},
+		},
+	}
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.mux)
+	defer ts.Close()
+
+	http.Get(ts.URL + "/api/")
+
+	if gotHeader != "$remote_addr" {
+		t.Errorf("X-Literal = %q, want literal $remote_addr", gotHeader)
+	}
+}
+
+func TestHasVarValues(t *testing.T) {
+	if hasVarValues(map[string]string{"X-Foo": "bar", "X-Baz": "qux"}) {
+		t.Error("expected false for no variables")
+	}
+	if !hasVarValues(map[string]string{"X-Foo": "bar", "X-IP": "$remote_addr"}) {
+		t.Error("expected true when variable present")
+	}
+}

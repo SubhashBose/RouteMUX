@@ -8,7 +8,7 @@ A lightweight, flexible reverse proxy written in Go. Routes HTTP and WebSocket t
 - **HTTP & WebSocket** — transparently proxies both HTTP and WebSocket connections
 - **TLS termination** — serve HTTPS with your own certificate; connect to HTTPS upstreams with optional verification skip
 - **HTTP Basic Auth** — global auth for all routes, per-route override, or explicit disable
-- **Header manipulation** — add, overwrite, or delete upstream request headers per route, with wildcard support (`CF-*`, `X-*`)
+- **Header manipulation** — add, overwrite, or delete upstream request headers per route, with wildcard support (`CF-*`, `X-*`) and variable interpolation (`$remote_addr`, `$header.User-Agent`, etc.)
 - **Config file + CLI** — configure via `config.yml`, command-line flags, or both; CLI takes precedence
 - **Zero external dependencies** at runtime (only [`gopkg.in/yaml.v3`](https://pkg.go.dev/gopkg.in/yaml.v3) for config parsing)
 
@@ -212,6 +212,39 @@ delete-header:
 Wildcard matching is **case-insensitive**.
 
 > **Performance note:** routes with no wildcards take a fast path (direct map lookup per pattern). The wildcard path (iterating the header map) is only taken when at least one delete pattern contains `*`, and this is determined once at startup — not per request.
+
+### Variables in `add-header`
+
+Header values can reference request properties using `$variable` syntax. Variables are only resolved when at least one `add-header` value contains `$` — routes without variables take a zero-overhead fast path.
+
+| Variable | Value |
+|----------|-------|
+| `$remote_addr` | Client IP address (no port) |
+| `$remote_port` | Client port |
+| `$scheme` | Request scheme — `http` or `https` |
+| `$request_uri` | Full request URI including query string |
+| `$header.Name` | Value of any client request header by name |
+| `$header.Host` | Original client `Host` header |
+
+Use `\$` to send a literal dollar sign (e.g. `\$remote_addr` → `$remote_addr`).
+
+```yaml
+routes:
+  /api/:
+    dest: http://localhost:3000/
+    add-header:
+      X-Real-IP:      $remote_addr          # client IP
+      X-Real-Port:    $remote_port          # client port
+      X-Scheme:       $scheme               # http or https
+      X-Request-URI:  $request_uri          # full URI with query string
+      X-Original-Host: $header.Host        # original Host header
+      X-Original-UA:  $header.User-Agent   # copy any client header
+      X-Literal:      \$remote_addr        # literal "$remote_addr"
+    delete-header:
+      - User-Agent    # deleted from upstream — but $header.User-Agent
+                      # still captures the original value
+```
+
 
 ### Special Headers
 

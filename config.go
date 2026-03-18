@@ -33,6 +33,7 @@ type RouteConfig struct {
 	AddHeaders    map[string]string  // headers to add/overwrite on upstream request
 	DeleteHeaders    []string           // headers to remove from upstream request
 	DeleteHasWildcard bool              // true if any DeleteHeaders entry contains '*'
+	AddHasVars        bool              // true if any AddHeaders value contains a '$' variable
 }
 
 func (c *Config) validate() error {
@@ -140,9 +141,10 @@ func loadConfigFile(path string) (*Config, error) {
 			NoTLSVerify:   fr.NoTLSVerify,
 			Timeout:       fr.Timeout,
 			AuthExplicit:  fr.authPresent,
-			AddHeaders:       fr.AddHeaders,
-			DeleteHeaders:    fr.DeleteHeaders,
+			AddHeaders:        fr.AddHeaders,
+			DeleteHeaders:     fr.DeleteHeaders,
 			DeleteHasWildcard: hasWildcard(fr.DeleteHeaders),
+			AddHasVars:        hasVarValues(fr.AddHeaders),
 		}
 		if fr.authPresent {
 			if len(fr.Auth) == 2 {

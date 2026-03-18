@@ -258,6 +258,9 @@ func applyCLI(cfg *Config, rawArgs []string) error {
 				curRoute.AddHeaders = map[string]string{}
 			}
 			curRoute.AddHeaders[name] = val
+			if strings.HasPrefix(val, "$") {
+				curRoute.AddHasVars = true
+			}
 			i += 2
 		case "--delete-header":
 			if curRoute == nil {

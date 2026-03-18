@@ -92,3 +92,57 @@ func (t *xffRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	return t.base.RoundTrip(req)
 }
+// hasVarValues returns true if any value in the map starts with '$' or '\$',
+// indicating a variable reference or escape sequence that needs processing.
+// Called once at config load time.
+func hasVarValues(headers map[string]string) bool {
+	for _, v := range headers {
+		if strings.HasPrefix(v, "$") || strings.HasPrefix(v, `\$`) {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveHeaderValue resolves a single add-header value against the request.
+//
+// Rules:
+//   - Plain value (no leading '$')  → returned as-is
+//   - '\$...'                        → escaped, returns the literal '$...' string
+//   - '$remote_addr'                 → client IP (no port)
+//   - '$remote_port'                 → client port
+//   - '$scheme'                      → "http" or "https"
+//   - '$request_uri'                 → full request URI including query string
+//   - '$header.Name'                 → value of Name from the original (pre-modification)
+//                                      client headers; empty string if absent
+//   - Unknown '$...' variable        → passed through as a literal string
+//
+// original must be a snapshot of req.Header taken before any modifications
+// (auth strip, delete-header, etc.) so that $header.X always reflects what
+// the client actually sent, regardless of delete-header config.
+func resolveHeaderValue(val string, clientIP, clientPort, scheme, requestURI string, original http.Header) string {
+	// Escaped dollar must be checked before the plain-value early exit,
+	// since \$foo starts with '\' not '$'.
+	if strings.HasPrefix(val, `\$`) {
+		return val[1:] // strip the backslash, return literal $foo
+	}
+	if !strings.HasPrefix(val, "$") {
+		return val
+	}
+	switch val {
+	case "$remote_addr":
+		return clientIP
+	case "$remote_port":
+		return clientPort
+	case "$scheme":
+		return scheme
+	case "$request_uri":
+		return requestURI
+	}
+	if strings.HasPrefix(val, "$header.") {
+		name := val[len("$header."):]
+		return original.Get(name) // empty string if header absent
+	}
+	// Unknown variable — pass through as literal so config errors are visible.
+	return val
+}

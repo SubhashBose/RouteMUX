@@ -145,22 +145,46 @@ func (s *server) buildRouteHandler(routePath string, destURL *url.URL, rc *Route
 			}
 
 			// --- User-defined header manipulation ---
+			// Snapshot original client headers before any modification when variables
+			// are in use — $header.X must reflect what the client sent, not the
+			// post-modification state.
+			var originalHeaders http.Header
+			if rc.AddHasVars {
+				originalHeaders = req.Header.Clone()
+				originalHeaders.Set("Host", req.Host)
+			}
+
 			// Delete first, then add/overwrite, so add always wins.
 			// Host is special: Go ignores req.Header["Host"] — it reads req.Host.
-			// We handle Host separately here, then delegate the rest to
-			// applyDeleteHeaders which takes the fast or wildcard path as needed.
 			for _, name := range rc.DeleteHeaders {
 				if strings.EqualFold(name, "host") {
 					req.Host = "" // fall back to req.URL.Host (upstream address)
 				}
 			}
 			applyDeleteHeaders(req.Header, rc.DeleteHeaders, rc.DeleteHasWildcard)
-			for name, val := range rc.AddHeaders {
-				if strings.EqualFold(name, "host") {
-					req.Host = val
-					continue
+
+			if rc.AddHasVars {
+				// Slow path — resolve variables in header values.
+				clientIP, clientPort, _ := net.SplitHostPort(req.RemoteAddr)
+				scheme := schemeOf(req)
+				requestURI := req.RequestURI
+				for name, val := range rc.AddHeaders {
+					resolved := resolveHeaderValue(val, clientIP, clientPort, scheme, requestURI, originalHeaders)
+					if strings.EqualFold(name, "host") {
+						req.Host = resolved
+						continue
+					}
+					req.Header.Set(name, resolved)
 				}
-				req.Header.Set(name, val)
+			} else {
+				// Fast path — plain values, no variable resolution.
+				for name, val := range rc.AddHeaders {
+					if strings.EqualFold(name, "host") {
+						req.Host = val
+						continue
+					}
+					req.Header.Set(name, val)
+				}
 			}
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {

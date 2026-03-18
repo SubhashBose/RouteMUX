@@ -112,11 +112,29 @@ func serveWebSocket(w http.ResponseWriter, r *http.Request, destURL *url.URL, ro
 		outHeaders.Del("Authorization")
 	}
 	applyDeleteHeaders(outHeaders, rc.DeleteHeaders, rc.DeleteHasWildcard)
-	for name, val := range rc.AddHeaders {
-		if strings.EqualFold(name, "host") {
-			continue // already handled above
+	// For WebSocket, r.Header is naturally the original client headers —
+	// outHeaders is already a copy, so no separate snapshot is needed.
+	if rc.AddHasVars {
+		clientIP, clientPort, _ := net.SplitHostPort(r.RemoteAddr)
+		scheme := "ws"
+		if destURL.Scheme == "wss" || destURL.Scheme == "https" {
+			scheme = "wss"
 		}
-		outHeaders.Set(name, val)
+		requestURI := r.RequestURI
+		for name, val := range rc.AddHeaders {
+			if strings.EqualFold(name, "host") {
+				continue // already handled above
+			}
+			resolved := resolveHeaderValue(val, clientIP, clientPort, scheme, requestURI, r.Header)
+			outHeaders.Set(name, resolved)
+		}
+	} else {
+		for name, val := range rc.AddHeaders {
+			if strings.EqualFold(name, "host") {
+				continue // already handled above
+			}
+			outHeaders.Set(name, val)
+		}
 	}
 	for k, vals := range outHeaders {
 		for _, v := range vals {
