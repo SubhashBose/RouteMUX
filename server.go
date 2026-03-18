@@ -93,7 +93,7 @@ func (s *server) buildRouteHandler(routePath string, destURL *url.URL, rc *Route
 	// -- Reverse proxy --
 	// Capture routePath for use in websocket handler via context.
 	handleWS := func(w http.ResponseWriter, r *http.Request) {
-		serveWebSocket(w, r, destURL, routePath, rc.NoTLSVerify)
+		serveWebSocket(w, r, destURL, routePath, rc)
 	}
 
 	proxy := &httputil.ReverseProxy{
@@ -106,9 +106,15 @@ func (s *server) buildRouteHandler(routePath string, destURL *url.URL, rc *Route
 			if !strings.HasSuffix(destPath, "/") {
 				destPath += "/"
 			}
+			// Save original client Host before we clear it (used for X-Forwarded-Host).
+			originalHost := req.Host
 			req.URL.Scheme = destURL.Scheme
 			req.URL.Host = destURL.Host
 			req.URL.Path = destPath + stripped
+			// Clear req.Host so Go uses req.URL.Host (the upstream address).
+			// Without this, the client's original Host header leaks through.
+			// add-header:Host below can still override this explicitly.
+			//req.Host = ""   #I think this is not needed. this is causing the Host header to be stripped even if no Host manimoulation ser in the route config
 			// Preserve raw query
 			if destURL.RawQuery != "" && req.URL.RawQuery != "" {
 				req.URL.RawQuery = destURL.RawQuery + "&" + req.URL.RawQuery
@@ -123,8 +129,29 @@ func (s *server) buildRouteHandler(routePath string, destURL *url.URL, rc *Route
 					req.Header.Set("X-Forwarded-For", host)
 				}
 			}
-			req.Header.Set("X-Forwarded-Host", req.Host)
+			req.Header.Set("X-Forwarded-Host", originalHost)
 			req.Header.Set("X-Forwarded-Proto", schemeOf(req))
+			// Delete headers first, then add/overwrite.
+			// NOTE: Go's HTTP stack ignores req.Header["Host"] entirely —
+			// the outgoing Host header is always taken from req.Host (or
+			// req.URL.Host if req.Host is empty). We must manipulate req.Host
+			// directly; req.Header.Set/Del("Host", ...) has no effect.
+			for _, name := range rc.DeleteHeaders {
+				if strings.EqualFold(name, "host") {
+					// Reset req.Host so Go falls back to req.URL.Host (the upstream).
+					req.Host = ""
+					continue
+				}
+				req.Header.Del(name)
+			}
+			for name, val := range rc.AddHeaders {
+				if strings.EqualFold(name, "host") {
+					// Must set req.Host, not req.Header["Host"].
+					req.Host = val
+					continue
+				}
+				req.Header.Set(name, val)
+			}
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			log.Printf("proxy error [%s -> %s]: %v", r.URL.Path, destURL, err)

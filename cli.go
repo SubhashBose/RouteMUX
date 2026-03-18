@@ -235,6 +235,31 @@ func applyCLI(cfg *Config, rawArgs []string) error {
 				curRoute.Auth = a
 			}
 			i += 2
+		case "--add-header":
+			if curRoute == nil {
+				return fmt.Errorf("--add-header must follow --route")
+			}
+			if i+1 >= len(args) {
+				return fmt.Errorf("--add-header requires a value (format: 'Name: Value')")
+			}
+			name, val, err := parseHeaderString(args[i+1])
+			if err != nil {
+				return fmt.Errorf("--add-header: %w", err)
+			}
+			if curRoute.AddHeaders == nil {
+				curRoute.AddHeaders = map[string]string{}
+			}
+			curRoute.AddHeaders[name] = val
+			i += 2
+		case "--delete-header":
+			if curRoute == nil {
+				return fmt.Errorf("--delete-header must follow --route")
+			}
+			if i+1 >= len(args) {
+				return fmt.Errorf("--delete-header requires a value")
+			}
+			curRoute.DeleteHeaders = append(curRoute.DeleteHeaders, args[i+1])
+			i += 2
 		case "--timeout":
 			if curRoute == nil {
 				return fmt.Errorf("--timeout must follow --route")
@@ -253,6 +278,14 @@ func applyCLI(cfg *Config, rawArgs []string) error {
 	}
 	flush()
 	return nil
+}
+
+func parseHeaderString(s string) (name, value string, err error) {
+	idx := strings.Index(s, ":")
+	if idx < 0 {
+		return "", "", fmt.Errorf("expected 'Name: Value', got %q", s)
+	}
+	return strings.TrimSpace(s[:idx]), strings.TrimSpace(s[idx+1:]), nil
 }
 
 func parseAuthString(s string) (*Auth, error) {
@@ -283,6 +316,8 @@ Route options (must follow --route PATH):
   --noTLSverify       Skip TLS verification for upstream
   --auth U:P          Per-route Basic Auth (overrides global-auth; "" disables auth)
   --timeout DURATION  Upstream timeout (e.g. 30s, 2m)
+  --add-header K:V    Add/overwrite a header on upstream request (repeatable)
+  --delete-header K   Delete a header from the upstream request (repeatable)
 
 Config file (config.yml):
   global:

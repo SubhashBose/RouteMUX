@@ -29,7 +29,9 @@ type RouteConfig struct {
 	NoTLSVerify  bool
 	Auth         *Auth  // nil = inherit global-auth; explicitly cleared = no auth
 	AuthExplicit bool   // true when auth was set explicitly (even as empty)
-	Timeout      string // e.g. "30s", "2m"
+	Timeout       string            // e.g. "30s", "2m"
+	AddHeaders    map[string]string  // headers to add/overwrite on upstream request
+	DeleteHeaders []string           // headers to remove from upstream request
 }
 
 func (c *Config) validate() error {
@@ -67,7 +69,9 @@ type fileRoute struct {
 	Dest        string   `yaml:"dest"`
 	NoTLSVerify bool     `yaml:"noTLSverify"`
 	Auth        []string `yaml:"auth"`    // ["USER", "PASSWORD"] or absent
-	Timeout     string   `yaml:"timeout"`
+	Timeout      string            `yaml:"timeout"`
+	AddHeaders    map[string]string  `yaml:"add-header"`
+	DeleteHeaders []string           `yaml:"delete-header"`
 
 	// authPresent records whether the "auth" key existed in the YAML at all.
 	authPresent bool
@@ -130,10 +134,12 @@ func loadConfigFile(path string) (*Config, error) {
 
 	for path, fr := range fc.Routes {
 		rc := &RouteConfig{
-			Dest:         fr.Dest,
-			NoTLSVerify:  fr.NoTLSVerify,
-			Timeout:      fr.Timeout,
-			AuthExplicit: fr.authPresent,
+			Dest:          fr.Dest,
+			NoTLSVerify:   fr.NoTLSVerify,
+			Timeout:       fr.Timeout,
+			AuthExplicit:  fr.authPresent,
+			AddHeaders:    fr.AddHeaders,
+			DeleteHeaders: fr.DeleteHeaders,
 		}
 		if fr.authPresent {
 			if len(fr.Auth) == 2 {

@@ -36,7 +36,7 @@ func dialUpstream(destURL *url.URL, noTLSVerify bool) (net.Conn, error) {
 }
 
 // serveWebSocket tunnels a WebSocket upgrade request to the upstream.
-func serveWebSocket(w http.ResponseWriter, r *http.Request, destURL *url.URL, routePath string, noTLSVerify bool) {
+func serveWebSocket(w http.ResponseWriter, r *http.Request, destURL *url.URL, routePath string, rc *RouteConfig) {
 	// --- 1. Hijack the client connection ---
 	hj, ok := w.(http.Hijacker)
 	if !ok {
@@ -51,7 +51,7 @@ func serveWebSocket(w http.ResponseWriter, r *http.Request, destURL *url.URL, ro
 	defer clientConn.Close()
 
 	// --- 2. Dial upstream ---
-	upstreamConn, err := dialUpstream(destURL, noTLSVerify)
+	upstreamConn, err := dialUpstream(destURL, rc.NoTLSVerify)
 	if err != nil {
 		fmt.Fprintf(clientConn, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
 		return
@@ -71,10 +71,24 @@ func serveWebSocket(w http.ResponseWriter, r *http.Request, destURL *url.URL, ro
 
 	fmt.Fprintf(upstreamConn, "GET %s HTTP/1.1\r\n", upstreamPath)
 	fmt.Fprintf(upstreamConn, "Host: %s\r\n", destURL.Host)
+	// Build the header set: start from client headers, apply delete then add.
+	outHeaders := make(http.Header)
 	for k, vals := range r.Header {
 		if strings.EqualFold(k, "Host") {
-			continue
+			continue // Host is written explicitly above
 		}
+		outHeaders[k] = vals
+	}
+	for _, name := range rc.DeleteHeaders {
+		if strings.EqualFold(name, "host") {
+			continue // never suppress Host
+		}
+		outHeaders.Del(name)
+	}
+	for name, val := range rc.AddHeaders {
+		outHeaders.Set(name, val)
+	}
+	for k, vals := range outHeaders {
 		for _, v := range vals {
 			fmt.Fprintf(upstreamConn, "%s: %s\r\n", k, v)
 		}
@@ -121,3 +135,4 @@ func serveWebSocket(w http.ResponseWriter, r *http.Request, destURL *url.URL, ro
 	<-done
 	<-done
 }
+

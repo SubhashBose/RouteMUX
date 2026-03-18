@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -516,5 +517,297 @@ func TestValidate_TLSPartial(t *testing.T) {
 	}
 	if err := cfg.validate(); err == nil {
 		t.Error("expected error for tls-cert without tls-key")
+	}
+}
+
+// ---- Header manipulation tests ----
+
+func TestRouteHandler_AddHeader(t *testing.T) {
+	var gotUA, gotCustom string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUA = r.Header.Get("User-Agent")
+		gotCustom = r.Header.Get("X-Custom")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := &Config{
+		Port: 8080,
+		Routes: map[string]*RouteConfig{
+			"/api/": {
+				Dest:       backend.URL + "/",
+				AddHeaders: map[string]string{"User-Agent": "RouteMUX", "X-Custom": "hello"},
+			},
+		},
+	}
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.mux)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
+	req.Header.Set("User-Agent", "OriginalAgent")
+	http.DefaultClient.Do(req)
+
+	if gotUA != "RouteMUX" {
+		t.Errorf("User-Agent = %q, want RouteMUX", gotUA)
+	}
+	if gotCustom != "hello" {
+		t.Errorf("X-Custom = %q, want hello", gotCustom)
+	}
+}
+
+func TestRouteHandler_DeleteHeader(t *testing.T) {
+	var gotUA, gotCookie string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUA = r.Header.Get("User-Agent")
+		gotCookie = r.Header.Get("Cookie")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := &Config{
+		Port: 8080,
+		Routes: map[string]*RouteConfig{
+			"/api/": {
+				Dest:          backend.URL + "/",
+				DeleteHeaders: []string{"User-Agent", "Cookie"},
+			},
+		},
+	}
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.mux)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
+	req.Header.Set("User-Agent", "ShouldBeGone")
+	req.Header.Set("Cookie", "session=abc")
+	http.DefaultClient.Do(req)
+
+	if gotUA != "" {
+		t.Errorf("User-Agent should be deleted, got %q", gotUA)
+	}
+	if gotCookie != "" {
+		t.Errorf("Cookie should be deleted, got %q", gotCookie)
+	}
+}
+
+func TestRouteHandler_DeleteHostIgnored(t *testing.T) {
+	var gotHost string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHost = r.Host
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := &Config{
+		Port: 8080,
+		Routes: map[string]*RouteConfig{
+			"/api/": {
+				Dest:          backend.URL + "/",
+				DeleteHeaders: []string{"Host"}, // should be silently ignored
+			},
+		},
+	}
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.mux)
+	defer ts.Close()
+
+	http.Get(ts.URL + "/api/")
+
+	if gotHost == "" {
+		t.Error("Host should always be present even when listed in delete-header")
+	}
+}
+
+func TestRouteHandler_AddAndDeleteOrder(t *testing.T) {
+	// delete runs before add, so add-header always wins even for same key
+	var gotUA string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUA = r.Header.Get("User-Agent")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := &Config{
+		Port: 8080,
+		Routes: map[string]*RouteConfig{
+			"/api/": {
+				Dest:          backend.URL + "/",
+				DeleteHeaders: []string{"User-Agent"},
+				AddHeaders:    map[string]string{"User-Agent": "RouteMUX"},
+			},
+		},
+	}
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.mux)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
+	req.Header.Set("User-Agent", "OriginalAgent")
+	http.DefaultClient.Do(req)
+
+	if gotUA != "RouteMUX" {
+		t.Errorf("User-Agent = %q, want RouteMUX (add should win over delete)", gotUA)
+	}
+}
+
+func TestCLI_AddDeleteHeaders(t *testing.T) {
+	cfg := &Config{Port: 8080, Routes: map[string]*RouteConfig{}}
+	err := applyCLI(cfg, []string{
+		"--route", "/api/",
+		"--dest", "http://backend/",
+		"--add-header", "User-Agent: RouteMUX",
+		"--add-header", "X-Env: production",
+		"--delete-header", "Cookie",
+		"--delete-header", "Authorization",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := cfg.Routes["/api/"]
+	if r == nil {
+		t.Fatal("route missing")
+	}
+	if r.AddHeaders["User-Agent"] != "RouteMUX" {
+		t.Errorf("User-Agent = %q", r.AddHeaders["User-Agent"])
+	}
+	if r.AddHeaders["X-Env"] != "production" {
+		t.Errorf("X-Env = %q", r.AddHeaders["X-Env"])
+	}
+	if len(r.DeleteHeaders) != 2 {
+		t.Errorf("DeleteHeaders = %v", r.DeleteHeaders)
+	}
+}
+
+func TestCLI_AddHeaderBadFormat(t *testing.T) {
+	cfg := &Config{Port: 8080, Routes: map[string]*RouteConfig{}}
+	err := applyCLI(cfg, []string{
+		"--route", "/api/",
+		"--dest", "http://backend/",
+		"--add-header", "NoColonHere",
+	})
+	if err == nil {
+		t.Error("expected error for missing colon in --add-header value")
+	}
+}
+
+func TestLoadConfigFile_HeaderOptions(t *testing.T) {
+	path := writeTempConfig(t, `
+routes:
+  /api/:
+    dest: http://localhost:3000/
+    add-header:
+      User-Agent: RouteMUX
+      X-Env: production
+    delete-header:
+      - Cookie
+      - Authorization
+`)
+	cfg, err := loadConfigFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := cfg.Routes["/api/"]
+	if r == nil {
+		t.Fatal("/api/ route missing")
+	}
+	if r.AddHeaders["User-Agent"] != "RouteMUX" {
+		t.Errorf("User-Agent = %q", r.AddHeaders["User-Agent"])
+	}
+	if r.AddHeaders["X-Env"] != "production" {
+		t.Errorf("X-Env = %q", r.AddHeaders["X-Env"])
+	}
+	if len(r.DeleteHeaders) != 2 {
+		t.Errorf("DeleteHeaders = %v", r.DeleteHeaders)
+	}
+}
+
+// ---- Host header manipulation tests ----
+
+func TestRouteHandler_AddHostHeader(t *testing.T) {
+	var gotHost string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHost = r.Host
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := &Config{
+		Port: 8080,
+		Routes: map[string]*RouteConfig{
+			"/api/": {
+				Dest:       backend.URL + "/",
+				AddHeaders: map[string]string{"Host": "custom.example.com"},
+			},
+		},
+	}
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.mux)
+	defer ts.Close()
+
+	http.Get(ts.URL + "/api/")
+
+	if gotHost != "custom.example.com" {
+		t.Errorf("Host = %q, want custom.example.com", gotHost)
+	}
+}
+
+func TestRouteHandler_DeleteHostHeader_FallsBackToUpstream(t *testing.T) {
+	var gotHost string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHost = r.Host
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	// Parse the backend URL to get just the host:port
+	backendURL, _ := url.Parse(backend.URL)
+
+	cfg := &Config{
+		Port: 8080,
+		Routes: map[string]*RouteConfig{
+			"/api/": {
+				Dest:          backend.URL + "/",
+				DeleteHeaders: []string{"Host"},
+			},
+		},
+	}
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.mux)
+	defer ts.Close()
+
+	http.Get(ts.URL + "/api/")
+
+	// When Host is deleted, Go uses req.URL.Host — the upstream address.
+	if gotHost != backendURL.Host {
+		t.Errorf("Host = %q, want upstream host %q", gotHost, backendURL.Host)
+	}
+}
+
+func TestRouteHandler_ClientHostNotLeaked(t *testing.T) {
+	// Without any host manipulation, the proxy should send the upstream host,
+	// NOT the client's original Host header (e.g. "127.0.0.1:PORT").
+	var gotHost string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHost = r.Host
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	backendURL, _ := url.Parse(backend.URL)
+
+	cfg := &Config{
+		Port:   8080,
+		Routes: map[string]*RouteConfig{"/api/": {Dest: backend.URL + "/"}},
+	}
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.mux)
+	defer ts.Close()
+
+	http.Get(ts.URL + "/api/")
+
+	// Default behaviour: upstream receives its own host, not the proxy's address.
+	if gotHost != backendURL.Host {
+		t.Errorf("Host = %q, want upstream host %q", gotHost, backendURL.Host)
 	}
 }
