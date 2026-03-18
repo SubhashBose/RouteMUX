@@ -1042,16 +1042,24 @@ func TestDeleteHeader_NoWildcard_FastPath(t *testing.T) {
 	}
 }
 
-func TestDeleteHeader_WildcardHostProtected(t *testing.T) {
-	// Even with a wildcard that matches "Host", it must not be deleted.
+func TestDeleteHeader_WildcardHostPattern(t *testing.T) {
+	// "Host" pattern is skipped in applyDeleteHeaders — Host is managed via
+	// req.Host and is never present in http.Header in real requests.
+	// A wildcard like "*" will match any key that IS in the header map,
+	// but since Host is never there, it is naturally unaffected.
 	h := http.Header{
-		"Host":   []string{"example.com"},
-		"X-Misc": []string{"val"},
+		"X-Misc":  []string{"val"},
+		"X-Other": []string{"other"},
 	}
-	applyDeleteHeaders(h, []string{"*"}, true)
+	applyDeleteHeaders(h, []string{"host"}, false) // exact "host" pattern — no-op
+	if h.Get("X-Misc") != "val" || h.Get("X-Other") != "other" {
+		t.Error("other headers should be untouched when only host pattern is given")
+	}
 
-	if h.Get("Host") != "example.com" {
-		t.Error("Host must never be deleted by applyDeleteHeaders")
+	// Wildcard "*" deletes everything in the map (Host isn't in the map anyway).
+	applyDeleteHeaders(h, []string{"*"}, true)
+	if len(h) != 0 {
+		t.Errorf("wildcard * should delete all headers in map, got: %v", h)
 	}
 }
 

@@ -122,12 +122,12 @@ func (s *server) buildRouteHandler(routePath string, destURL *url.URL, rc *Route
 			} else if destURL.RawQuery != "" {
 				req.URL.RawQuery = destURL.RawQuery
 			}
-			// Forward the real remote address
-			if prior, ok := req.Header["X-Forwarded-For"]; ok {
-				req.Header.Set("X-Forwarded-For", strings.Join(prior, ", ")+", "+req.RemoteAddr)
-			} else {
-				if host, _, err := net.SplitHostPort(req.RemoteAddr); err == nil {
-					req.Header.Set("X-Forwarded-For", host)
+			// Forward the real remote address (IP only, no port).
+			if clientIP, _, err := net.SplitHostPort(req.RemoteAddr); err == nil {
+				if prior, ok := req.Header["X-Forwarded-For"]; ok {
+					req.Header.Set("X-Forwarded-For", strings.Join(prior, ", ")+", "+clientIP)
+				} else {
+					req.Header.Set("X-Forwarded-For", clientIP)
 				}
 			}
 			req.Header.Set("X-Forwarded-Host", originalHost)

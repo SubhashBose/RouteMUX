@@ -37,31 +37,24 @@ func matchesDelete(pattern, headerName string) bool {
 // checking each key against every pattern. Only taken when at least one
 // pattern in the list contains '*'.
 //
-// The Host header is always protected: it is never deleted here because it is
-// managed separately via req.Host / outHost.
+// Host is never in http.Header (Go keeps it in req.Host), so neither the
+// fast-path Del nor the slow-path key loop will ever touch it.
 func applyDeleteHeaders(h http.Header, deleteList []string, hasWild bool) {
 	if !hasWild {
-		// Fast path — direct lookup, no iteration over header map.
+		// Fast path — one direct Del call per pattern, no header map iteration.
+		// h.Del("Host") is a no-op anyway since Host is never in http.Header.
 		for _, name := range deleteList {
-			if strings.EqualFold(name, "host") {
-				continue // Host handled separately
-			}
 			h.Del(name)
 		}
 		return
 	}
 
-	// Slow path — must iterate over current headers to find wildcard matches.
-	// Collect keys to delete first to avoid mutating the map while ranging it.
+	// Slow path — iterate the header map once and match each key against patterns.
+	// Collect keys first to avoid mutating the map while ranging it.
+	// Host never appears as a key in http.Header so no special-casing needed.
 	var toDelete []string
 	for key := range h {
-		if strings.EqualFold(key, "host") {
-			continue
-		}
 		for _, pattern := range deleteList {
-			if strings.EqualFold(pattern, "host") {
-				continue
-			}
 			if matchesDelete(pattern, key) {
 				toDelete = append(toDelete, key)
 				break
@@ -69,6 +62,6 @@ func applyDeleteHeaders(h http.Header, deleteList []string, hasWild bool) {
 		}
 	}
 	for _, key := range toDelete {
-		delete(h, key) // use direct map delete (faster than h.Del for known canonical keys)
+		delete(h, key)
 	}
 }
