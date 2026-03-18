@@ -11,6 +11,13 @@ routes:
     timeout: 30s
     # noTLSverify: true
     # auth: ["apiuser", "apipass"]   # overrides global-auth for this route
+    add-header:                # add-header supersedes delete-header
+      #Host: somesite.com      # Overwrite client HOST header
+      x-Proxy-Server: RouteMUX
+      x-forwarded-for: 1.1.1.1  # By default X-Forwarded-For is set to client sent header appended with proxy's connecting IP
+    delete-header: 
+      - Host           # If HOST header is deleted, then upstream host will be used
+      - 'X-*'
 
   /app/:
     dest: http://localhost:8000/

@@ -12,14 +12,22 @@ import (
 // CLI args take precedence over config file.
 func parseAll(args []string) (*Config, error) {
 	// --- 1. Find config file path from args (first pass) ---
-	configPath := ""
+	configPath := "<none>"
+
+	for i := 0; i < len(args); i++ {  // Skip reading config file if --help
+		if args[i] == "--help" || args[i] == "-h" {
+			configPath = ""
+			break
+		}
+	}
+
 	for i := 0; i < len(args)-1; i++ {
 		if args[i] == "--config" {
 			configPath = args[i+1]
 			break
 		}
 	}
-	if configPath == "" {
+	if configPath == "<none>" {
 		configPath = findDefaultConfig()
 	}
 
@@ -59,6 +67,13 @@ func findDefaultConfig() string {
 	exe, err := os.Executable()
 	if err == nil {
 		p := filepath.Join(filepath.Dir(exe), "config.yml")
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	// Current directory
+	{
+		p := "config.yml"
 		if _, err := os.Stat(p); err == nil {
 			return p
 		}
@@ -300,20 +315,29 @@ func parseAuthString(s string) (*Auth, error) {
 }
 
 func printHelp() {
-	fmt.Print(`routemux — a flexible reverse proxy
+	bindir := "BinaryDirectory/config.yml"
+	exe, err := os.Executable()
+	if err == nil {
+		bindir = filepath.Join(filepath.Dir(exe), "config.yml")
+	}
+
+	fmt.Print(`RouteMUX — a flexible reverse proxy
 
 Usage:
-  routemux [global options] [--route PATH --dest URL [route options]] ...
+  routemux [global options] \
+            --route PATH --dest URL [route options] \
+           [--route PATH2 --dest URL [route options]] ...
 
 Global options:
-  --config PATH       Config file (default: ./config.yml or ~/.config/routemux/config.yml)
+  --config PATH       Config file (default: `+bindir+` or
+                      ./config.yml or ~/.config/routemux/config.yml)
   --listen ADDR       IP address or interface name to listen on (default: all interfaces)
   --port PORT         Port to listen on (default: 8080)
   --tls-cert FILE     TLS certificate file (enables HTTPS)
   --tls-key  FILE     TLS key file (enables HTTPS)
   --global-auth U:P   HTTP Basic Auth applied to all routes (format: USER:PASSWORD)
 
-Route options (must follow --route PATH):
+Route options (must follow --route PATH): 
   --route PATH        Define a route (e.g. /api/)
   --dest URL          Upstream destination URL
   --noTLSverify       Skip TLS verification for upstream
@@ -322,6 +346,10 @@ Route options (must follow --route PATH):
   --add-header K:V    Add/overwrite a header on upstream request (repeatable)
   --delete-header K   Delete a header from the upstream request (repeatable)
                       Can take wildcards (e.g. --delete-header *cookie*)
+
+Sets of --route followed by route options can be repeated to define multiple routes.
+Options in command line and config.yml file are combined, where command line options takes precedence.
+To disable reading any config.yml file, use --config "". 
 
 Config file (config.yml):
   global:
@@ -337,11 +365,11 @@ Config file (config.yml):
       noTLSverify: false
       auth: ["USER", "PASSWORD"]
       timeout: 30s
-	  add-header:
-		User-Agent: RouteMUX
-		X-Internal-Token: TOKEN
-	  delete-header:
-		- *cookie*
-		- Authorization
+      add-header:
+        User-Agent: RouteMUX
+        X-Internal-Token: TOKEN
+      delete-header:
+        - *cookie*
+        - Authorization
 `)
 }

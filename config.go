@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
-
+	"log"
 	"gopkg.in/yaml.v3"
 )
 
@@ -107,6 +107,7 @@ func loadConfigFile(path string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	log.Printf("Loading config from %q", path)
 
 	var fc fileConfig
 	if err := yaml.Unmarshal(data, &fc); err != nil {

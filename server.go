@@ -66,7 +66,7 @@ func (s *server) buildMux() error {
 			pattern += "/"
 		}
 		s.mux.Handle(pattern, handler)
-		log.Printf("  route %s  ->  %s", pattern, rc.Dest)
+		log.Printf("  route %s  →  %s", pattern, rc.Dest)
 	}
 	return nil
 }
@@ -164,7 +164,7 @@ func (s *server) buildRouteHandler(routePath string, destURL *url.URL, rc *Route
 			}
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			log.Printf("proxy error [%s -> %s]: %v", r.URL.Path, destURL, err)
+			log.Printf("proxy error [%s → %s]: %v", r.URL.Path, destURL, err)
 			http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		},
 	}

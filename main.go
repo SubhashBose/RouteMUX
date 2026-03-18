@@ -23,7 +23,7 @@ func main() {
 		log.Fatalf("Failed to create server: %v", err)
 	}
 
-	log.Printf("routemux starting on %s", server.listenAddr())
+	log.Printf("RouteMUX starting on %s", server.listenAddr())
 	if err := server.run(); err != nil {
 		log.Fatalf("Server error: %v", err)
 	}
