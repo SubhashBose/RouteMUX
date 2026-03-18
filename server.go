@@ -73,12 +73,16 @@ func (s *server) buildMux() error {
 
 // buildRouteHandler creates the http.Handler for one route.
 func (s *server) buildRouteHandler(routePath string, destURL *url.URL, rc *RouteConfig) (http.Handler, error) {
-	// -- TLS transport --
-	transport := &http.Transport{
+	// -- TLS transport wrapped in a RoundTripper that fixes X-Forwarded-For --
+	// The Director always sets X-Forwarded-For, but Go's ReverseProxy appends
+	// the client IP again after the Director returns, causing duplication.
+	// The xffRoundTripper strips that extra append before the request hits the wire.
+	baseTransport := &http.Transport{
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: rc.NoTLSVerify, //nolint:gosec
 		},
 	}
+	transport := &xffRoundTripper{base: baseTransport}
 
 	// -- Timeout --
 	var clientTimeout time.Duration

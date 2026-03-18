@@ -65,3 +65,29 @@ func applyDeleteHeaders(h http.Header, deleteList []string, hasWild bool) {
 		delete(h, key)
 	}
 }
+// xffRoundTripper wraps an http.RoundTripper to fix X-Forwarded-For handling.
+//
+// Go's ReverseProxy always appends the client IP after the Director returns,
+// causing duplication. By the time RoundTrip is called, the fix is simple:
+//
+//   - 2+ IPs: Director built the chain, ReverseProxy appended one extra.
+//             Strip the last entry.
+//   - 1 IP:  Director deleted XFF (delete-header config), ReverseProxy
+//             re-added just the client IP. Delete it entirely.
+type xffRoundTripper struct {
+	base http.RoundTripper
+}
+
+func (t *xffRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if vals, ok := req.Header["X-Forwarded-For"]; ok && len(vals) == 1 {
+		combined := vals[0]
+		if idx := strings.LastIndex(combined, ", "); idx >= 0 {
+			// 2+ IPs: strip the duplicate last entry ReverseProxy appended.
+			req.Header.Set("X-Forwarded-For", combined[:idx])
+		} else {
+			// 1 IP: Director deleted XFF, ReverseProxy re-added it. Delete it.
+			req.Header.Del("X-Forwarded-For")
+		}
+	}
+	return t.base.RoundTrip(req)
+}
