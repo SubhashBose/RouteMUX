@@ -41,11 +41,11 @@ jobs:
           # Increment patch until we find an unused tag
           while git ls-remote --tags origin "refs/tags/${candidate}" | grep -q "${candidate}"; do
             patch=$((patch + 1))
-            candidate="${major}.${minor}.${patch}"
+            candidate="v${major}.${minor}.${patch}"
           done
 
-          echo "tag=v$candidate" >> $GITHUB_OUTPUT
-          echo "version=$candidate" >> $GITHUB_OUTPUT
+          echo "tag=$candidate" >> $GITHUB_OUTPUT
+          echo "version=${candidate#v}" >> $GITHUB_OUTPUT
 
       #- name: Create tag
       #  id: create_time_tag
