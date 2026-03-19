@@ -92,6 +92,7 @@ func (t *xffRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	return t.base.RoundTrip(req)
 }
+
 // hasVarValues returns true if any value in the map starts with '$' or '\$',
 // indicating a variable reference or escape sequence that needs processing.
 // Called once at config load time.

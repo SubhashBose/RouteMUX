@@ -135,7 +135,13 @@ func (s *server) buildRouteHandler(routePath string, destURL *url.URL, rc *Route
 				}
 			}
 			req.Header.Set("X-Forwarded-Host", originalHost)
-			req.Header.Set("X-Forwarded-Proto", schemeOf(req))
+			// Use actual TLS state for X-Forwarded-Proto — don't trust the incoming
+			// X-Forwarded-Proto header from the client (could be forged).
+			if req.TLS != nil {
+				req.Header.Set("X-Forwarded-Proto", "https")
+			} else {
+				req.Header.Set("X-Forwarded-Proto", "http")
+			}
 			// If proxy auth is active, strip Authorization so the proxy credentials
 			// never reach the upstream. The user-defined add/delete loop below runs
 			// afterwards, so add-header:Authorization or delete-header:Authorization

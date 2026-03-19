@@ -79,9 +79,26 @@ func serveWebSocket(w http.ResponseWriter, r *http.Request, destURL *url.URL, ro
 			outHost = destURL.Host
 		}
 	}
-	for name, val := range rc.AddHeaders {
-		if strings.EqualFold(name, "host") {
-			outHost = val
+	if rc.AddHasVars {
+		// Resolve variables in add-header:Host if present.
+		clientIPForHost, clientPortForHost, _ := net.SplitHostPort(r.RemoteAddr)
+		schemeForHost := "ws"
+		if destURL.Scheme == "wss" || destURL.Scheme == "https" {
+			schemeForHost = "wss"
+		}
+		// Build snapshot for $header.X including Host.
+		originalForHost := r.Header.Clone()
+		originalForHost.Set("Host", r.Host)
+		for name, val := range rc.AddHeaders {
+			if strings.EqualFold(name, "host") {
+				outHost = resolveHeaderValue(val, clientIPForHost, clientPortForHost, schemeForHost, r.RequestURI, originalForHost)
+			}
+		}
+	} else {
+		for name, val := range rc.AddHeaders {
+			if strings.EqualFold(name, "host") {
+				outHost = val
+			}
 		}
 	}
 
@@ -121,11 +138,14 @@ func serveWebSocket(w http.ResponseWriter, r *http.Request, destURL *url.URL, ro
 			scheme = "wss"
 		}
 		requestURI := r.RequestURI
+		// Build snapshot with Host injected so $header.Host works.
+		originalWS := r.Header.Clone()
+		originalWS.Set("Host", r.Host)
 		for name, val := range rc.AddHeaders {
 			if strings.EqualFold(name, "host") {
 				continue // already handled above
 			}
-			resolved := resolveHeaderValue(val, clientIP, clientPort, scheme, requestURI, r.Header)
+			resolved := resolveHeaderValue(val, clientIP, clientPort, scheme, requestURI, originalWS)
 			outHeaders.Set(name, resolved)
 		}
 	} else {
