@@ -186,6 +186,9 @@ func applyCLI(cfg *Config, rawArgs []string) error {
 			}
 			cfg.TLSKey = args[i+1]
 			i += 2
+		case "--trust-client-headers":
+			cfg.TrustClientHeaders = true
+			i++
 		case "--global-auth":
 			if i+1 >= len(args) {
 				return fmt.Errorf("--global-auth requires a value")
@@ -331,6 +334,7 @@ Global options:
   --port PORT         Port to listen on (default: 8080)
   --tls-cert FILE     TLS certificate file (enables HTTPS)
   --tls-key  FILE     TLS key file (enables HTTPS)
+  --trust-client-headers  Trust X-Forwarded-* headers from client (default: false)
   --global-auth U:P   HTTP Basic Auth applied to all routes (format: USER:PASSWORD)
 
 Route options (must follow --route PATH): 
@@ -354,6 +358,7 @@ Config file (config.yml):
     tls-cert: ""
     tls-key: ""
     global-auth: ["USER", "PASSWORD"]
+    trust-client-headers: false
 
   routes:
     "/path/":

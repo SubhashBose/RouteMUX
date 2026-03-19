@@ -36,7 +36,7 @@ func dialUpstream(destURL *url.URL, noTLSVerify bool) (net.Conn, error) {
 }
 
 // serveWebSocket tunnels a WebSocket upgrade request to the upstream.
-func serveWebSocket(w http.ResponseWriter, r *http.Request, destURL *url.URL, routePath string, rc *RouteConfig, effectiveAuth *Auth) {
+func serveWebSocket(w http.ResponseWriter, r *http.Request, destURL *url.URL, routePath string, rc *RouteConfig, effectiveAuth *Auth, trustClientHeaders bool) {
 	// --- 1. Hijack the client connection ---
 	hj, ok := w.(http.Hijacker)
 	if !ok {
@@ -94,13 +94,24 @@ func serveWebSocket(w http.ResponseWriter, r *http.Request, destURL *url.URL, ro
 		}
 		outHeaders[k] = vals
 	}
-	// Set X-Forwarded-For (IP only, no port) mirroring the HTTP proxy path.
+	// X-Forwarded-* handling mirrors the HTTP proxy path.
 	if clientIP, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-		if prior, ok := outHeaders["X-Forwarded-For"]; ok {
-			outHeaders.Set("X-Forwarded-For", strings.Join(prior, ", ")+", "+clientIP)
+		if trustClientHeaders {
+			if prior, ok := outHeaders["X-Forwarded-For"]; ok {
+				outHeaders.Set("X-Forwarded-For", strings.Join(prior, ", ")+", "+clientIP)
+			} else {
+				outHeaders.Set("X-Forwarded-For", clientIP)
+			}
+			// Leave X-Forwarded-Host and X-Forwarded-Proto untouched.
 		} else {
 			outHeaders.Set("X-Forwarded-For", clientIP)
 		}
+	}
+	// X-Forwarded-Host and X-Forwarded-Proto don't depend on clientIP —
+	// set them unconditionally when not trusting client headers.
+	if !trustClientHeaders {
+		outHeaders.Set("X-Forwarded-Host", r.Host)
+		outHeaders.Set("X-Forwarded-Proto", schemeOf(r))
 	}
 	// If proxy auth is active, strip Authorization so proxy credentials never
 	// reach upstream. The add/delete loop below runs after, so add-header or

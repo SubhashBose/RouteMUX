@@ -13,8 +13,9 @@ type Config struct {
 	Port       int
 	TLSCert    string
 	TLSKey     string
-	GlobalAuth *Auth
-	Routes     map[string]*RouteConfig
+	GlobalAuth          *Auth
+	TrustClientHeaders  bool
+	Routes              map[string]*RouteConfig
 }
 
 // Auth holds HTTP Basic Auth credentials.
@@ -64,7 +65,8 @@ type fileGlobal struct {
 	Port       int      `yaml:"port"`
 	TLSCert    string   `yaml:"tls-cert"`
 	TLSKey     string   `yaml:"tls-key"`
-	GlobalAuth []string `yaml:"global-auth"` // ["USER", "PASSWORD"]
+	GlobalAuth          []string `yaml:"global-auth"`   // ["USER", "PASSWORD"]
+	TrustClientHeaders  bool     `yaml:"trust-client-headers"`
 }
 
 type fileRoute struct {
@@ -116,11 +118,12 @@ func loadConfigFile(path string) (*Config, error) {
 	}
 
 	cfg := &Config{
-		Listen:  fc.Global.Listen,
-		Port:    fc.Global.Port,
-		TLSCert: fc.Global.TLSCert,
-		TLSKey:  fc.Global.TLSKey,
-		Routes:  make(map[string]*RouteConfig, len(fc.Routes)),
+		Listen:             fc.Global.Listen,
+		Port:               fc.Global.Port,
+		TLSCert:            fc.Global.TLSCert,
+		TLSKey:             fc.Global.TLSKey,
+		TrustClientHeaders: fc.Global.TrustClientHeaders,
+		Routes:             make(map[string]*RouteConfig, len(fc.Routes)),
 	}
 	if cfg.Port == 0 {
 		cfg.Port = 8080

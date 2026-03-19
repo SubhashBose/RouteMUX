@@ -10,7 +10,8 @@ A lightweight, flexible reverse proxy written in Go. Routes HTTP and WebSocket t
 - **HTTP Basic Auth** — global auth for all routes, per-route override, or explicit disable
 - **Header manipulation** — add, overwrite, or delete upstream request headers per route, with wildcard support (`CF-*`, `X-*`) and variable interpolation (`$remote_addr`, `$header.User-Agent`, etc.)
 - **Config file + CLI** — configure via `config.yml`, command-line flags, or both; CLI takes precedence
-- **Zero external dependencies** at runtime (only [`gopkg.in/yaml.v3`](https://pkg.go.dev/gopkg.in/yaml.v3) for config parsing)
+- **Trusted proxy support** — `trust-client-headers` mode for deployments behind an upstream proxy
+- **Zero external dependencies** - standalone binary available in 15 OS and architecture combinations.
 
 ---
 
@@ -55,6 +56,7 @@ global:
   # tls-cert: /path/to/cert.pem
   # tls-key:  /path/to/key.pem
   # global-auth: ["admin", "s3cr3t"]   # HTTP Basic Auth applied to all routes
+  # trust-client-headers: true   # default: false
 
 routes:
   /api/:
@@ -94,6 +96,7 @@ routemux [global options] \
 | `--tls-cert FILE` | TLS certificate file — enables HTTPS |
 | `--tls-key FILE` | TLS key file — required when `--tls-cert` is set |
 | `--global-auth USER:PASS` | HTTP Basic Auth for all routes |
+| `--trust-client-headers`  | Trust X-Forwarded-* headers from client (default: false) |
 
 ### Route Options
 
@@ -127,12 +130,13 @@ routemux \
   --route /api/ --dest http://localhost:3000/ \
   --route /public/ --dest http://localhost:4000/ --auth ""
 
-# Header manipulation
+# Header manipulation with wildcard and variables
 routemux \
   --route /api/ --dest http://localhost:3000/ \
   --add-header "X-Internal: true" \
   --delete-header "Cookie" \
-  --delete-header "CF-*"
+  --delete-header "CF-*" \
+  --add-header 'X-Original-UA: $header.User-Agent'
 
 # HTTPS termination
 routemux \
@@ -252,9 +256,9 @@ routes:
 |--------|-----------|
 | `Host` | Passed through from client by default. `delete-header: Host` uses the upstream host. `add-header: Host: custom.example.com` sets a custom value. |
 | `Authorization` | Passed through when no proxy auth. Stripped when proxy auth is active (to prevent credential leakage). |
-| `X-Forwarded-For` | Built and appended per hop. `delete-header: X-Forwarded-For` suppresses it entirely. |
-| `X-Forwarded-Host` | Set to the original client `Host` header. |
-| `X-Forwarded-Proto` | Set to `http` or `https` based on the incoming connection. |
+| `X-Forwarded-For` | Behaviour depends on `trust-client-headers` (see below). `delete-header: X-Forwarded-For` suppresses it entirely. |
+| `X-Forwarded-Host` | Set to original client `Host` when `trust-client-headers: false`. Left untouched when `true`. |
+| `X-Forwarded-Proto` | Set from actual TLS state when `trust-client-headers: false`. Left untouched when `true`. |
 
 ---
 
@@ -292,20 +296,19 @@ The `timeout` setting is intentionally **not** applied to WebSocket connections 
 
 ---
 
-## X-Forwarded-For Details
+## Trusted Proxy Support (`trust-client-headers`)
 
-RouteMUX builds the `X-Forwarded-For` chain correctly:
+By default, RouteMUX treats itself as the public entry point and does not trust `X-Forwarded-*` headers sent by clients. This is the safe default — a client could forge `X-Forwarded-For: 1.1.1.1` to spoof their IP or `X-Forwarded-Proto: https` to lie about the connection type.
 
-- If the client sends an existing `X-Forwarded-For`, the proxy's connecting IP is appended
-- If the client sends none, the connecting IP is set as the initial value
-- Go's `ReverseProxy` internally appends the client IP again after the Director runs — RouteMUX's `xffRoundTripper` removes that duplicate before the request hits the wire
+When RouteMUX sits behind a trusted upstream proxy (e.g. a cloud load balancer, CDN, or another RouteMUX instance), set `trust-client-headers: true` to preserve the chain the upstream proxy already built.
 
-To suppress `X-Forwarded-For` entirely:
+### Behaviour comparison
 
-```yaml
-delete-header:
-  - X-Forwarded-For
-```
+| Header | `trust-client-headers: false` (default) | `trust-client-headers: true` |
+|--------|------------------------------------------|-------------------------------|
+| `X-Forwarded-For` | Discard client chain — set to connecting IP only | Append connecting IP to existing chain |
+| `X-Forwarded-Host` | Set to original client `Host` header | Leave untouched |
+| `X-Forwarded-Proto` | Set from actual TLS state of connection | Leave untouched |
 
 ---
 

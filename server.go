@@ -111,8 +111,7 @@ func (s *server) buildRouteHandler(routePath string, destURL *url.URL, rc *Route
 			if !strings.HasSuffix(destPath, "/") {
 				destPath += "/"
 			}
-			// Save original client Host for X-Forwarded-Host and default passthrough.
-			originalHost := req.Host
+
 			req.URL.Scheme = destURL.Scheme
 			req.URL.Host = destURL.Host
 			req.URL.Path = destPath + stripped
@@ -126,22 +125,47 @@ func (s *server) buildRouteHandler(routePath string, destURL *url.URL, rc *Route
 			} else if destURL.RawQuery != "" {
 				req.URL.RawQuery = destURL.RawQuery
 			}
-			// Forward the real remote address (IP only, no port).
+
+			// Snapshot original client headers before any modification when variables
+			// are in use — $header.X must reflect what the client sent, not the
+			// post-modification state. Host is injected explicitly since Go never
+			// puts it in req.Header.
+			var originalHeaders http.Header
+			if rc.AddHasVars {
+				originalHeaders = req.Header.Clone()
+				originalHeaders.Set("Host", req.Host)
+			}
+
+			// X-Forwarded-* handling depends on trust-client-headers setting.
+			//
+			// false (default — secure, routemux is the entry point):
+			//   X-Forwarded-For   → discard client chain, set to connecting IP only
+			//   X-Forwarded-Host  → set to original client Host
+			//   X-Forwarded-Proto → set from actual TLS state (never trust client)
+			//
+			// true (routemux sits behind a trusted upstream proxy):
+			//   X-Forwarded-For   → append connecting IP to existing chain
+			//   X-Forwarded-Host  → leave untouched (upstream proxy already set it)
+			//   X-Forwarded-Proto → leave untouched (upstream proxy already set it)
 			if clientIP, _, err := net.SplitHostPort(req.RemoteAddr); err == nil {
-				if prior, ok := req.Header["X-Forwarded-For"]; ok {
-					req.Header.Set("X-Forwarded-For", strings.Join(prior, ", ")+", "+clientIP)
+				if s.cfg.TrustClientHeaders {
+					if prior, ok := req.Header["X-Forwarded-For"]; ok {
+						req.Header.Set("X-Forwarded-For", strings.Join(prior, ", ")+", "+clientIP)
+					} else {
+						req.Header.Set("X-Forwarded-For", clientIP)
+					}
+					// Leave X-Forwarded-Host and X-Forwarded-Proto untouched.
 				} else {
 					req.Header.Set("X-Forwarded-For", clientIP)
 				}
 			}
-			req.Header.Set("X-Forwarded-Host", originalHost)
-			// Use actual TLS state for X-Forwarded-Proto — don't trust the incoming
-			// X-Forwarded-Proto header from the client (could be forged).
-			if req.TLS != nil {
-				req.Header.Set("X-Forwarded-Proto", "https")
-			} else {
-				req.Header.Set("X-Forwarded-Proto", "http")
+			// X-Forwarded-Host and X-Forwarded-Proto don't depend on clientIP —
+			// set them unconditionally when not trusting client headers.
+			if !s.cfg.TrustClientHeaders {
+				req.Header.Set("X-Forwarded-Host", req.Host)
+				req.Header.Set("X-Forwarded-Proto", schemeOf(req))
 			}
+
 			// If proxy auth is active, strip Authorization so the proxy credentials
 			// never reach the upstream. The user-defined add/delete loop below runs
 			// afterwards, so add-header:Authorization or delete-header:Authorization
@@ -151,15 +175,6 @@ func (s *server) buildRouteHandler(routePath string, destURL *url.URL, rc *Route
 			}
 
 			// --- User-defined header manipulation ---
-			// Snapshot original client headers before any modification when variables
-			// are in use — $header.X must reflect what the client sent, not the
-			// post-modification state.
-			var originalHeaders http.Header
-			if rc.AddHasVars {
-				originalHeaders = req.Header.Clone()
-				originalHeaders.Set("Host", req.Host)
-			}
-
 			// Delete first, then add/overwrite, so add always wins.
 			// Host is special: Go ignores req.Header["Host"] — it reads req.Host.
 			for _, name := range rc.DeleteHeaders {
@@ -201,7 +216,7 @@ func (s *server) buildRouteHandler(routePath string, destURL *url.URL, rc *Route
 
 	// handleWS uses effectiveAuth which is declared above.
 	handleWS := func(w http.ResponseWriter, r *http.Request) {
-		serveWebSocket(w, r, destURL, routePath, rc, effectiveAuth)
+		serveWebSocket(w, r, destURL, routePath, rc, effectiveAuth, s.cfg.TrustClientHeaders)
 	}
 
 	var h http.Handler = proxy
@@ -265,12 +280,13 @@ func (s *server) run() error {
 	return srv.ListenAndServe()
 }
 
+// schemeOf returns the actual scheme of the incoming connection.
+// Used only for $scheme variable resolution in add-header values.
+// Does NOT trust X-Forwarded-Proto from the client — use trust-client-headers
+// if routemux is behind a trusted upstream proxy.
 func schemeOf(r *http.Request) string {
 	if r.TLS != nil {
 		return "https"
-	}
-	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
-		return proto
 	}
 	return "http"
 }

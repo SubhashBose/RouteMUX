@@ -1282,3 +1282,128 @@ func TestHasVarValues(t *testing.T) {
 		t.Error("expected true when variable present")
 	}
 }
+// ---- trust-client-headers tests ----
+
+func TestTrustClientHeaders_False_DiscardXFF(t *testing.T) {
+	var gotXFF string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotXFF = r.Header.Get("X-Forwarded-For")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := &Config{
+		Port:               8080,
+		TrustClientHeaders: false,
+		Routes:             map[string]*RouteConfig{"/api/": {Dest: backend.URL + "/"}},
+	}
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.mux)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
+	req.Header.Set("X-Forwarded-For", "185.255.129.29, 10.0.0.1") // forged chain
+	http.DefaultClient.Do(req)
+
+	// Client chain should be discarded — only the connecting IP
+	parts := strings.Split(gotXFF, ", ")
+	if len(parts) != 1 {
+		t.Errorf("trust=false: expected 1 IP, got %d in %q (client chain not discarded)", len(parts), gotXFF)
+	}
+}
+
+func TestTrustClientHeaders_True_AppendXFF(t *testing.T) {
+	var gotXFF string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotXFF = r.Header.Get("X-Forwarded-For")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := &Config{
+		Port:               8080,
+		TrustClientHeaders: true,
+		Routes:             map[string]*RouteConfig{"/api/": {Dest: backend.URL + "/"}},
+	}
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.mux)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
+	req.Header.Set("X-Forwarded-For", "185.255.129.29") // upstream proxy set this
+	http.DefaultClient.Do(req)
+
+	// Chain should be preserved and connecting IP appended
+	if !strings.HasPrefix(gotXFF, "185.255.129.29") {
+		t.Errorf("trust=true: client chain should be preserved, got %q", gotXFF)
+	}
+	parts := strings.Split(gotXFF, ", ")
+	if len(parts) != 2 {
+		t.Errorf("trust=true: expected 2 IPs (original + connecting), got %d in %q", len(parts), gotXFF)
+	}
+}
+
+func TestTrustClientHeaders_False_SetsXForwardedHeaders(t *testing.T) {
+	var gotHost, gotProto string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHost = r.Header.Get("X-Forwarded-Host")
+		gotProto = r.Header.Get("X-Forwarded-Proto")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := &Config{
+		Port:               8080,
+		TrustClientHeaders: false,
+		Routes:             map[string]*RouteConfig{"/api/": {Dest: backend.URL + "/"}},
+	}
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.mux)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
+	req.Host = "myapp.example.com"
+	// Client tries to forge these
+	req.Header.Set("X-Forwarded-Host", "evil.com")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	http.DefaultClient.Do(req)
+
+	if gotHost != "myapp.example.com" {
+		t.Errorf("X-Forwarded-Host = %q, want myapp.example.com", gotHost)
+	}
+	if gotProto != "http" { // plain HTTP test server
+		t.Errorf("X-Forwarded-Proto = %q, want http", gotProto)
+	}
+}
+
+func TestTrustClientHeaders_True_LeavesXForwardedHeadersUntouched(t *testing.T) {
+	var gotHost, gotProto string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHost = r.Header.Get("X-Forwarded-Host")
+		gotProto = r.Header.Get("X-Forwarded-Proto")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := &Config{
+		Port:               8080,
+		TrustClientHeaders: true,
+		Routes:             map[string]*RouteConfig{"/api/": {Dest: backend.URL + "/"}},
+	}
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.mux)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
+	req.Header.Set("X-Forwarded-Host", "original.example.com") // set by upstream proxy
+	req.Header.Set("X-Forwarded-Proto", "https")               // set by upstream proxy
+	http.DefaultClient.Do(req)
+
+	// Both should pass through untouched
+	if gotHost != "original.example.com" {
+		t.Errorf("X-Forwarded-Host = %q, want original.example.com", gotHost)
+	}
+	if gotProto != "https" {
+		t.Errorf("X-Forwarded-Proto = %q, want https", gotProto)
+	}
+}
