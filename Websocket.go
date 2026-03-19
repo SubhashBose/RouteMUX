@@ -73,40 +73,20 @@ func serveWebSocket(w http.ResponseWriter, r *http.Request, destURL *url.URL, ro
 	// Default: pass client Host through unchanged.
 	// delete-header:Host → use upstream host instead.
 	// add-header:Host    → use user-supplied value.
+	// Determine Host: default to client Host, delete-header:Host falls back to
+	// upstream host. add-header:Host is handled below in the same loop as all
+	// other headers — outHost starts as the default and gets overwritten there.
 	outHost := r.Host
 	for _, name := range rc.DeleteHeaders {
 		if strings.EqualFold(name, "host") {
 			outHost = destURL.Host
 		}
 	}
-	if rc.AddHasVars {
-		// Resolve variables in add-header:Host if present.
-		clientIPForHost, clientPortForHost, _ := net.SplitHostPort(r.RemoteAddr)
-		schemeForHost := "ws"
-		if destURL.Scheme == "wss" || destURL.Scheme == "https" {
-			schemeForHost = "wss"
-		}
-		// Build snapshot for $header.X including Host.
-		originalForHost := r.Header.Clone()
-		originalForHost.Set("Host", r.Host)
-		for name, val := range rc.AddHeaders {
-			if strings.EqualFold(name, "host") {
-				outHost = resolveHeaderValue(val, clientIPForHost, clientPortForHost, schemeForHost, r.RequestURI, originalForHost)
-			}
-		}
-	} else {
-		for name, val := range rc.AddHeaders {
-			if strings.EqualFold(name, "host") {
-				outHost = val
-			}
-		}
-	}
 
 	fmt.Fprintf(upstreamConn, "GET %s HTTP/1.1\r\n", upstreamPath)
-	fmt.Fprintf(upstreamConn, "Host: %s\r\n", outHost)
-
 	// Build remaining headers: copy client headers (skip Host — written above),
-	// then apply delete and add rules for non-Host headers.
+	// then apply delete and add rules. Host is included here too — if add-header
+	// sets Host it overwrites outHost and we write the corrected value at the end.
 	outHeaders := make(http.Header)
 	for k, vals := range r.Header {
 		if strings.EqualFold(k, "Host") {
@@ -129,33 +109,34 @@ func serveWebSocket(w http.ResponseWriter, r *http.Request, destURL *url.URL, ro
 		outHeaders.Del("Authorization")
 	}
 	applyDeleteHeaders(outHeaders, rc.DeleteHeaders, rc.DeleteHasWildcard)
-	// For WebSocket, r.Header is naturally the original client headers —
-	// outHeaders is already a copy, so no separate snapshot is needed.
 	if rc.AddHasVars {
 		clientIP, clientPort, _ := net.SplitHostPort(r.RemoteAddr)
 		scheme := "ws"
 		if destURL.Scheme == "wss" || destURL.Scheme == "https" {
 			scheme = "wss"
 		}
-		requestURI := r.RequestURI
 		// Build snapshot with Host injected so $header.Host works.
 		originalWS := r.Header.Clone()
 		originalWS.Set("Host", r.Host)
 		for name, val := range rc.AddHeaders {
+			resolved := resolveHeaderValue(val, clientIP, clientPort, scheme, r.RequestURI, originalWS)
 			if strings.EqualFold(name, "host") {
-				continue // already handled above
+				outHost = resolved // overwrite the default/delete-derived host
+				continue
 			}
-			resolved := resolveHeaderValue(val, clientIP, clientPort, scheme, requestURI, originalWS)
 			outHeaders.Set(name, resolved)
 		}
 	} else {
 		for name, val := range rc.AddHeaders {
 			if strings.EqualFold(name, "host") {
-				continue // already handled above
+				outHost = val // overwrite the default/delete-derived host
+				continue
 			}
 			outHeaders.Set(name, val)
 		}
 	}
+	// Write the final Host (default, delete-derived, or add-header override).
+	fmt.Fprintf(upstreamConn, "Host: %s\r\n", outHost)
 	for k, vals := range outHeaders {
 		for _, v := range vals {
 			fmt.Fprintf(upstreamConn, "%s: %s\r\n", k, v)

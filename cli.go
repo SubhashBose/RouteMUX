@@ -367,5 +367,12 @@ Config file (config.yml):
       delete-header:
         - *cookie*
         - Authorization
+
+The 'add-header' values can be static strings or the following supported variables:
+  $remote_addr: client IP (no port)
+  $remote_port: client port
+  $scheme: "http" or "https"
+  $request_uri: full request URI including query string
+  $header.Name: value of 'Name' from the original client headers
 `)
 }
