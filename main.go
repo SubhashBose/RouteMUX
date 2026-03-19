@@ -6,6 +6,8 @@ import (
 	"os"
 )
 
+var version = "1.0"
+
 func main() {
 	cfg, err := parseAll(os.Args[1:])
 	if err != nil {

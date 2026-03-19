@@ -320,7 +320,7 @@ func printHelp() {
 		bindir = filepath.Join(filepath.Dir(exe), "config.yml")
 	}
 
-	fmt.Print(`RouteMUX — a flexible reverse proxy
+	fmt.Print(`RouteMUX v` + version + ` — a flexible reverse proxy
 
 Usage:
   routemux [global options] \

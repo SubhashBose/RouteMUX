@@ -14,17 +14,49 @@ jobs:
   create-release:
     runs-on: ubuntu-latest
     outputs:
-      tagname: ${{ steps.create_tag.outputs.tag }}
+      tagname: ${{ steps.resolve_tag.outputs.tag }}
+      version: ${{ steps.resolve_tag.outputs.version }}
     steps:
-      - name: Create tag
-        id: create_tag
+      - uses: actions/checkout@v4
+        with:
+          fetch-tags: true
+
+      - name: Extract version from main.go
+        id: extract_version
         run: |
-          tag=$(date +%Y-%m-%d_%H%M%S)
-          echo "tag=$tag" >> $GITHUB_OUTPUT
+          version=$(grep -oP 'var version\s*=\s*"\K[^"]+' main.go)
+          echo "version=$version" >> $GITHUB_OUTPUT
+
+      - name: Resolve tag (auto-increment patch if tag exists)
+        id: resolve_tag
+        run: |
+          base="${{ steps.extract_version.outputs.version }}"
+          major=$(echo "$base" | cut -d. -f1)
+          minor=$(echo "$base" | cut -d. -f2)
+          #patch=$(echo "$base" | cut -d. -f3)
+          patch="0"
+
+          candidate="v${major}.${minor}.${patch}"
+
+          # Increment patch until we find an unused tag
+          while git ls-remote --tags origin "refs/tags/${candidate}" | grep -q "${candidate}"; do
+            patch=$((patch + 1))
+            candidate="${major}.${minor}.${patch}"
+          done
+
+          echo "tag=v$candidate" >> $GITHUB_OUTPUT
+          echo "version=$candidate" >> $GITHUB_OUTPUT
+
+      #- name: Create tag
+      #  id: create_time_tag
+      #  run: |
+      #    tag=$(date +%Y-%m-%d_%H%M%S)
+      #    echo "tag=$tag" >> $GITHUB_OUTPUT
+
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.create_tag.outputs.tag }}
+          tag_name: ${{ steps.resolve_tag.outputs.tag }}
 
   releases-matrix:
     name: Release Go Binary
@@ -46,14 +78,14 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build
         uses: wangyoucao577/go-release-action@v1
-        env: 
+        env:
           CGO_ENABLED: 0
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           goos: ${{ matrix.goos }}
           goarch: ${{ matrix.goarch }}
-          goversion: "1.23"
-          ldflags: "-w -s -buildid="
+          goversion: "1.24"
+          ldflags: "-w -s -buildid= -X main.version=${{ needs.create-release.outputs.version }}"
           md5sum: false
           release_tag: ${{ needs.create-release.outputs.tagname }}
           asset_name: "routemux-${{ matrix.goos }}-${{ matrix.goarch }}"

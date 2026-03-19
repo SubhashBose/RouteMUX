@@ -15,13 +15,9 @@ A lightweight, flexible reverse proxy written in Go. Routes HTTP and WebSocket t
 
 ---
 
-## Installation
+## Download
 
-```bash
-git clone https://github.com/you/routemux
-cd routemux
-go build -o routemux .
-```
+Download the appropriate binary from the [release](https://github.com/SubhashBose/RouteMUX/releases) section.
 
 ---
 
