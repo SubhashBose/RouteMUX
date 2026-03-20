@@ -4,12 +4,13 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/http/httputil"
-	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -50,12 +51,13 @@ func (s *server) buildMux() error {
 
 	for _, path := range paths {
 		rc := s.cfg.Routes[path]
-		destURL, err := url.Parse(rc.Dest)
-		if err != nil {
-			return fmt.Errorf("invalid dest for route %q: %w", path, err)
+		// Build the upstream picker (URLs already validated and parsed in applyDestEntries).
+		var picker *upstreamPicker
+		if rc.StatusCode == 0 {
+			picker = newUpstreamPicker(rc.Upstreams, rc.LBMode)
 		}
 
-		handler, err := s.buildRouteHandler(path, destURL, rc)
+		handler, err := s.buildRouteHandler(path, picker, rc)
 		if err != nil {
 			return err
 		}
@@ -66,13 +68,49 @@ func (s *server) buildMux() error {
 			pattern += "/"
 		}
 		s.mux.Handle(pattern, handler)
-		log.Printf("  route %s  →  %s", pattern, rc.Dest)
+		if rc.StatusCode != 0 {
+			log.Printf("  route %s  →  STATUS %d", pattern, rc.StatusCode)
+		} else {
+			urls := make([]string, len(rc.Upstreams))
+			for i, u := range rc.Upstreams {
+				urls[i] = u.URL
+			}
+			log.Printf("  route %s  →  %s", pattern, strings.Join(urls, ", "))
+		}
 	}
 	return nil
 }
 
 // buildRouteHandler creates the http.Handler for one route.
-func (s *server) buildRouteHandler(routePath string, destURL *url.URL, rc *RouteConfig) (http.Handler, error) {
+func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc *RouteConfig) (http.Handler, error) {
+	// -- Static STATUS response route --
+	if rc.StatusCode != 0 {
+		var h http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(rc.StatusCode)
+			if rc.StatusText != "" {
+				fmt.Fprint(w, rc.StatusText)
+			}
+		})
+		effectiveAuth := s.cfg.GlobalAuth
+		if rc.AuthExplicit {
+			effectiveAuth = rc.Auth
+		}
+		if effectiveAuth != nil {
+			inner := h
+			auth := effectiveAuth
+			h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				user, pass, ok := r.BasicAuth()
+				if !ok || user != auth.User || pass != auth.Password {
+					w.Header().Set("WWW-Authenticate", `Basic realm="routemux"`)
+					http.Error(w, "Unauthorized", http.StatusUnauthorized)
+					return
+				}
+				inner.ServeHTTP(w, r)
+			})
+		}
+		return h, nil
+	}
+
 	// -- TLS transport wrapped in a RoundTripper that fixes X-Forwarded-For --
 	// The Director always sets X-Forwarded-For, but Go's ReverseProxy appends
 	// the client IP again after the Director returns, causing duplication.
@@ -83,6 +121,7 @@ func (s *server) buildRouteHandler(routePath string, destURL *url.URL, rc *Route
 		},
 	}
 	transport := &xffRoundTripper{base: baseTransport}
+	lbMode := rc.LBMode
 
 	// -- Timeout --
 	var clientTimeout time.Duration
@@ -104,6 +143,10 @@ func (s *server) buildRouteHandler(routePath string, destURL *url.URL, rc *Route
 	proxy := &httputil.ReverseProxy{
 		Transport: transport,
 		Director: func(req *http.Request) {
+			// Pick an upstream for this request — ParsedURL computed once at startup.
+			upstream := picker.pick(lbMode)
+			destURL := upstream.ParsedURL
+
 			// Strip the route prefix from the path, then prepend the dest path.
 			stripped := strings.TrimPrefix(req.URL.Path, routePath)
 			// Join dest base path + stripped remainder
@@ -136,6 +179,9 @@ func (s *server) buildRouteHandler(routePath string, destURL *url.URL, rc *Route
 				originalHeaders.Set("Host", req.Host)
 			}
 
+			// Parse client address once — reused for XFF and $remote_addr/$remote_port variables.
+			clientIP, clientPort, _ := net.SplitHostPort(req.RemoteAddr)
+
 			// X-Forwarded-* handling depends on trust-client-headers setting.
 			//
 			// false (default — secure, routemux is the entry point):
@@ -147,7 +193,7 @@ func (s *server) buildRouteHandler(routePath string, destURL *url.URL, rc *Route
 			//   X-Forwarded-For   → append connecting IP to existing chain
 			//   X-Forwarded-Host  → leave untouched (upstream proxy already set it)
 			//   X-Forwarded-Proto → leave untouched (upstream proxy already set it)
-			if clientIP, _, err := net.SplitHostPort(req.RemoteAddr); err == nil {
+			if clientIP != "" {
 				if s.cfg.TrustClientHeaders {
 					if prior, ok := req.Header["X-Forwarded-For"]; ok {
 						req.Header.Set("X-Forwarded-For", strings.Join(prior, ", ")+", "+clientIP)
@@ -186,7 +232,7 @@ func (s *server) buildRouteHandler(routePath string, destURL *url.URL, rc *Route
 
 			if rc.AddHasVars {
 				// Slow path — resolve variables in header values.
-				clientIP, clientPort, _ := net.SplitHostPort(req.RemoteAddr)
+				// clientIP and clientPort already parsed above — reused here.
 				scheme := schemeOf(req)
 				requestURI := req.RequestURI
 				for name, val := range rc.AddHeaders {
@@ -209,14 +255,15 @@ func (s *server) buildRouteHandler(routePath string, destURL *url.URL, rc *Route
 			}
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			log.Printf("proxy error [%s → %s]: %v", r.URL.Path, destURL, err)
+			log.Printf("proxy error [%s → %s]: %v", r.URL.Path, r.URL.Host, err)
 			http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		},
 	}
 
 	// handleWS uses effectiveAuth which is declared above.
 	handleWS := func(w http.ResponseWriter, r *http.Request) {
-		serveWebSocket(w, r, destURL, routePath, rc, effectiveAuth, s.cfg.TrustClientHeaders)
+		upstream := picker.pick(lbMode)
+		serveWebSocket(w, r, upstream.ParsedURL, routePath, rc, effectiveAuth, s.cfg.TrustClientHeaders)
 	}
 
 	var h http.Handler = proxy
@@ -289,4 +336,77 @@ func schemeOf(r *http.Request) string {
 		return "https"
 	}
 	return "http"
+}
+// upstreamPicker selects an upstream for each request according to the
+// configured load-balancing mode and weights.
+//
+// Weighted random: each request draws a random number in [0, totalWeight)
+// and walks the upstream list until the cumulative weight exceeds it.
+//
+// Weighted round-robin: the upstream list is expanded into a flat pool at
+// construction time (e.g. weight=2 → two slots), then a mutex-protected
+// counter cycles through it. No per-request weight arithmetic.
+type upstreamPicker struct {
+	upstreams []Upstream
+
+	// random mode
+	totalWeight int
+
+	// round-robin mode
+	mu   sync.Mutex
+	pool []int // indices into upstreams, expanded by weight
+	next int
+}
+
+func newUpstreamPicker(upstreams []Upstream, mode string) *upstreamPicker {
+	p := &upstreamPicker{upstreams: upstreams}
+	for _, u := range upstreams {
+		w := u.Weight
+		if w < 1 {
+			w = 1
+		}
+		p.totalWeight += w
+		for i := 0; i < w; i++ {
+			p.pool = append(p.pool, len(p.pool)) // will be rebuilt below
+		}
+	}
+	// Rebuild pool with correct upstream indices
+	p.pool = p.pool[:0]
+	for idx, u := range upstreams {
+		w := u.Weight
+		if w < 1 {
+			w = 1
+		}
+		for i := 0; i < w; i++ {
+			p.pool = append(p.pool, idx)
+		}
+	}
+	return p
+}
+
+func (p *upstreamPicker) pick(mode string) *Upstream {
+	if len(p.upstreams) == 1 {
+		return &p.upstreams[0]
+	}
+	if mode == "round-robin" {
+		p.mu.Lock()
+		idx := p.pool[p.next%len(p.pool)]
+		p.next++
+		p.mu.Unlock()
+		return &p.upstreams[idx]
+	}
+	// Weighted random (default)
+	r := rand.Intn(p.totalWeight)
+	cumulative := 0
+	for i, u := range p.upstreams {
+		w := u.Weight
+		if w < 1 {
+			w = 1
+		}
+		cumulative += w
+		if r < cumulative {
+			return &p.upstreams[i]
+		}
+	}
+	return &p.upstreams[0] // unreachable, but safe fallback
 }

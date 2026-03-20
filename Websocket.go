@@ -94,8 +94,11 @@ func serveWebSocket(w http.ResponseWriter, r *http.Request, destURL *url.URL, ro
 		}
 		outHeaders[k] = vals
 	}
+	// Parse client address once — reused for XFF and $remote_addr/$remote_port variables.
+	clientIP, clientPort, _ := net.SplitHostPort(r.RemoteAddr)
+
 	// X-Forwarded-* handling mirrors the HTTP proxy path.
-	if clientIP, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+	if clientIP != "" {
 		if trustClientHeaders {
 			if prior, ok := outHeaders["X-Forwarded-For"]; ok {
 				outHeaders.Set("X-Forwarded-For", strings.Join(prior, ", ")+", "+clientIP)
@@ -121,7 +124,7 @@ func serveWebSocket(w http.ResponseWriter, r *http.Request, destURL *url.URL, ro
 	}
 	applyDeleteHeaders(outHeaders, rc.DeleteHeaders, rc.DeleteHasWildcard)
 	if rc.AddHasVars {
-		clientIP, clientPort, _ := net.SplitHostPort(r.RemoteAddr)
+		// clientIP and clientPort already parsed above — reused here.
 		scheme := "ws"
 		if destURL.Scheme == "wss" || destURL.Scheme == "https" {
 			scheme = "wss"

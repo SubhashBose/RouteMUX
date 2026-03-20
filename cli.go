@@ -7,8 +7,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/SubhashBose/GoModule-selfupdater"
+"github.com/SubhashBose/GoModule-selfupdater"
 )
+
+var version = "1.1"
 
 // parseAll merges config file + CLI args into a final Config.
 // CLI args take precedence over config file.
@@ -221,7 +223,9 @@ func applyCLI(cfg *Config, rawArgs []string) error {
 			if i+1 >= len(args) {
 				return fmt.Errorf("--dest requires a value")
 			}
-			curRoute.Dest = args[i+1]
+			if err := applyDestEntries(curRoute, []string{args[i+1]}, curPath); err != nil {
+				return fmt.Errorf("--dest: %w", err)
+			}
 			i += 2
 		case "--noTLSverify":
 			if curRoute == nil {
@@ -278,6 +282,15 @@ func applyCLI(cfg *Config, rawArgs []string) error {
 			if strings.Contains(args[i+1], "*") {
 				curRoute.DeleteHasWildcard = true
 			}
+			i += 2
+		case "--load-balancer-mode":
+			if curRoute == nil {
+				return fmt.Errorf("--load-balancer-mode must follow --route")
+			}
+			if i+1 >= len(args) {
+				return fmt.Errorf("--load-balancer-mode requires a value (random or round-robin)")
+			}
+			curRoute.LBMode = normalizeLBMode(args[i+1])
 			i += 2
 		case "--timeout":
 			if curRoute == nil {
@@ -365,34 +378,39 @@ Usage:
            [--route PATH2 --dest URL [route options]] ...
 
 Global options:
-  --config PATH       Config file (default: `+bindir+` or
+  --config PATH         Config file (default: `+bindir+` or
                       ./config.yml or ~/.config/routemux/config.yml)
-  --listen ADDR       IP address or interface name to listen on (default: all interfaces)
-  --port PORT         Port to listen on (default: 8080)
-  --tls-cert FILE     TLS certificate file (enables HTTPS)
-  --tls-key  FILE     TLS key file (enables HTTPS)
+  --listen ADDR         IP address or interface name to listen on (default: all interfaces)
+  --port PORT           Port to listen on (default: 8080)
+  --tls-cert FILE       TLS certificate file (enables HTTPS)
+  --tls-key  FILE       TLS key file (enables HTTPS)
   --trust-client-headers  Trust X-Forwarded-* headers from client (default: false)
-  --global-auth U:P   HTTP Basic Auth applied to all routes (format: USER:PASSWORD)
+  --global-auth U:P     HTTP Basic Auth applied to all routes (format: USER:PASSWORD)
 
 Route options (must follow --route PATH): 
-  --route PATH        Define a route (e.g. /api/)
-  --dest URL          Upstream destination URL
-  --noTLSverify       Skip TLS verification for upstream
-  --auth U:P          Per-route Basic Auth (overrides global-auth; "" disables auth)
-  --timeout DURATION  Upstream timeout (e.g. 30s, 2m)
-  --add-header K:V    Add/overwrite a header on upstream request (repeatable)
-  --delete-header K   Delete a header from the upstream request (repeatable)
+  --route PATH          Define a route (e.g. /api/)
+  --dest URL            Upstream destination URL (repeatable).
+                        Repeated --dest <URL> [weight=<N>] per route forms load-balancer,
+                        where weight is optional, default is 1.
+                        --dest STATUS <code> [text] is also supported, where a HTTP
+                        response code is returned with optional static text body.
+  --load-balancer-mode  Load balancer mode, "round-robin" or "random", (default: random) 
+  --noTLSverify         Skip TLS verification for upstream
+  --auth U:P            Per-route Basic Auth (overrides global-auth; "" disables auth)
+  --timeout DURATION    Upstream timeout (e.g. 30s, 2m)
+  --add-header K:V      Add/overwrite a header on upstream request (repeatable)
+  --delete-header K     Delete a header from the upstream request (repeatable)
                       Can take wildcards (e.g. --delete-header *cookie*)
 
 Other flags:
-  --help, -h          Show this help
-  --upgrade           Self-upgrade RouteMUX to the latest version
+  --help, -h            Show this help
+  --upgrade             Self-upgrade RouteMUX to the latest version
 
 Sets of --route followed by route options can be repeated to define multiple routes.
 Options in command line and config.yml file are combined, where command line options takes precedence.
 To disable reading any config.yml file, use --config "". 
 
-Config file (config.yml):
+Config file (config.yml) example:
   global:
     listen: ""
     port: 8080
@@ -413,6 +431,13 @@ Config file (config.yml):
       delete-header:
         - *cookie*
         - Authorization
+    "/load-balancer/":
+      dest:
+        - http://localhost:3000/
+        - http://localhost:3001/ weight=5
+      load-balancer-mode: round-robin
+    "/health/":
+      dest: STATUS 200 Health is ok
 
 The 'add-header' values can be static strings or the following supported variables:
   $remote_addr: client IP (no port)

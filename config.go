@@ -2,8 +2,10 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"log"
+	"net/url"
+	"os"
+	"strings"
 	"gopkg.in/yaml.v3"
 )
 
@@ -24,17 +26,27 @@ type Auth struct {
 	Password string
 }
 
+// Upstream holds the destination URL and per-upstream options for a route.
+type Upstream struct {
+	URL       string
+	ParsedURL *url.URL // parsed once at startup, never nil for valid routes
+	Weight    int      // default 1; used for weighted load balancing (future)
+}
+
 // RouteConfig describes a single reverse-proxy route.
 type RouteConfig struct {
-	Dest         string
-	NoTLSVerify  bool
-	Auth         *Auth  // nil = inherit global-auth; explicitly cleared = no auth
-	AuthExplicit bool   // true when auth was set explicitly (even as empty)
-	Timeout       string            // e.g. "30s", "2m"
-	AddHeaders    map[string]string  // headers to add/overwrite on upstream request
-	DeleteHeaders    []string           // headers to remove from upstream request
-	DeleteHasWildcard bool              // true if any DeleteHeaders entry contains '*'
-	AddHasVars        bool              // true if any AddHeaders value contains a '$' variable
+	Upstreams          []Upstream        // upstream destinations (nil for STATUS routes)
+	LBMode             string            // "random" (default) or "round-robin"
+	StatusCode         int               // non-zero: static response route
+	StatusText         string            // body text for static response
+	NoTLSVerify        bool              // skip TLS verification for all upstreams
+	Auth               *Auth             // nil = inherit global-auth; explicitly cleared = no auth
+	AuthExplicit       bool              // true when auth was set explicitly (even as empty)
+	Timeout            string            // e.g. "30s", "2m"
+	AddHeaders         map[string]string // headers to add/overwrite on upstream request
+	DeleteHeaders      []string          // headers to remove from upstream request
+	DeleteHasWildcard  bool              // true if any DeleteHeaders entry contains '*'
+	AddHasVars         bool              // true if any AddHeaders value contains a '$' variable
 }
 
 func (c *Config) validate() error {
@@ -42,7 +54,7 @@ func (c *Config) validate() error {
 		return fmt.Errorf("no routes configured")
 	}
 	for path, r := range c.Routes {
-		if r.Dest == "" {
+		if r.StatusCode == 0 && len(r.Upstreams) == 0 {
 			return fmt.Errorf("route %q has no dest", path)
 		}
 	}
@@ -70,15 +82,39 @@ type fileGlobal struct {
 }
 
 type fileRoute struct {
-	Dest        string   `yaml:"dest"`
-	NoTLSVerify bool     `yaml:"noTLSverify"`
-	Auth        []string `yaml:"auth"`    // ["USER", "PASSWORD"] or absent
-	Timeout      string            `yaml:"timeout"`
-	AddHeaders    map[string]string  `yaml:"add-header"`
-	DeleteHeaders []string           `yaml:"delete-header"`
+	Dest        destValue         `yaml:"dest"` // string or []string — custom unmarshaler
+	NoTLSVerify bool              `yaml:"noTLSverify"`
+	Auth        []string          `yaml:"auth"` // ["USER", "PASSWORD"] or absent
+	Timeout     string            `yaml:"timeout"`
+	LBMode      string            `yaml:"load-balancer-mode"`
+	AddHeaders  map[string]string `yaml:"add-header"`
+	DeleteHeaders []string        `yaml:"delete-header"`
 
 	// authPresent records whether the "auth" key existed in the YAML at all.
 	authPresent bool
+}
+
+// destValue holds the raw dest strings before they are parsed into Upstreams.
+// It accepts both a single string and a YAML sequence of strings.
+type destValue struct {
+	entries []string
+}
+
+func (d *destValue) UnmarshalYAML(value *yaml.Node) error {
+	switch value.Kind {
+	case yaml.ScalarNode:
+		d.entries = []string{value.Value}
+	case yaml.SequenceNode:
+		for _, item := range value.Content {
+			if item.Kind != yaml.ScalarNode {
+				return fmt.Errorf("dest list entries must be strings")
+			}
+			d.entries = append(d.entries, item.Value)
+		}
+	default:
+		return fmt.Errorf("dest must be a string or a list of strings")
+	}
+	return nil
 }
 
 // UnmarshalYAML implements yaml.Unmarshaler so we can detect whether the
@@ -140,14 +176,18 @@ func loadConfigFile(path string) (*Config, error) {
 
 	for path, fr := range fc.Routes {
 		rc := &RouteConfig{
-			Dest:          fr.Dest,
-			NoTLSVerify:   fr.NoTLSVerify,
-			Timeout:       fr.Timeout,
-			AuthExplicit:  fr.authPresent,
+			NoTLSVerify:       fr.NoTLSVerify,
+			Timeout:           fr.Timeout,
+			LBMode:            normalizeLBMode(fr.LBMode),
+			AuthExplicit:      fr.authPresent,
 			AddHeaders:        fr.AddHeaders,
 			DeleteHeaders:     fr.DeleteHeaders,
 			DeleteHasWildcard: hasWildcard(fr.DeleteHeaders),
 			AddHasVars:        hasVarValues(fr.AddHeaders),
+		}
+		// Parse dest entries into Upstreams or StatusCode/StatusText.
+		if err := applyDestEntries(rc, fr.Dest.entries, path); err != nil {
+			return nil, err
 		}
 		if fr.authPresent {
 			if len(fr.Auth) == 2 {
@@ -161,4 +201,105 @@ func loadConfigFile(path string) (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// parseDestField checks if a dest value is a STATUS directive.
+// Format: "STATUS <code> [text]" (case-insensitive).
+// Returns (statusCode, statusText, isStatus).
+func parseDestField(dest string) (code int, text string, isStatus bool) {
+	if !strings.HasPrefix(strings.ToUpper(dest), "STATUS ") {
+		return 0, "", false
+	}
+	rest := strings.TrimSpace(dest[7:]) // strip "STATUS "
+	spaceIdx := strings.IndexByte(rest, ' ')
+	var codeStr string
+	if spaceIdx < 0 {
+		codeStr = rest
+		text = ""
+	} else {
+		codeStr = rest[:spaceIdx]
+		text = rest[spaceIdx+1:]
+	}
+	var n int
+	if _, err := fmt.Sscanf(codeStr, "%d", &n); err != nil || n < 100 || n > 599 {
+		return 0, "", false
+	}
+	return n, text, true
+}
+
+
+// parseUpstreamString parses a single upstream entry from a dest list.
+// Format: "URL [weight=N]"
+// Returns an error if the entry looks like a STATUS directive (not valid in a list).
+func parseUpstreamString(s string) (Upstream, error) {
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(strings.ToUpper(s), "STATUS") {
+		return Upstream{}, fmt.Errorf("STATUS is not valid in a multi-dest list; use a single dest: STATUS <code> <text>")
+	}
+	// Split off optional weight= suffix
+	weight := 1
+	rawURL := s
+	if idx := strings.Index(s, " "); idx >= 0 {
+		rawURL = s[:idx]
+		rest := strings.TrimSpace(s[idx+1:])
+		if strings.HasPrefix(rest, "weight=") {
+			fmt.Sscanf(rest[7:], "%d", &weight)
+			if weight < 1 {
+				weight = 1
+			}
+		}
+	}
+	return Upstream{URL: rawURL, Weight: weight}, nil
+}
+
+// applyDestEntries parses the raw dest entries (from YAML or CLI) and populates
+// rc.Upstreams or rc.StatusCode/StatusText accordingly.
+// Each upstream URL is parsed once here so the Director closure pays zero
+// allocation cost per request.
+// routePath is used only for error messages.
+func applyDestEntries(rc *RouteConfig, entries []string, routePath string) error {
+	if len(entries) == 0 {
+		return nil // no dest — validate() will catch this
+	}
+	if len(entries) == 1 {
+		// Single entry: may be a URL or a STATUS directive.
+		code, text, isStatus := parseDestField(entries[0])
+		if isStatus {
+			rc.StatusCode = code
+			rc.StatusText = text
+			return nil
+		}
+		parsed, err := url.Parse(entries[0])
+		if err != nil {
+			return fmt.Errorf("route %q: invalid dest URL: %w", routePath, err)
+		}
+		rc.Upstreams = []Upstream{{URL: entries[0], ParsedURL: parsed, Weight: 1}}
+		return nil
+	}
+	// Multiple entries: all must be URLs (STATUS not allowed in a list).
+	upstreams := make([]Upstream, 0, len(entries))
+	for _, entry := range entries {
+		u, err := parseUpstreamString(entry)
+		if err != nil {
+			return fmt.Errorf("route %q: %w", routePath, err)
+		}
+		u.ParsedURL, err = url.Parse(u.URL)
+		if err != nil {
+			return fmt.Errorf("route %q: invalid dest URL %q: %w", routePath, u.URL, err)
+		}
+		upstreams = append(upstreams, u)
+	}
+	rc.Upstreams = upstreams
+	return nil
+}
+
+// normalizeLBMode returns a canonical LB mode string.
+// Empty or unrecognised values default to "random".
+func normalizeLBMode(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "round-robin", "roundrobin":
+		return "round-robin"
+	default:
+		return "random"
+	}
 }

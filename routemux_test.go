@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -9,6 +10,16 @@ import (
 	"strings"
 	"testing"
 )
+
+
+// mustUpstream parses a URL at test time and returns a ready Upstream.
+func mustUpstream(rawURL string, weight int) Upstream {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		panic("invalid test URL: " + rawURL)
+	}
+	return Upstream{URL: rawURL, ParsedURL: parsed, Weight: weight}
+}
 
 // ---- Config file loading (yaml.v3) ----
 
@@ -66,8 +77,8 @@ routes:
 	if api == nil {
 		t.Fatal("/api/ route missing")
 	}
-	if api.Dest != "http://localhost:3000/v1/" {
-		t.Errorf("dest = %q", api.Dest)
+	if api.Upstreams[0].URL != "http://localhost:3000/v1/" {
+		t.Errorf("dest = %q", api.Upstreams[0].URL)
 	}
 	if !api.NoTLSVerify {
 		t.Error("noTLSverify should be true")
@@ -193,7 +204,7 @@ func TestCLI_MultipleRoutes(t *testing.T) {
 		t.Fatalf("want 2 routes, got %d", len(cfg.Routes))
 	}
 	a := cfg.Routes["/a/"]
-	if a == nil || a.Dest != "http://a/" || a.Timeout != "30s" || !a.NoTLSVerify {
+	if a == nil || a.Upstreams[0].URL != "http://a/" || a.Timeout != "30s" || !a.NoTLSVerify {
 		t.Errorf("route /a/ = %+v", a)
 	}
 	b := cfg.Routes["/b/"]
@@ -320,7 +331,7 @@ func TestRouteHandler_BasicProxy(t *testing.T) {
 
 	cfg := &Config{
 		Port:   8080,
-		Routes: map[string]*RouteConfig{"/api/": {Dest: backend.URL + "/v1/"}},
+		Routes: map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/v1/", 1)}}},
 	}
 	srv, err := newServer(cfg)
 	if err != nil {
@@ -351,7 +362,7 @@ func TestRouteHandler_GlobalAuth(t *testing.T) {
 	cfg := &Config{
 		Port:       8080,
 		GlobalAuth: &Auth{"admin", "secret"},
-		Routes:     map[string]*RouteConfig{"/secure/": {Dest: backend.URL + "/"}},
+		Routes:     map[string]*RouteConfig{"/secure/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)}}},
 	}
 	srv, _ := newServer(cfg)
 	ts := httptest.NewServer(srv.mux)
@@ -391,7 +402,7 @@ func TestRouteHandler_RouteAuthOverridesGlobal(t *testing.T) {
 		GlobalAuth: &Auth{"admin", "secret"},
 		Routes: map[string]*RouteConfig{
 			"/public/": {
-				Dest:         backend.URL + "/",
+				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
 				AuthExplicit: true,
 				Auth:         nil, // explicit no-auth overrides global
 			},
@@ -418,7 +429,7 @@ func TestRouteHandler_PerRouteAuth(t *testing.T) {
 		GlobalAuth: &Auth{"admin", "global"},
 		Routes: map[string]*RouteConfig{
 			"/special/": {
-				Dest:         backend.URL + "/",
+				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
 				AuthExplicit: true,
 				Auth:         &Auth{"special", "pass"},
 			},
@@ -455,7 +466,7 @@ func TestRouteHandler_PathStripping(t *testing.T) {
 
 	cfg := &Config{
 		Port:   8080,
-		Routes: map[string]*RouteConfig{"/prefix/": {Dest: backend.URL + "/base/"}},
+		Routes: map[string]*RouteConfig{"/prefix/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/base/", 1)}}},
 	}
 	srv, _ := newServer(cfg)
 	ts := httptest.NewServer(srv.mux)
@@ -478,7 +489,7 @@ func TestRouteHandler_XForwardedHeaders(t *testing.T) {
 
 	cfg := &Config{
 		Port:   8080,
-		Routes: map[string]*RouteConfig{"/": {Dest: backend.URL + "/"}},
+		Routes: map[string]*RouteConfig{"/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)}}},
 	}
 	srv, _ := newServer(cfg)
 	ts := httptest.NewServer(srv.mux)
@@ -513,7 +524,7 @@ func TestValidate_TLSPartial(t *testing.T) {
 	cfg := &Config{
 		Port:    8080,
 		TLSCert: "/c.pem",
-		Routes:  map[string]*RouteConfig{"/x/": {Dest: "http://x/"}},
+		Routes:  map[string]*RouteConfig{"/x/": {Upstreams: []Upstream{mustUpstream("http://x/", 1)}}},
 	}
 	if err := cfg.validate(); err == nil {
 		t.Error("expected error for tls-cert without tls-key")
@@ -535,7 +546,7 @@ func TestRouteHandler_AddHeader(t *testing.T) {
 		Port: 8080,
 		Routes: map[string]*RouteConfig{
 			"/api/": {
-				Dest:       backend.URL + "/",
+				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
 				AddHeaders: map[string]string{"User-Agent": "RouteMUX", "X-Custom": "hello"},
 			},
 		},
@@ -569,7 +580,7 @@ func TestRouteHandler_DeleteHeader(t *testing.T) {
 		Port: 8080,
 		Routes: map[string]*RouteConfig{
 			"/api/": {
-				Dest:          backend.URL + "/",
+				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
 				DeleteHeaders: []string{"User-Agent", "Cookie"},
 			},
 		},
@@ -603,7 +614,7 @@ func TestRouteHandler_DeleteHostIgnored(t *testing.T) {
 		Port: 8080,
 		Routes: map[string]*RouteConfig{
 			"/api/": {
-				Dest:          backend.URL + "/",
+				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
 				DeleteHeaders: []string{"Host"}, // should be silently ignored
 			},
 		},
@@ -632,7 +643,7 @@ func TestRouteHandler_AddAndDeleteOrder(t *testing.T) {
 		Port: 8080,
 		Routes: map[string]*RouteConfig{
 			"/api/": {
-				Dest:          backend.URL + "/",
+				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
 				DeleteHeaders: []string{"User-Agent"},
 				AddHeaders:    map[string]string{"User-Agent": "RouteMUX"},
 			},
@@ -736,7 +747,7 @@ func TestRouteHandler_AddHostHeader(t *testing.T) {
 		Port: 8080,
 		Routes: map[string]*RouteConfig{
 			"/api/": {
-				Dest:       backend.URL + "/",
+				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
 				AddHeaders: map[string]string{"Host": "custom.example.com"},
 			},
 		},
@@ -767,7 +778,7 @@ func TestRouteHandler_DeleteHostHeader_FallsBackToUpstream(t *testing.T) {
 		Port: 8080,
 		Routes: map[string]*RouteConfig{
 			"/api/": {
-				Dest:          backend.URL + "/",
+				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
 				DeleteHeaders: []string{"Host"},
 			},
 		},
@@ -796,7 +807,7 @@ func TestRouteHandler_ClientHostPassedThrough(t *testing.T) {
 
 	cfg := &Config{
 		Port:   8080,
-		Routes: map[string]*RouteConfig{"/api/": {Dest: backend.URL + "/"}},
+		Routes: map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)}}},
 	}
 	srv, _ := newServer(cfg)
 	ts := httptest.NewServer(srv.mux)
@@ -827,7 +838,7 @@ func TestRouteHandler_ProxyAuthStripsAuthorization(t *testing.T) {
 	cfg := &Config{
 		Port:       8080,
 		GlobalAuth: &Auth{"admin", "secret"},
-		Routes:     map[string]*RouteConfig{"/api/": {Dest: backend.URL + "/"}},
+		Routes:     map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)}}},
 	}
 	srv, _ := newServer(cfg)
 	ts := httptest.NewServer(srv.mux)
@@ -854,7 +865,7 @@ func TestRouteHandler_NoProxyAuthPassesAuthorization(t *testing.T) {
 
 	cfg := &Config{
 		Port:   8080,
-		Routes: map[string]*RouteConfig{"/api/": {Dest: backend.URL + "/"}},
+		Routes: map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)}}},
 	}
 	srv, _ := newServer(cfg)
 	ts := httptest.NewServer(srv.mux)
@@ -884,7 +895,7 @@ func TestRouteHandler_ProxyAuthWithAddHeaderAuthOverride(t *testing.T) {
 		GlobalAuth: &Auth{"admin", "secret"},
 		Routes: map[string]*RouteConfig{
 			"/api/": {
-				Dest:       backend.URL + "/",
+				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
 				AddHeaders: map[string]string{"Authorization": "Bearer upstream-token"},
 			},
 		},
@@ -915,7 +926,7 @@ func TestRouteHandler_NoProxyAuthDeleteAuthorization(t *testing.T) {
 		Port: 8080,
 		Routes: map[string]*RouteConfig{
 			"/api/": {
-				Dest:          backend.URL + "/",
+				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
 				DeleteHeaders: []string{"Authorization"},
 			},
 		},
@@ -947,7 +958,7 @@ func TestDeleteHeader_WildcardPrefix(t *testing.T) {
 		Port: 8080,
 		Routes: map[string]*RouteConfig{
 			"/api/": {
-				Dest:             backend.URL + "/",
+				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
 				DeleteHeaders:    []string{"CF-*"},
 				DeleteHasWildcard: true,
 			},
@@ -986,7 +997,7 @@ func TestDeleteHeader_WildcardSuffix(t *testing.T) {
 		Port: 8080,
 		Routes: map[string]*RouteConfig{
 			"/api/": {
-				Dest:             backend.URL + "/",
+				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
 				DeleteHeaders:    []string{"*-Secret"},
 				DeleteHasWildcard: true,
 			},
@@ -1016,7 +1027,7 @@ func TestDeleteHeader_WildcardSuffix(t *testing.T) {
 func TestDeleteHeader_NoWildcard_FastPath(t *testing.T) {
 	// Verify that exact-match delete still works and the wildcard flag is false.
 	rc := &RouteConfig{
-		Dest:             "http://x/",
+		Upstreams: []Upstream{mustUpstream("http://x/", 1)},
 		DeleteHeaders:    []string{"Cookie", "Authorization"},
 		DeleteHasWildcard: false,
 	}
@@ -1157,7 +1168,7 @@ func TestRouteHandler_VarRemoteAddr(t *testing.T) {
 		Port: 8080,
 		Routes: map[string]*RouteConfig{
 			"/api/": {
-				Dest:       backend.URL + "/",
+				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
 				AddHeaders: map[string]string{"X-Real-IP": "$remote_addr"},
 				AddHasVars: true,
 			},
@@ -1193,7 +1204,7 @@ func TestRouteHandler_VarHeaderCopiedAfterDelete(t *testing.T) {
 		Port: 8080,
 		Routes: map[string]*RouteConfig{
 			"/api/": {
-				Dest:          backend.URL + "/",
+				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
 				DeleteHeaders: []string{"User-Agent"},
 				AddHeaders:    map[string]string{"X-Original-UA": "$header.User-Agent"},
 				AddHasVars:    true,
@@ -1228,7 +1239,7 @@ func TestRouteHandler_VarScheme(t *testing.T) {
 		Port: 8080,
 		Routes: map[string]*RouteConfig{
 			"/api/": {
-				Dest:       backend.URL + "/",
+				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
 				AddHeaders: map[string]string{"X-Scheme": "$scheme"},
 				AddHasVars: true,
 			},
@@ -1257,7 +1268,7 @@ func TestRouteHandler_EscapedDollar(t *testing.T) {
 		Port: 8080,
 		Routes: map[string]*RouteConfig{
 			"/api/": {
-				Dest:       backend.URL + "/",
+				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
 				AddHeaders: map[string]string{"X-Literal": `\$remote_addr`},
 				AddHasVars: true,
 			},
@@ -1295,7 +1306,7 @@ func TestTrustClientHeaders_False_DiscardXFF(t *testing.T) {
 	cfg := &Config{
 		Port:               8080,
 		TrustClientHeaders: false,
-		Routes:             map[string]*RouteConfig{"/api/": {Dest: backend.URL + "/"}},
+		Routes:             map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)}}},
 	}
 	srv, _ := newServer(cfg)
 	ts := httptest.NewServer(srv.mux)
@@ -1323,7 +1334,7 @@ func TestTrustClientHeaders_True_AppendXFF(t *testing.T) {
 	cfg := &Config{
 		Port:               8080,
 		TrustClientHeaders: true,
-		Routes:             map[string]*RouteConfig{"/api/": {Dest: backend.URL + "/"}},
+		Routes:             map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)}}},
 	}
 	srv, _ := newServer(cfg)
 	ts := httptest.NewServer(srv.mux)
@@ -1355,7 +1366,7 @@ func TestTrustClientHeaders_False_SetsXForwardedHeaders(t *testing.T) {
 	cfg := &Config{
 		Port:               8080,
 		TrustClientHeaders: false,
-		Routes:             map[string]*RouteConfig{"/api/": {Dest: backend.URL + "/"}},
+		Routes:             map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)}}},
 	}
 	srv, _ := newServer(cfg)
 	ts := httptest.NewServer(srv.mux)
@@ -1388,7 +1399,7 @@ func TestTrustClientHeaders_True_LeavesXForwardedHeadersUntouched(t *testing.T) 
 	cfg := &Config{
 		Port:               8080,
 		TrustClientHeaders: true,
-		Routes:             map[string]*RouteConfig{"/api/": {Dest: backend.URL + "/"}},
+		Routes:             map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)}}},
 	}
 	srv, _ := newServer(cfg)
 	ts := httptest.NewServer(srv.mux)
@@ -1405,5 +1416,258 @@ func TestTrustClientHeaders_True_LeavesXForwardedHeadersUntouched(t *testing.T) 
 	}
 	if gotProto != "https" {
 		t.Errorf("X-Forwarded-Proto = %q, want https", gotProto)
+	}
+}
+// ---- Upstream / STATUS route tests ----
+
+func TestParseDestField_Status(t *testing.T) {
+	cases := []struct {
+		dest     string
+		wantCode int
+		wantText string
+		wantIs   bool
+	}{
+		{"STATUS 200 OK", 200, "OK", true},
+		{"STATUS 404 Not Found", 404, "Not Found", true},
+		{"STATUS 204", 204, "", true},
+		{"STATUS 200 Hello world", 200, "Hello world", true},
+		{"status 200 lowercase", 200, "lowercase", true},
+		{"http://localhost:3000/", 0, "", false},
+		{"STATUS 99 too low", 0, "", false},
+		{"STATUS 600 too high", 0, "", false},
+	}
+	for _, tc := range cases {
+		code, text, isStatus := parseDestField(tc.dest)
+		if isStatus != tc.wantIs || code != tc.wantCode || text != tc.wantText {
+			t.Errorf("parseDestField(%q) = (%d, %q, %v), want (%d, %q, %v)",
+				tc.dest, code, text, isStatus, tc.wantCode, tc.wantText, tc.wantIs)
+		}
+	}
+}
+
+func TestParseUpstreamString(t *testing.T) {
+	cases := []struct {
+		in         string
+		wantURL    string
+		wantWeight int
+		wantErr    bool
+	}{
+		{"http://localhost:3000/", "http://localhost:3000/", 1, false},
+		{"http://localhost:3000/  weight=2", "http://localhost:3000/", 2, false},
+		{"http://localhost:4000/ weight=0", "http://localhost:4000/", 1, false}, // weight<1 → 1
+		{"STATUS 200 OK", "", 0, true}, // STATUS not allowed in list
+	}
+	for _, tc := range cases {
+		u, err := parseUpstreamString(tc.in)
+		if tc.wantErr {
+			if err == nil {
+				t.Errorf("parseUpstreamString(%q): expected error", tc.in)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("parseUpstreamString(%q): unexpected error: %v", tc.in, err)
+			continue
+		}
+		if u.URL != tc.wantURL || u.Weight != tc.wantWeight {
+			t.Errorf("parseUpstreamString(%q) = {%q, %d}, want {%q, %d}",
+				tc.in, u.URL, u.Weight, tc.wantURL, tc.wantWeight)
+		}
+	}
+}
+
+func TestApplyDestEntries_Single(t *testing.T) {
+	rc := &RouteConfig{}
+	if err := applyDestEntries(rc, []string{"http://localhost:3000/"}, "/api/"); err != nil {
+		t.Fatal(err)
+	}
+	if len(rc.Upstreams) != 1 || rc.Upstreams[0].URL != "http://localhost:3000/" {
+		t.Errorf("unexpected upstreams: %v", rc.Upstreams)
+	}
+	if rc.StatusCode != 0 {
+		t.Errorf("StatusCode should be 0, got %d", rc.StatusCode)
+	}
+}
+
+func TestApplyDestEntries_Multi(t *testing.T) {
+	rc := &RouteConfig{}
+	entries := []string{"http://localhost:3000/ weight=2", "http://localhost:3001/ weight=1"}
+	if err := applyDestEntries(rc, entries, "/api/"); err != nil {
+		t.Fatal(err)
+	}
+	if len(rc.Upstreams) != 2 {
+		t.Fatalf("expected 2 upstreams, got %d", len(rc.Upstreams))
+	}
+	if rc.Upstreams[0].Weight != 2 || rc.Upstreams[1].Weight != 1 {
+		t.Errorf("unexpected weights: %+v", rc.Upstreams)
+	}
+}
+
+func TestApplyDestEntries_Status(t *testing.T) {
+	rc := &RouteConfig{}
+	if err := applyDestEntries(rc, []string{"STATUS 200 healthy"}, "/health/"); err != nil {
+		t.Fatal(err)
+	}
+	if rc.StatusCode != 200 || rc.StatusText != "healthy" {
+		t.Errorf("got StatusCode=%d StatusText=%q", rc.StatusCode, rc.StatusText)
+	}
+	if len(rc.Upstreams) != 0 {
+		t.Errorf("STATUS route should have no upstreams")
+	}
+}
+
+func TestApplyDestEntries_StatusInList_Error(t *testing.T) {
+	rc := &RouteConfig{}
+	entries := []string{"http://localhost:3000/", "STATUS 200 OK"}
+	if err := applyDestEntries(rc, entries, "/api/"); err == nil {
+		t.Error("expected error when STATUS appears in a multi-dest list")
+	}
+}
+
+func TestStatusRoute_200(t *testing.T) {
+	cfg := &Config{
+		Port:   8080,
+		Routes: map[string]*RouteConfig{"/health/": {StatusCode: 200, StatusText: "OK"}},
+	}
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.mux)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/health/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "OK" {
+		t.Errorf("body = %q, want OK", string(body))
+	}
+}
+
+func TestStatusRoute_EmptyBody(t *testing.T) {
+	cfg := &Config{
+		Port:   8080,
+		Routes: map[string]*RouteConfig{"/ping/": {StatusCode: 204, StatusText: ""}},
+	}
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.mux)
+	defer ts.Close()
+
+	resp, _ := http.Get(ts.URL + "/ping/")
+	defer resp.Body.Close()
+	if resp.StatusCode != 204 {
+		t.Errorf("status = %d, want 204", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if len(body) != 0 {
+		t.Errorf("body should be empty, got %q", string(body))
+	}
+}
+
+func TestStatusRoute_WithAuth(t *testing.T) {
+	cfg := &Config{
+		Port:       8080,
+		GlobalAuth: &Auth{User: "admin", Password: "secret"},
+		Routes:     map[string]*RouteConfig{"/health/": {StatusCode: 200, StatusText: "healthy"}},
+	}
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.mux)
+	defer ts.Close()
+
+	resp, _ := http.Get(ts.URL + "/health/")
+	resp.Body.Close()
+	if resp.StatusCode != 401 {
+		t.Errorf("without auth: status = %d, want 401", resp.StatusCode)
+	}
+
+	req, _ := http.NewRequest("GET", ts.URL+"/health/", nil)
+	req.SetBasicAuth("admin", "secret")
+	resp, _ = http.DefaultClient.Do(req)
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Errorf("with auth: status = %d, want 200", resp.StatusCode)
+	}
+}
+
+// ---- Load balancer tests ----
+
+func TestUpstreamPicker_SingleUpstream(t *testing.T) {
+	upstreams := []Upstream{{URL: "http://a/", Weight: 1}}
+	p := newUpstreamPicker(upstreams, "random")
+	for i := 0; i < 10; i++ {
+		u := p.pick("random")
+		if u.URL != "http://a/" {
+			t.Errorf("pick() = %q, want http://a/", u.URL)
+		}
+	}
+}
+
+func TestUpstreamPicker_RoundRobin_Equal(t *testing.T) {
+	upstreams := []Upstream{
+		{URL: "http://a/", Weight: 1},
+		{URL: "http://b/", Weight: 1},
+	}
+	p := newUpstreamPicker(upstreams, "round-robin")
+	got := make([]string, 6)
+	for i := range got {
+		got[i] = p.pick("round-robin").URL
+	}
+	want := []string{"http://a/", "http://b/", "http://a/", "http://b/", "http://a/", "http://b/"}
+	for i, g := range got {
+		if g != want[i] {
+			t.Errorf("pick[%d] = %q, want %q", i, g, want[i])
+		}
+	}
+}
+
+func TestUpstreamPicker_RoundRobin_Weighted(t *testing.T) {
+	upstreams := []Upstream{
+		{URL: "http://a/", Weight: 2},
+		{URL: "http://b/", Weight: 1},
+	}
+	p := newUpstreamPicker(upstreams, "round-robin")
+	counts := map[string]int{}
+	for i := 0; i < 300; i++ {
+		counts[p.pick("round-robin").URL]++
+	}
+	// a should get ~2x the requests of b
+	if counts["http://a/"] < counts["http://b/"]*15/10 {
+		t.Errorf("weighted round-robin: a=%d b=%d, expected a ~2x b", counts["http://a/"], counts["http://b/"])
+	}
+}
+
+func TestUpstreamPicker_Random_Weighted(t *testing.T) {
+	upstreams := []Upstream{
+		{URL: "http://a/", Weight: 3},
+		{URL: "http://b/", Weight: 1},
+	}
+	p := newUpstreamPicker(upstreams, "random")
+	counts := map[string]int{}
+	for i := 0; i < 4000; i++ {
+		counts[p.pick("random").URL]++
+	}
+	// a should get ~3x the requests of b (allow 20% variance)
+	ratio := float64(counts["http://a/"]) / float64(counts["http://b/"])
+	if ratio < 2.0 || ratio > 4.5 {
+		t.Errorf("weighted random ratio a/b = %.2f, want ~3.0", ratio)
+	}
+}
+
+func TestNormalizeLBMode(t *testing.T) {
+	cases := map[string]string{
+		"random":      "random",
+		"round-robin": "round-robin",
+		"roundrobin":  "round-robin",
+		"RANDOM":      "random",
+		"":            "random",
+		"unknown":     "random",
+	}
+	for in, want := range cases {
+		if got := normalizeLBMode(in); got != want {
+			t.Errorf("normalizeLBMode(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
