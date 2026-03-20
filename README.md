@@ -1,6 +1,6 @@
 # RouteMUX
 
-A lightweight, flexible reverse proxy written in Go. Routes HTTP and WebSocket traffic to upstream destinations with per-route configuration for authentication, header manipulation, TLS, and timeouts.
+A lightweight, flexible reverse proxy written in Go. Routes HTTP and WebSocket traffic to upstream destinations with per-route configuration for authentication, header manipulation, TLS, timeouts, and weighted load-balancing to multiple upstreams.
 
 ## Features
 
@@ -11,13 +11,21 @@ A lightweight, flexible reverse proxy written in Go. Routes HTTP and WebSocket t
 - **Header manipulation** — add, overwrite, or delete upstream request headers per route, with wildcard support (`CF-*`, `X-*`) and variable interpolation (`$remote_addr`, `$header.User-Agent`, etc.)
 - **Config file + CLI** — configure via `config.yml`, command-line flags, or both; CLI takes precedence
 - **Trusted proxy support** — `trust-client-headers` mode for deployments behind an upstream proxy
+- **Load balancing** — weighted random or weighted round-robin across multiple upstream destinations
+- **Static responses** — return a fixed HTTP status code and body directly from RouteMUX, no upstream needed
 - **Zero external dependencies** - standalone binary available in 15 OS and architecture combinations.
 
 ---
 
-## Download
+## Download & Update
 
 Download the appropriate binary from the [release](https://github.com/SubhashBose/RouteMUX/releases) section.
+
+The installed binary can self update to the latest release version
+
+```bash
+routemux --upgrade
+```
 
 ---
 
@@ -70,6 +78,17 @@ routes:
   /app/:
     dest: http://localhost:8000/
     timeout: 120s
+
+  # Load-balanced route
+  /lb/:
+    dest:
+      - http://localhost:4000/  weight=2
+      - http://localhost:4001/  weight=1
+    load-balancer-mode: round-robin   # or "random" (default)
+
+  # Static response route
+  /health/:
+    dest: STATUS 200 healthy
 ```
 
 ---
@@ -101,13 +120,21 @@ Route options must follow `--route`. The `--route` + route options block can be 
 | Flag | Description |
 |------|-------------|
 | `--route PATH` | Route path prefix (e.g. `/api/`) |
-| `--dest URL` | Upstream destination URL |
+| `--dest URL` | Upstream destination (repeatable — multiple `--dest` flags with URL and optional weight=<N> create a load-balanced route). Use `STATUS <code> [text]` for a static response. |
+| `--load-balancer-mode MODE` | Load balancer mode: `random` (default) or `round-robin` |
 | `--noTLSverify` | Skip TLS certificate verification for this upstream |
 | `--auth USER:PASS` | Per-route Basic Auth (overrides `--global-auth`) |
 | `--auth ""` | Explicitly disable auth for this route |
 | `--timeout DURATION` | Upstream request timeout (e.g. `30s`, `2m`) |
 | `--add-header "Name: Value"` | Add or overwrite a header (repeatable) |
 | `--delete-header NAME` | Delete a header (repeatable, supports wildcards) |
+
+### Other flags
+
+| Flag | Description |
+|------|-------------|
+| `--help, -h` | Display help information |
+| `--upgrade` | Self update the RouteMUX binary to the latest release version |
 
 ### Examples
 
@@ -140,6 +167,18 @@ routemux \
   --tls-key  /etc/ssl/key.pem \
   --port 443 \
   --route / --dest http://localhost:8080/
+
+# Load-balanced route
+routemux \
+  --route /api/ \
+  --dest "http://localhost:3000/ weight=2" \
+  --dest "http://localhost:3001/" \
+  --load-balancer-mode round-robin
+
+# Static response
+routemux \
+  --route /health/ --dest "STATUS 200 healthy" \
+  --route /api/    --dest http://localhost:3000/
 ```
 
 ---
@@ -255,6 +294,61 @@ routes:
 | `X-Forwarded-For` | Behaviour depends on `trust-client-headers` (see below). `delete-header: X-Forwarded-For` suppresses it entirely. |
 | `X-Forwarded-Host` | Set to original client `Host` when `trust-client-headers: false`. Left untouched when `true`. |
 | `X-Forwarded-Proto` | Set from actual TLS state when `trust-client-headers: false`. Left untouched when `true`. |
+
+---
+
+## Load Balancing
+
+A route can proxy to multiple upstream destinations. RouteMUX selects an upstream for each request using the configured mode and weights.
+
+```yaml
+routes:
+  /api/:
+    dest:
+      - http://localhost:3000/          # weight defaults to 1
+      - http://localhost:3001/ weight=3 # gets 3x the traffic
+      - http://localhost:3002/ weight=1
+    load-balancer-mode: round-robin     # or "random" (default)
+```
+
+### Modes
+
+| Mode | Behaviour |
+|------|-----------|
+| `random` (default) | Each request picks an upstream randomly, proportional to weight |
+| `round-robin` | Requests cycle through upstreams in order, proportional to weight |
+
+### Weights
+
+The optional `weight=N` suffix on each dest entry controls relative traffic share. Omitting it defaults to `weight=1`. An upstream with `weight=3` receives three times as many requests as one with `weight=1`.
+
+> **Single upstream:** when only one dest is configured, the picker is bypassed entirely — no random number or lock is involved, so there is zero overhead in this plain route.
+
+---
+
+## Static Responses (`STATUS`)
+
+A route can return a fixed HTTP response directly from RouteMUX without forwarding to any upstream. Useful for health check endpoints, maintenance pages, or explicitly blocking paths.
+
+```yaml
+routes:
+  /health/:
+    dest: STATUS 200 healthy
+
+  /maintenance/:
+    dest: STATUS 503 Service Unavailable
+
+  /ping/:
+    dest: STATUS 204        # empty body
+```
+
+The format is `STATUS <code> [text]` where:
+- `<code>` is any valid HTTP status code (100–599)
+- `[text]` is an optional response body (empty is fine)
+
+Auth still applies to STATUS routes — a route with `global-auth` or per-route `auth` will require credentials before returning the static response.
+
+STATUS is only valid as a single `dest` string. Mixing STATUS with other upstreams in a list is an error.
 
 ---
 
