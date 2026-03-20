@@ -47,6 +47,7 @@ type RouteConfig struct {
 	DeleteHeaders      []string          // headers to remove from upstream request
 	DeleteHasWildcard  bool              // true if any DeleteHeaders entry contains '*'
 	AddHasVars         bool              // true if any AddHeaders value contains a '$' variable
+	destEntries        []string          // temporary: accumulates --dest CLI args before parsing
 }
 
 func (c *Config) validate() error {

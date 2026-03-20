@@ -6,8 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
-"github.com/SubhashBose/GoModule-selfupdater"
+	
+	"github.com/SubhashBose/GoPkg-selfupdater"
 )
 
 var version = "1.1"
@@ -150,8 +150,15 @@ func applyCLI(cfg *Config, rawArgs []string) error {
 	var curPath string
 	var curRoute *RouteConfig
 
+	var flushErr error
 	flush := func() {
 		if curPath != "" && curRoute != nil {
+			if len(curRoute.destEntries) > 0 {
+				if err := applyDestEntries(curRoute, curRoute.destEntries, curPath); err != nil {
+					flushErr = fmt.Errorf("--dest: %w", err)
+					return
+				}
+			}
 			cfg.Routes[curPath] = curRoute
 		}
 	}
@@ -205,6 +212,9 @@ func applyCLI(cfg *Config, rawArgs []string) error {
 			i += 2
 		case "--route":
 			flush() // save previous route
+			if flushErr != nil {
+				return flushErr
+			}
 			if i+1 >= len(args) {
 				return fmt.Errorf("--route requires a value")
 			}
@@ -223,9 +233,8 @@ func applyCLI(cfg *Config, rawArgs []string) error {
 			if i+1 >= len(args) {
 				return fmt.Errorf("--dest requires a value")
 			}
-			if err := applyDestEntries(curRoute, []string{args[i+1]}, curPath); err != nil {
-				return fmt.Errorf("--dest: %w", err)
-			}
+			// Accumulate entries — repeated --dest builds the upstream list.
+			curRoute.destEntries = append(curRoute.destEntries, args[i+1])
 			i += 2
 		case "--noTLSverify":
 			if curRoute == nil {
@@ -312,6 +321,9 @@ func applyCLI(cfg *Config, rawArgs []string) error {
 		}
 	}
 	flush()
+	if flushErr != nil {
+		return flushErr
+	}
 	return nil
 }
 
@@ -379,7 +391,7 @@ Usage:
 
 Global options:
   --config PATH         Config file (default: `+bindir+` or
-                      ./config.yml or ~/.config/routemux/config.yml)
+                        ./config.yml or ~/.config/routemux/config.yml)
   --listen ADDR         IP address or interface name to listen on (default: all interfaces)
   --port PORT           Port to listen on (default: 8080)
   --tls-cert FILE       TLS certificate file (enables HTTPS)

@@ -1671,3 +1671,70 @@ func TestNormalizeLBMode(t *testing.T) {
 		}
 	}
 }
+func TestCLI_RepeatedDest(t *testing.T) {
+	cfg, err := parseAll([]string{
+		"--route", "/api/",
+		"--dest", "http://localhost:3000/ weight=2",
+		"--dest", "http://localhost:3001/ weight=1",
+		"--load-balancer-mode", "round-robin",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc := cfg.Routes["/api/"]
+	if rc == nil {
+		t.Fatal("route /api/ not found")
+	}
+	if len(rc.Upstreams) != 2 {
+		t.Fatalf("expected 2 upstreams, got %d", len(rc.Upstreams))
+	}
+	if rc.Upstreams[0].URL != "http://localhost:3000/" || rc.Upstreams[0].Weight != 2 {
+		t.Errorf("upstream[0] = %+v", rc.Upstreams[0])
+	}
+	if rc.Upstreams[1].URL != "http://localhost:3001/" || rc.Upstreams[1].Weight != 1 {
+		t.Errorf("upstream[1] = %+v", rc.Upstreams[1])
+	}
+	if rc.LBMode != "round-robin" {
+		t.Errorf("LBMode = %q, want round-robin", rc.LBMode)
+	}
+}
+
+func TestCLI_SingleDest(t *testing.T) {
+	cfg, err := parseAll([]string{
+		"--route", "/api/",
+		"--dest", "http://localhost:3000/",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc := cfg.Routes["/api/"]
+	if len(rc.Upstreams) != 1 {
+		t.Fatalf("expected 1 upstream, got %d", len(rc.Upstreams))
+	}
+	if rc.Upstreams[0].URL != "http://localhost:3000/" {
+		t.Errorf("upstream URL = %q", rc.Upstreams[0].URL)
+	}
+	if rc.Upstreams[0].ParsedURL == nil {
+		t.Error("ParsedURL should not be nil")
+	}
+}
+
+func TestCLI_StatusDest(t *testing.T) {
+	cfg, err := parseAll([]string{
+		"--route", "/health/",
+		"--dest", "STATUS 200 healthy",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc := cfg.Routes["/health/"]
+	if rc.StatusCode != 200 {
+		t.Errorf("StatusCode = %d, want 200", rc.StatusCode)
+	}
+	if rc.StatusText != "healthy" {
+		t.Errorf("StatusText = %q, want healthy", rc.StatusText)
+	}
+	if len(rc.Upstreams) != 0 {
+		t.Error("STATUS route should have no upstreams")
+	}
+}
