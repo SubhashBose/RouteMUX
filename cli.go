@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/SubhashBose/GoModule-selfupdater"
 )
 
 // parseAll merges config file + CLI args into a final Config.
@@ -18,7 +20,7 @@ func parseAll(args []string) (*Config, error) {
 	skipConfig := false
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
-		case "--help", "-h":
+		case "--help", "-h", "--upgrade":
 			skipConfig = true
 		case "--config":
 			if i+1 < len(args) {
@@ -286,6 +288,9 @@ func applyCLI(cfg *Config, rawArgs []string) error {
 			}
 			curRoute.Timeout = args[i+1]
 			i += 2
+		case "--upgrade":
+			runUpgrade()
+			os.Exit(0)
 		case "--help", "-h":
 			printHelp()
 			os.Exit(0)
@@ -311,6 +316,38 @@ func parseAuthString(s string) (*Auth, error) {
 		return nil, fmt.Errorf("expected USER:PASSWORD, got %q", s)
 	}
 	return &Auth{User: parts[0], Password: parts[1]}, nil
+}
+
+func runUpgrade(){
+	cfg := selfupdate.Config{
+		RepoURL:        "https://github.com/SubhashBose/RouteMUX",
+		BinaryPrefix:   "routemux-",
+		OSSep:          "-",
+		CurrentVersion: version, // your build-time var
+	}
+
+	fmt.Printf("Current version: %s\nChecking for updates…", version)
+ 
+	res, err := selfupdate.Update(cfg)
+
+	if res.LatestVersion != "" {
+		fmt.Printf(" Latest version: %s\n", res.LatestVersion)
+	} else {
+		fmt.Printf("\n")
+	}
+	
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Update failed:", err)
+		os.Exit(1)
+	}
+ 
+	if !res.Updated {
+		fmt.Printf("Already up to date (latest: %s)\n", res.LatestVersion)
+		return
+	}
+ 
+	fmt.Printf("Successfully updated to v%s (asset: %s)\nPlease restart any running instances of the program.\n",
+		res.LatestVersion, res.AssetName)
 }
 
 func printHelp() {
@@ -346,6 +383,10 @@ Route options (must follow --route PATH):
   --add-header K:V    Add/overwrite a header on upstream request (repeatable)
   --delete-header K   Delete a header from the upstream request (repeatable)
                       Can take wildcards (e.g. --delete-header *cookie*)
+
+Other flags:
+  --help, -h          Show this help
+  --upgrade           Self-upgrade RouteMUX to the latest version
 
 Sets of --route followed by route options can be repeated to define multiple routes.
 Options in command line and config.yml file are combined, where command line options takes precedence.
