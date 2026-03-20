@@ -24,7 +24,7 @@ jobs:
       - name: Extract version from main.go
         id: extract_version
         run: |
-          version=$(grep -oP 'var version\s*=\s*"\K[^"]+' main.go)
+          version=$(grep -oP 'var version\s*=\s*"\K[^"]+' cli.go)
           echo "version=$version" >> $GITHUB_OUTPUT
 
       - name: Resolve tag (auto-increment patch if tag exists)
