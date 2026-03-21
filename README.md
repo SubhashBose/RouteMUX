@@ -8,7 +8,7 @@ A lightweight, flexible reverse proxy written in Go. Routes HTTP and WebSocket t
 - **HTTP & WebSocket** — transparently proxies both HTTP and WebSocket connections
 - **TLS termination** — serve HTTPS with your own certificate; connect to HTTPS upstreams with optional verification skip
 - **HTTP Basic Auth** — global auth for all routes, per-route override, or explicit disable
-- **Header manipulation** — add, overwrite, or delete upstream request headers per route, with wildcard support (`CF-*`, `X-*`) and variable interpolation (`$remote_addr`, `$header.User-Agent`, etc.)
+- **Header manipulation** — add, overwrite, or delete upstream request headers per route, with wildcard support (`CF-*`, `X-*`) and variable interpolation (`${remote_addr}`, `${header.User-Agent}`, etc.)
 - **Config file + CLI** — configure via `config.yml`, command-line flags, or both; CLI takes precedence
 - **Trusted proxy support** — `trust-client-headers` mode for deployments behind an upstream proxy
 - **Load balancing** — weighted random or weighted round-robin across multiple upstream destinations
@@ -71,6 +71,7 @@ routes:
     # auth: []                         # Explicitly disable auth for this route
     add-header:
       X-Proxy: RouteMUX               # Add or overwrite a header sent to upstream
+      X-Built-URL: ${scheme}://${header.host}${request_uri} #combined text and variable
     delete-header:
       - Cookie                         # Delete a specific header
       - CF-*                           # Delete all headers matching wildcard
@@ -126,7 +127,7 @@ Route options must follow `--route`. The `--route` + route options block can be 
 | `--auth USER:PASS` | Per-route Basic Auth (overrides `--global-auth`) |
 | `--auth ""` | Explicitly disable auth for this route |
 | `--timeout DURATION` | Upstream request timeout (e.g. `30s`, `2m`) |
-| `--add-header "Name: Value"` | Add or overwrite a header (repeatable) |
+| `--add-header "Name: Value"` | Add or overwrite a header (repeatable). Value be plain text, supported variables or combination of both |
 | `--delete-header NAME` | Delete a header (repeatable, supports wildcards) |
 
 ### Other flags
@@ -159,7 +160,8 @@ routemux \
   --add-header "X-Internal: true" \
   --delete-header "Cookie" \
   --delete-header "CF-*" \
-  --add-header 'X-Original-UA: $header.User-Agent'
+  --add-header 'X-Original-UA: ${header.User-Agent}' \
+  --add-header 'X-Built-URL: ${scheme}://${header.host}${request_uri}'
 
 # HTTPS termination
 routemux \
@@ -254,33 +256,35 @@ Wildcard matching is **case-insensitive**.
 
 ### Variables in `add-header`
 
-Header values can reference request properties using `$variable` syntax. Variables are only resolved when at least one `add-header` value contains `$` — routes without variables take a zero-overhead fast path.
+Header values can reference request properties using `${variable}` syntax, and multiple variable and text can be combined to form the value, i.e, `${var1}text${var2}`. Values are syntex parsed upfront when loading configuration. Variables are only resolved when at least one `add-header` is parsed to have variables — routes without variables take a zero-overhead fast path.
 
 | Variable | Value |
 |----------|-------|
-| `$remote_addr` | Client IP address (no port) |
-| `$remote_port` | Client port |
-| `$scheme` | Request scheme — `http` or `https` |
-| `$request_uri` | Full request URI including query string |
-| `$header.Name` | Value of any client request header by name |
-| `$header.Host` | Original client `Host` header |
+| `${remote_addr}` | Client IP address (no port) |
+| `${remote_port}` | Client port |
+| `${scheme}` | Request scheme — `http` or `https` |
+| `${request_uri}` | Full request URI including query string |
+| `${header.Name}` | Value of any client request header by name |
+| `${header.Host}` | Original client `Host` header |
 
-Use `\$` to send a literal dollar sign (e.g. `\$remote_addr` → `$remote_addr`).
+Use `\${` to send a literal  sign (e.g. `\${remote_addr}` → `${remote_addr}`). Non-existent variable or unclosed `${` will be treated as plain string
 
 ```yaml
 routes:
   /api/:
     dest: http://localhost:3000/
     add-header:
-      X-Real-IP:      $remote_addr          # client IP
-      X-Real-Port:    $remote_port          # client port
-      X-Scheme:       $scheme               # http or https
-      X-Request-URI:  $request_uri          # full URI with query string
-      X-Original-Host: $header.Host        # original Host header
-      X-Original-UA:  $header.User-Agent   # copy any client header
-      X-Literal:      \$remote_addr        # literal "$remote_addr"
+      X-Real-IP:       ${remote_addr}          # client IP
+      X-Real-Port:     ${remote_port}          # client port
+      X-Scheme:        ${scheme}               # http or https
+      X-Request-URI:   ${request_uri}          # full URI with query string
+      X-Original-Host: ${header.Host}          # original Host header
+      X-Original-UA:   ${header.User-Agent}    # copy any client header
+      X-Literal:       \${remote_addr}         # literal "$remote_addr"
+      X-Built-URL:     ${scheme}://${header.host}${request_uri}  # combining variable and strings
+      X-Text:          Plain text content
     delete-header:
-      - User-Agent    # deleted from upstream — but $header.User-Agent
+      - User-Agent    # deleted from upstream — but ${header.User-Agent}
                       # still captures the original value
 ```
 

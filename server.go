@@ -170,16 +170,16 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 			}
 
 			// Snapshot original client headers before any modification when variables
-			// are in use — $header.X must reflect what the client sent, not the
+			// are in use — {header.X} must reflect what the client sent, not the
 			// post-modification state. Host is injected explicitly since Go never
 			// puts it in req.Header.
 			var originalHeaders http.Header
-			if rc.AddHasVars {
+			if rc.NeedsOriginal {
 				originalHeaders = req.Header.Clone()
 				originalHeaders.Set("Host", req.Host)
 			}
 
-			// Parse client address once — reused for XFF and $remote_addr/$remote_port variables.
+			// Parse client address once — reused for XFF and {remote_addr}/{remote_port} variables.
 			clientIP, clientPort, _ := net.SplitHostPort(req.RemoteAddr)
 
 			// X-Forwarded-* handling depends on trust-client-headers setting.
@@ -230,27 +230,25 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 			}
 			applyDeleteHeaders(req.Header, rc.DeleteHeaders, rc.DeleteHasWildcard)
 
-			if rc.AddHasVars {
-				// Slow path — resolve variables in header values.
-				// clientIP and clientPort already parsed above — reused here.
-				scheme := schemeOf(req)
-				requestURI := req.RequestURI
-				for name, val := range rc.AddHeaders {
-					resolved := resolveHeaderValue(val, clientIP, clientPort, scheme, requestURI, originalHeaders)
+			// Apply add-headers. Each parsedHeaderValue was compiled at startup;
+			// eval() is a simple segment walk — no string parsing at request time.
+			// Constant values (no variables) return directly with no allocation.
+			// scheme and requestURI are only computed when at least one header
+			// value contains a variable (AddHasVars), avoiding unnecessary work
+			// for routes with all plain-string add-headers.
+			if len(rc.ParsedAddHeaders) > 0 {
+				var scheme, requestURI string
+				if rc.AddHasVars {
+					scheme = schemeOf(req)
+					requestURI = req.RequestURI
+				}
+				for name, ph := range rc.ParsedAddHeaders {
+					resolved := ph.eval(clientIP, clientPort, scheme, requestURI, originalHeaders)
 					if strings.EqualFold(name, "host") {
 						req.Host = resolved
 						continue
 					}
 					req.Header.Set(name, resolved)
-				}
-			} else {
-				// Fast path — plain values, no variable resolution.
-				for name, val := range rc.AddHeaders {
-					if strings.EqualFold(name, "host") {
-						req.Host = val
-						continue
-					}
-					req.Header.Set(name, val)
 				}
 			}
 		},

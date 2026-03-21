@@ -123,30 +123,31 @@ func serveWebSocket(w http.ResponseWriter, r *http.Request, destURL *url.URL, ro
 		outHeaders.Del("Authorization")
 	}
 	applyDeleteHeaders(outHeaders, rc.DeleteHeaders, rc.DeleteHasWildcard)
-	if rc.AddHasVars {
+	if len(rc.ParsedAddHeaders) > 0 {
 		// clientIP and clientPort already parsed above — reused here.
-		scheme := "ws"
-		if destURL.Scheme == "wss" || destURL.Scheme == "https" {
-			scheme = "wss"
+		// scheme and requestURI only computed when a variable header is present.
+		var scheme, requestURI string
+		if rc.AddHasVars {
+			scheme = "ws"
+			if destURL.Scheme == "wss" || destURL.Scheme == "https" {
+				scheme = "wss"
+			}
+			requestURI = r.RequestURI
 		}
-		// Build snapshot with Host injected so $header.Host works.
-		originalWS := r.Header.Clone()
-		originalWS.Set("Host", r.Host)
-		for name, val := range rc.AddHeaders {
-			resolved := resolveHeaderValue(val, clientIP, clientPort, scheme, r.RequestURI, originalWS)
+		// Build snapshot with Host injected so ${header.Host} works.
+		// Only needed when at least one header references ${header.X}.
+		var originalWS http.Header
+		if rc.NeedsOriginal {
+			originalWS = r.Header.Clone()
+			originalWS.Set("Host", r.Host)
+		}
+		for name, ph := range rc.ParsedAddHeaders {
+			resolved := ph.eval(clientIP, clientPort, scheme, requestURI, originalWS)
 			if strings.EqualFold(name, "host") {
 				outHost = resolved // overwrite the default/delete-derived host
 				continue
 			}
 			outHeaders.Set(name, resolved)
-		}
-	} else {
-		for name, val := range rc.AddHeaders {
-			if strings.EqualFold(name, "host") {
-				outHost = val // overwrite the default/delete-derived host
-				continue
-			}
-			outHeaders.Set(name, val)
 		}
 	}
 	// Write the final Host (default, delete-derived, or add-header override).
