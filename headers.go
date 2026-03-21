@@ -93,57 +93,188 @@ func (t *xffRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	return t.base.RoundTrip(req)
 }
 
-// hasVarValues returns true if any value in the map starts with '$' or '\$',
-// indicating a variable reference or escape sequence that needs processing.
-// Called once at config load time.
-func hasVarValues(headers map[string]string) bool {
-	for _, v := range headers {
-		if strings.HasPrefix(v, "$") || strings.HasPrefix(v, `\$`) {
+// ---- Parsed header value system ----
+//
+// add-header values are compiled once at config load time into a slice of
+// segments. At request time, evaluation is a simple linear scan with no
+// string parsing — just concatenation of literals and resolved variables.
+//
+// Syntax:  ${variable}       variable reference
+//          \${...}           escaped — emits a literal ${...}
+//          anything else     literal text (no quoting needed in YAML)
+//
+// Supported variables:
+//   ${remote_addr}    client IP (no port)
+//   ${remote_port}    client port
+//   ${scheme}         http or https
+//   ${request_uri}    full URI including query string
+//   ${header.Name}    value of Name from original client headers
+//
+// Unknown ${variables} pass through as the literal text "${variable}".
+// Unmatched ${ (no closing }) is treated as literal text.
+
+type segKind int
+
+const (
+	segLiteral    segKind = iota
+	segRemoteAddr         // ${remote_addr}
+	segRemotePort         // ${remote_port}
+	segScheme             // ${scheme}
+	segRequestURI         // ${request_uri}
+	segHeaderName         // ${header.Name} — carries the header name in seg.value
+)
+
+type segment struct {
+	kind  segKind
+	value string // literal text or header name for segHeaderName
+}
+
+// parsedHeaderValue is the compiled form of a single add-header value.
+// If isConst is true, the value is a plain string in segments[0].value
+// and eval returns it directly with no allocation.
+type parsedHeaderValue struct {
+	segments []segment
+	isConst  bool
+}
+
+// compileHeaderValue parses a raw add-header value string into a
+// parsedHeaderValue. Called once per header at config load / CLI parse time.
+func compileHeaderValue(raw string) parsedHeaderValue {
+	var segs []segment
+
+	appendLit := func(lit string) {
+		if lit == "" {
+			return
+		}
+		if len(segs) > 0 && segs[len(segs)-1].kind == segLiteral {
+			segs[len(segs)-1].value += lit
+		} else {
+			segs = append(segs, segment{kind: segLiteral, value: lit})
+		}
+	}
+
+	s := raw
+	for len(s) > 0 {
+		// Find next ${ marker
+		idx := strings.Index(s, "${")
+		if idx < 0 {
+			// No more variable markers — rest is literal
+			appendLit(s)
+			break
+		}
+		// Check for escape \${
+		if idx > 0 && s[idx-1] == '\\' {
+			// Everything before the backslash + literal ${ 
+			appendLit(s[:idx-1] + "${")
+			s = s[idx+2:] // skip past ${
+			continue
+		}
+		// Emit literal text before ${
+		appendLit(s[:idx])
+		s = s[idx+2:] // skip past ${
+		// Find matching }
+		close := strings.IndexByte(s, '}')
+		if close < 0 {
+			// Unmatched ${ — treat as literal
+			appendLit("${")
+			continue
+		}
+		varName := s[:close]
+		s = s[close+1:] // skip past }
+		seg := resolveVarName(varName)
+		if len(segs) > 0 && seg.kind == segLiteral && segs[len(segs)-1].kind == segLiteral {
+			segs[len(segs)-1].value += seg.value
+		} else {
+			segs = append(segs, seg)
+		}
+	}
+	if len(segs) == 0 {
+		segs = []segment{{kind: segLiteral, value: ""}}
+	}
+	isConst := len(segs) == 1 && segs[0].kind == segLiteral
+	return parsedHeaderValue{segments: segs, isConst: isConst}
+}
+
+// resolveVarName maps a variable name (inside {}) to a segment.
+// Unknown names become literal text "{name}".
+func resolveVarName(name string) segment {
+	switch name {
+	case "remote_addr":
+		return segment{kind: segRemoteAddr}
+	case "remote_port":
+		return segment{kind: segRemotePort}
+	case "scheme":
+		return segment{kind: segScheme}
+	case "request_uri":
+		return segment{kind: segRequestURI}
+	}
+	if strings.HasPrefix(name, "header.") {
+		return segment{kind: segHeaderName, value: name[len("header."):]}
+	}
+	// Unknown variable — pass through as literal ${name}
+	return segment{kind: segLiteral, value: "${" + name + "}"}
+}
+
+// eval resolves a parsedHeaderValue against the current request context.
+// For constant values (isConst == true) this is a single field read — no
+// allocation, no iteration.
+func (ph parsedHeaderValue) eval(clientIP, clientPort, scheme, requestURI string, original http.Header) string {
+	if ph.isConst {
+		return ph.segments[0].value
+	}
+	var b strings.Builder
+	for _, seg := range ph.segments {
+		switch seg.kind {
+		case segLiteral:
+			b.WriteString(seg.value)
+		case segRemoteAddr:
+			b.WriteString(clientIP)
+		case segRemotePort:
+			b.WriteString(clientPort)
+		case segScheme:
+			b.WriteString(scheme)
+		case segRequestURI:
+			b.WriteString(requestURI)
+		case segHeaderName:
+			b.WriteString(original.Get(seg.value))
+		}
+	}
+	return b.String()
+}
+
+// compiledHeaders compiles a map of raw add-header strings into
+// parsedHeaderValues. Called once at config load / CLI parse time.
+func compiledHeaders(raw map[string]string) map[string]parsedHeaderValue {
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make(map[string]parsedHeaderValue, len(raw))
+	for k, v := range raw {
+		out[k] = compileHeaderValue(v)
+	}
+	return out
+}
+
+// hasNonConstHeader returns true if any header value contains any variable
+// reference. Used to decide whether to compute scheme/URI at request time.
+func hasNonConstHeader(headers map[string]parsedHeaderValue) bool {
+	for _, ph := range headers {
+		if !ph.isConst {
 			return true
 		}
 	}
 	return false
 }
 
-// resolveHeaderValue resolves a single add-header value against the request.
-//
-// Rules:
-//   - Plain value (no leading '$')  → returned as-is
-//   - '\$...'                        → escaped, returns the literal '$...' string
-//   - '$remote_addr'                 → client IP (no port)
-//   - '$remote_port'                 → client port
-//   - '$scheme'                      → "http" or "https"
-//   - '$request_uri'                 → full request URI including query string
-//   - '$header.Name'                 → value of Name from the original (pre-modification)
-//                                      client headers; empty string if absent
-//   - Unknown '$...' variable        → passed through as a literal string
-//
-// original must be a snapshot of req.Header taken before any modifications
-// (auth strip, delete-header, etc.) so that $header.X always reflects what
-// the client actually sent, regardless of delete-header config.
-func resolveHeaderValue(val string, clientIP, clientPort, scheme, requestURI string, original http.Header) string {
-	// Escaped dollar must be checked before the plain-value early exit,
-	// since \$foo starts with '\' not '$'.
-	if strings.HasPrefix(val, `\$`) {
-		return val[1:] // strip the backslash, return literal $foo
+// hasHeaderNameVar returns true if any header value references ${header.X},
+// which requires a snapshot of the original client headers at request time.
+func hasHeaderNameVar(headers map[string]parsedHeaderValue) bool {
+	for _, ph := range headers {
+		for _, seg := range ph.segments {
+			if seg.kind == segHeaderName {
+				return true
+			}
+		}
 	}
-	if !strings.HasPrefix(val, "$") {
-		return val
-	}
-	switch val {
-	case "$remote_addr":
-		return clientIP
-	case "$remote_port":
-		return clientPort
-	case "$scheme":
-		return scheme
-	case "$request_uri":
-		return requestURI
-	}
-	if strings.HasPrefix(val, "$header.") {
-		name := val[len("$header."):]
-		return original.Get(name) // empty string if header absent
-	}
-	// Unknown variable — pass through as literal so config errors are visible.
-	return val
+	return false
 }

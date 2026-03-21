@@ -10,7 +10,7 @@ import (
 	"github.com/SubhashBose/GoPkg-selfupdater"
 )
 
-var version = "1.1"
+var version = "1.2"
 
 // parseAll merges config file + CLI args into a final Config.
 // CLI args take precedence over config file.
@@ -272,12 +272,19 @@ func applyCLI(cfg *Config, rawArgs []string) error {
 			if err != nil {
 				return fmt.Errorf("--add-header: %w", err)
 			}
-			if curRoute.AddHeaders == nil {
-				curRoute.AddHeaders = map[string]string{}
+			if curRoute.ParsedAddHeaders == nil {
+				curRoute.ParsedAddHeaders = map[string]parsedHeaderValue{}
 			}
-			curRoute.AddHeaders[name] = val
-			if strings.HasPrefix(val, "$") || strings.HasPrefix(val, `\$`) {
+			ph := compileHeaderValue(val)
+			curRoute.ParsedAddHeaders[name] = ph
+			if !ph.isConst {
 				curRoute.AddHasVars = true
+			}
+			for _, seg := range ph.segments {
+				if seg.kind == segHeaderName {
+					curRoute.NeedsOriginal = true
+					break
+				}
 			}
 			i += 2
 		case "--delete-header":
@@ -411,8 +418,9 @@ Route options (must follow --route PATH):
   --auth U:P            Per-route Basic Auth (overrides global-auth; "" disables auth)
   --timeout DURATION    Upstream timeout (e.g. 30s, 2m)
   --add-header K:V      Add/overwrite a header on upstream request (repeatable)
+                        Can be combination of variables and text
   --delete-header K     Delete a header from the upstream request (repeatable)
-                      Can take wildcards (e.g. --delete-header *cookie*)
+                        Can take wildcards (e.g. --delete-header *cookie*)
 
 Other flags:
   --help, -h            Show this help
@@ -439,7 +447,7 @@ Config file (config.yml) example:
       timeout: 30s
       add-header:
         User-Agent: RouteMUX
-        X-Internal-Token: TOKEN
+        X-Built-URL: ${scheme}://${header.host}${request_uri}
       delete-header:
         - *cookie*
         - Authorization
@@ -451,11 +459,12 @@ Config file (config.yml) example:
     "/health/":
       dest: STATUS 200 Health is ok
 
-The 'add-header' values can be static strings or the following supported variables:
-  $remote_addr: client IP (no port)
-  $remote_port: client port
-  $scheme: "http" or "https"
-  $request_uri: full request URI including query string
-  $header.Name: value of 'Name' from the original client headers
+The 'add-header' values can be static strings or the following supported variables,
+it can be a combination of variables and text as well:
+  ${remote_addr}: client IP (no port)
+  ${remote_port}: client port
+  ${scheme}: "http" or "https"
+  ${request_uri}: full request URI including query string
+  ${header.Name}: value of 'Name' from the original client headers
 `)
 }

@@ -43,10 +43,11 @@ type RouteConfig struct {
 	Auth               *Auth             // nil = inherit global-auth; explicitly cleared = no auth
 	AuthExplicit       bool              // true when auth was set explicitly (even as empty)
 	Timeout            string            // e.g. "30s", "2m"
-	AddHeaders         map[string]string // headers to add/overwrite on upstream request
+	ParsedAddHeaders   map[string]parsedHeaderValue // compiled add-header values (parsed at startup)
+	NeedsOriginal      bool              // true if any header value references ${header.X}
+	AddHasVars         bool              // true if any header value contains a variable (non-const)
 	DeleteHeaders      []string          // headers to remove from upstream request
 	DeleteHasWildcard  bool              // true if any DeleteHeaders entry contains '*'
-	AddHasVars         bool              // true if any AddHeaders value contains a '$' variable
 	destEntries        []string          // temporary: accumulates --dest CLI args before parsing
 }
 
@@ -181,11 +182,11 @@ func loadConfigFile(path string) (*Config, error) {
 			Timeout:           fr.Timeout,
 			LBMode:            normalizeLBMode(fr.LBMode),
 			AuthExplicit:      fr.authPresent,
-			AddHeaders:        fr.AddHeaders,
+			ParsedAddHeaders:  compiledHeaders(fr.AddHeaders),
 			DeleteHeaders:     fr.DeleteHeaders,
 			DeleteHasWildcard: hasWildcard(fr.DeleteHeaders),
-			AddHasVars:        hasVarValues(fr.AddHeaders),
 		}
+		rc.NeedsOriginal = hasNonConstHeader(rc.ParsedAddHeaders)
 		// Parse dest entries into Upstreams or StatusCode/StatusText.
 		if err := applyDestEntries(rc, fr.Dest.entries, path); err != nil {
 			return nil, err

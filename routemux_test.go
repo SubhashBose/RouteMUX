@@ -12,6 +12,16 @@ import (
 )
 
 
+
+// evalConst returns the constant value of a parsedHeaderValue for testing.
+// Panics if the value contains variables (use in tests that only test plain values).
+func evalConst(ph parsedHeaderValue) string {
+	if !ph.isConst {
+		panic("evalConst called on non-const parsedHeaderValue")
+	}
+	return ph.segments[0].value
+}
+
 // mustUpstream parses a URL at test time and returns a ready Upstream.
 func mustUpstream(rawURL string, weight int) Upstream {
 	parsed, err := url.Parse(rawURL)
@@ -547,7 +557,7 @@ func TestRouteHandler_AddHeader(t *testing.T) {
 		Routes: map[string]*RouteConfig{
 			"/api/": {
 				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
-				AddHeaders: map[string]string{"User-Agent": "RouteMUX", "X-Custom": "hello"},
+				ParsedAddHeaders: map[string]parsedHeaderValue{"User-Agent": compileHeaderValue("RouteMUX"), "X-Custom": compileHeaderValue("hello")},
 			},
 		},
 	}
@@ -645,7 +655,7 @@ func TestRouteHandler_AddAndDeleteOrder(t *testing.T) {
 			"/api/": {
 				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
 				DeleteHeaders: []string{"User-Agent"},
-				AddHeaders:    map[string]string{"User-Agent": "RouteMUX"},
+				ParsedAddHeaders: map[string]parsedHeaderValue{"User-Agent": compileHeaderValue("RouteMUX")},
 			},
 		},
 	}
@@ -679,11 +689,11 @@ func TestCLI_AddDeleteHeaders(t *testing.T) {
 	if r == nil {
 		t.Fatal("route missing")
 	}
-	if r.AddHeaders["User-Agent"] != "RouteMUX" {
-		t.Errorf("User-Agent = %q", r.AddHeaders["User-Agent"])
+	if evalConst(r.ParsedAddHeaders["User-Agent"]) != "RouteMUX" {
+		t.Errorf("User-Agent = %q", evalConst(r.ParsedAddHeaders["User-Agent"]))
 	}
-	if r.AddHeaders["X-Env"] != "production" {
-		t.Errorf("X-Env = %q", r.AddHeaders["X-Env"])
+	if evalConst(r.ParsedAddHeaders["X-Env"]) != "production" {
+		t.Errorf("X-Env = %q", evalConst(r.ParsedAddHeaders["X-Env"]))
 	}
 	if len(r.DeleteHeaders) != 2 {
 		t.Errorf("DeleteHeaders = %v", r.DeleteHeaders)
@@ -722,11 +732,11 @@ routes:
 	if r == nil {
 		t.Fatal("/api/ route missing")
 	}
-	if r.AddHeaders["User-Agent"] != "RouteMUX" {
-		t.Errorf("User-Agent = %q", r.AddHeaders["User-Agent"])
+	if evalConst(r.ParsedAddHeaders["User-Agent"]) != "RouteMUX" {
+		t.Errorf("User-Agent = %q", evalConst(r.ParsedAddHeaders["User-Agent"]))
 	}
-	if r.AddHeaders["X-Env"] != "production" {
-		t.Errorf("X-Env = %q", r.AddHeaders["X-Env"])
+	if evalConst(r.ParsedAddHeaders["X-Env"]) != "production" {
+		t.Errorf("X-Env = %q", evalConst(r.ParsedAddHeaders["X-Env"]))
 	}
 	if len(r.DeleteHeaders) != 2 {
 		t.Errorf("DeleteHeaders = %v", r.DeleteHeaders)
@@ -748,7 +758,7 @@ func TestRouteHandler_AddHostHeader(t *testing.T) {
 		Routes: map[string]*RouteConfig{
 			"/api/": {
 				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
-				AddHeaders: map[string]string{"Host": "custom.example.com"},
+				ParsedAddHeaders: map[string]parsedHeaderValue{"Host": compileHeaderValue("custom.example.com")},
 			},
 		},
 	}
@@ -896,7 +906,7 @@ func TestRouteHandler_ProxyAuthWithAddHeaderAuthOverride(t *testing.T) {
 		Routes: map[string]*RouteConfig{
 			"/api/": {
 				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
-				AddHeaders: map[string]string{"Authorization": "Bearer upstream-token"},
+				ParsedAddHeaders: map[string]parsedHeaderValue{"Authorization": compileHeaderValue("Bearer upstream-token")},
 			},
 		},
 	}
@@ -1084,75 +1094,130 @@ func TestHasWildcard(t *testing.T) {
 }
 // ---- Variable resolution tests ----
 
-func TestResolveHeaderValue_PlainValue(t *testing.T) {
-	orig := http.Header{"User-Agent": []string{"TestBrowser"}}
-	got := resolveHeaderValue("plain-value", "1.2.3.4", "54321", "https", "/path?q=1", orig)
-	if got != "plain-value" {
+
+// ---- Variable (compiled header value) tests ----
+
+func evalHeader(raw, clientIP, clientPort, scheme, requestURI string, orig http.Header) string {
+	ph := compileHeaderValue(raw)
+	return ph.eval(clientIP, clientPort, scheme, requestURI, orig)
+}
+
+func TestCompile_PlainValue(t *testing.T) {
+	ph := compileHeaderValue("plain-value")
+	if !ph.isConst {
+		t.Error("plain value should be const")
+	}
+	if got := evalHeader("plain-value", "1.2.3.4", "54321", "https", "/", nil); got != "plain-value" {
 		t.Errorf("got %q, want plain-value", got)
 	}
 }
 
-func TestResolveHeaderValue_EscapedDollar(t *testing.T) {
-	orig := http.Header{}
-	got := resolveHeaderValue(`\$remote_addr`, "1.2.3.4", "54321", "https", "/", orig)
-	if got != "$remote_addr" {
-		t.Errorf("got %q, want literal $remote_addr", got)
+func TestCompile_EscapedBrace(t *testing.T) {
+	// \${ should produce a literal ${
+	got := evalHeader(`\${scheme}`, "1.2.3.4", "54321", "https", "/", nil)
+	if got != "${scheme}" {
+		t.Errorf("got %q, want ${scheme}", got)
 	}
 }
 
-func TestResolveHeaderValue_RemoteAddr(t *testing.T) {
-	orig := http.Header{}
-	got := resolveHeaderValue("$remote_addr", "1.2.3.4", "54321", "https", "/", orig)
+func TestCompile_RemoteAddr(t *testing.T) {
+	got := evalHeader("${remote_addr}", "1.2.3.4", "54321", "https", "/", nil)
 	if got != "1.2.3.4" {
 		t.Errorf("got %q, want 1.2.3.4", got)
 	}
 }
 
-func TestResolveHeaderValue_RemotePort(t *testing.T) {
-	orig := http.Header{}
-	got := resolveHeaderValue("$remote_port", "1.2.3.4", "54321", "https", "/", orig)
+func TestCompile_RemotePort(t *testing.T) {
+	got := evalHeader("${remote_port}", "1.2.3.4", "54321", "https", "/", nil)
 	if got != "54321" {
 		t.Errorf("got %q, want 54321", got)
 	}
 }
 
-func TestResolveHeaderValue_Scheme(t *testing.T) {
-	orig := http.Header{}
-	got := resolveHeaderValue("$scheme", "1.2.3.4", "54321", "https", "/", orig)
+func TestCompile_Scheme(t *testing.T) {
+	got := evalHeader("${scheme}", "1.2.3.4", "54321", "https", "/", nil)
 	if got != "https" {
 		t.Errorf("got %q, want https", got)
 	}
 }
 
-func TestResolveHeaderValue_RequestURI(t *testing.T) {
-	orig := http.Header{}
-	got := resolveHeaderValue("$request_uri", "1.2.3.4", "54321", "http", "/path?foo=bar", orig)
+func TestCompile_RequestURI(t *testing.T) {
+	got := evalHeader("${request_uri}", "1.2.3.4", "54321", "http", "/path?foo=bar", nil)
 	if got != "/path?foo=bar" {
 		t.Errorf("got %q, want /path?foo=bar", got)
 	}
 }
 
-func TestResolveHeaderValue_HeaderVar(t *testing.T) {
+func TestCompile_HeaderVar(t *testing.T) {
 	orig := http.Header{"User-Agent": []string{"TestBrowser/1.0"}}
-	got := resolveHeaderValue("$header.User-Agent", "1.2.3.4", "54321", "http", "/", orig)
+	got := evalHeader("${header.User-Agent}", "1.2.3.4", "54321", "http", "/", orig)
 	if got != "TestBrowser/1.0" {
 		t.Errorf("got %q, want TestBrowser/1.0", got)
 	}
 }
 
-func TestResolveHeaderValue_HeaderVarMissing(t *testing.T) {
+func TestCompile_HeaderVarMissing(t *testing.T) {
 	orig := http.Header{}
-	got := resolveHeaderValue("$header.X-Missing", "1.2.3.4", "54321", "http", "/", orig)
+	got := evalHeader("${header.X-Missing}", "1.2.3.4", "54321", "http", "/", orig)
 	if got != "" {
-		t.Errorf("got %q, want empty string for missing header", got)
+		t.Errorf("got %q, want empty string", got)
 	}
 }
 
-func TestResolveHeaderValue_UnknownVar(t *testing.T) {
+func TestCompile_HeaderHost(t *testing.T) {
+	// {header.Host} works because Host is injected into the snapshot.
 	orig := http.Header{}
-	got := resolveHeaderValue("$unknown_var", "1.2.3.4", "54321", "http", "/", orig)
-	if got != "$unknown_var" {
-		t.Errorf("got %q, want literal $unknown_var", got)
+	orig.Set("Host", "myapp.example.com")
+	got := evalHeader("${header.Host}", "1.2.3.4", "54321", "http", "/", orig)
+	if got != "myapp.example.com" {
+		t.Errorf("got %q, want myapp.example.com", got)
+	}
+}
+
+func TestCompile_UnknownVar(t *testing.T) {
+	// Unknown variable passes through as literal ${unknown_var}
+	got := evalHeader("${unknown_var}", "1.2.3.4", "54321", "http", "/", nil)
+	if got != "${unknown_var}" {
+		t.Errorf("got %q, want ${unknown_var}", got)
+	}
+}
+
+func TestCompile_UnmatchedBrace(t *testing.T) {
+	// Unmatched ${ treated as literal
+	got := evalHeader("prefix${no-close", "1.2.3.4", "54321", "http", "/", nil)
+	if got != "prefix${no-close" {
+		t.Errorf("got %q, want prefix${no-close", got)
+	}
+}
+
+func TestCompile_Concatenation(t *testing.T) {
+	// "{scheme}://{header.Host}:{remote_port}" — the key new feature
+	orig := http.Header{}
+	orig.Set("Host", "example.com")
+	got := evalHeader("${scheme}://${header.Host}:${remote_port}", "1.2.3.4", "8080", "https", "/", orig)
+	if got != "https://example.com:8080" {
+		t.Errorf("got %q, want https://example.com:8080", got)
+	}
+}
+
+func TestCompile_IsConst(t *testing.T) {
+	if !compileHeaderValue("plain").isConst {
+		t.Error("plain string should be const")
+	}
+	if compileHeaderValue("${scheme}").isConst {
+		t.Error("{scheme} should not be const")
+	}
+	if compileHeaderValue("prefix-${scheme}").isConst {
+		t.Error("mixed should not be const")
+	}
+}
+
+func TestHasNonConstHeader(t *testing.T) {
+	if hasNonConstHeader(compiledHeaders(map[string]string{"X-Foo": "bar", "X-Baz": "qux"})) {
+		t.Error("expected false for no variables")
+	}
+	if !hasNonConstHeader(compiledHeaders(map[string]string{"X-Foo": "bar", "X-IP": "${remote_addr}"})) {
+		t.Error("expected true when variable present")
 	}
 }
 
@@ -1168,30 +1233,27 @@ func TestRouteHandler_VarRemoteAddr(t *testing.T) {
 		Port: 8080,
 		Routes: map[string]*RouteConfig{
 			"/api/": {
-				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
-				AddHeaders: map[string]string{"X-Real-IP": "$remote_addr"},
-				AddHasVars: true,
+				Upstreams:        []Upstream{mustUpstream(backend.URL+"/", 1)},
+				ParsedAddHeaders: map[string]parsedHeaderValue{"X-Real-IP": compileHeaderValue("${remote_addr}")},
+				AddHasVars:       true,
+				NeedsOriginal:    false,
 			},
 		},
 	}
 	srv, _ := newServer(cfg)
 	ts := httptest.NewServer(srv.mux)
 	defer ts.Close()
-
 	http.Get(ts.URL + "/api/")
-
 	if gotHeader == "" {
 		t.Error("X-Real-IP should be set to client IP")
 	}
-	// Should be a valid IP (no port)
 	if strings.Contains(gotHeader, ":") {
 		t.Errorf("X-Real-IP should be IP only (no port), got %q", gotHeader)
 	}
 }
 
 func TestRouteHandler_VarHeaderCopiedAfterDelete(t *testing.T) {
-	// Even if User-Agent is deleted, $header.User-Agent should still pass
-	// the original value because we snapshot headers before modification.
+	// Even if User-Agent is deleted, ${header.User-Agent} captures the original.
 	var gotUA, gotUACopy string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotUA = r.Header.Get("User-Agent")
@@ -1204,10 +1266,11 @@ func TestRouteHandler_VarHeaderCopiedAfterDelete(t *testing.T) {
 		Port: 8080,
 		Routes: map[string]*RouteConfig{
 			"/api/": {
-				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
-				DeleteHeaders: []string{"User-Agent"},
-				AddHeaders:    map[string]string{"X-Original-UA": "$header.User-Agent"},
-				AddHasVars:    true,
+				Upstreams:        []Upstream{mustUpstream(backend.URL+"/", 1)},
+				DeleteHeaders:    []string{"User-Agent"},
+				ParsedAddHeaders: map[string]parsedHeaderValue{"X-Original-UA": compileHeaderValue("${header.User-Agent}")},
+				AddHasVars:       true,
+				NeedsOriginal:    true,
 			},
 		},
 	}
@@ -1239,27 +1302,25 @@ func TestRouteHandler_VarScheme(t *testing.T) {
 		Port: 8080,
 		Routes: map[string]*RouteConfig{
 			"/api/": {
-				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
-				AddHeaders: map[string]string{"X-Scheme": "$scheme"},
-				AddHasVars: true,
+				Upstreams:        []Upstream{mustUpstream(backend.URL+"/", 1)},
+				ParsedAddHeaders: map[string]parsedHeaderValue{"X-Scheme": compileHeaderValue("${scheme}")},
+				AddHasVars:       true,
 			},
 		},
 	}
 	srv, _ := newServer(cfg)
 	ts := httptest.NewServer(srv.mux)
 	defer ts.Close()
-
 	http.Get(ts.URL + "/api/")
-
 	if gotScheme != "http" {
 		t.Errorf("X-Scheme = %q, want http", gotScheme)
 	}
 }
 
-func TestRouteHandler_EscapedDollar(t *testing.T) {
+func TestRouteHandler_VarConcatenation(t *testing.T) {
 	var gotHeader string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotHeader = r.Header.Get("X-Literal")
+		gotHeader = r.Header.Get("X-Origin")
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer backend.Close()
@@ -1268,9 +1329,10 @@ func TestRouteHandler_EscapedDollar(t *testing.T) {
 		Port: 8080,
 		Routes: map[string]*RouteConfig{
 			"/api/": {
-				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
-				AddHeaders: map[string]string{"X-Literal": `\$remote_addr`},
-				AddHasVars: true,
+				Upstreams:        []Upstream{mustUpstream(backend.URL+"/", 1)},
+				ParsedAddHeaders: map[string]parsedHeaderValue{"X-Origin": compileHeaderValue("${scheme}://${header.Host}")},
+				AddHasVars:       true,
+				NeedsOriginal:    true,
 			},
 		},
 	}
@@ -1278,21 +1340,15 @@ func TestRouteHandler_EscapedDollar(t *testing.T) {
 	ts := httptest.NewServer(srv.mux)
 	defer ts.Close()
 
-	http.Get(ts.URL + "/api/")
+	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
+	req.Host = "myapp.example.com"
+	http.DefaultClient.Do(req)
 
-	if gotHeader != "$remote_addr" {
-		t.Errorf("X-Literal = %q, want literal $remote_addr", gotHeader)
+	if gotHeader != "http://myapp.example.com" {
+		t.Errorf("X-Origin = %q, want http://myapp.example.com", gotHeader)
 	}
 }
 
-func TestHasVarValues(t *testing.T) {
-	if hasVarValues(map[string]string{"X-Foo": "bar", "X-Baz": "qux"}) {
-		t.Error("expected false for no variables")
-	}
-	if !hasVarValues(map[string]string{"X-Foo": "bar", "X-IP": "$remote_addr"}) {
-		t.Error("expected true when variable present")
-	}
-}
 // ---- trust-client-headers tests ----
 
 func TestTrustClientHeaders_False_DiscardXFF(t *testing.T) {
