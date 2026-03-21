@@ -42,11 +42,11 @@ func parseAll(args []string) (*Config, error) {
 		var err error
 		base, err = loadConfigFile(configPath)
 		if err != nil {
-			if explicitConfig {
-				return nil, fmt.Errorf("reading config file %q: %w", configPath, err)
-			}
-			// Default path suddenly unreadable — start fresh.
-			base = &Config{Port: 8080, Routes: map[string]*RouteConfig{}}
+			// Always report config file errors — whether the path was given via
+			// --config or auto-discovered. findDefaultConfig() already verified
+			// the file exists, so any error here is a real problem (YAML syntax,
+			// bad values, permission denied) not a missing file.
+			return nil, fmt.Errorf("config file %q: %w", configPath, err)
 		}
 	}
 
