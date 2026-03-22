@@ -35,12 +35,24 @@ routemux --upgrade
 # Forward /api/ to a local service
 ./routemux --route /api/ --dest http://localhost:3000/
 
-# With a config file
-./routemux --config config.yml
-
 # HTTPS termination
 ./routemux --tls-cert cert.pem --tls-key key.pem --route / --dest http://localhost:8080/
+
+# With a config file
+./routemux --config config.yml
 ```
+
+Or using a config file `./routemux --config config.yml`
+
+
+```yaml
+# config.yml
+routes:
+  /api/:
+    dest: http://localhost:3000/
+```
+
+
 
 ---
 
@@ -62,35 +74,45 @@ global:
   # global-auth: ["admin", "s3cr3t"]   # HTTP Basic Auth applied to all routes
   # trust-client-headers: true   # default: false
 
-routes:
-  /api/:
-    dest: http://localhost:3000/v1/   # Upstream destination URL
-    timeout: 30s                       # Optional upstream timeout (e.g. 30s, 2m)
-    # noTLSverify: true                # Skip TLS certificate verification for upstream
-    # auth: ["user", "pass"]           # Per-route auth (overrides global-auth)
-    # auth: []                         # Explicitly disable auth for this route
-    add-header:
-      X-Proxy: RouteMUX               # Add or overwrite a header sent to upstream
-      X-Built-URL: ${scheme}://${header.host}${request_uri} #combined text and variable
-    delete-header:
-      - Cookie                         # Delete a specific header
-      - CF-*                           # Delete all headers matching wildcard
+vhosts:                                    
+  - domains: ["example.com", "www.example.com"] # Hostname to match following routes group
+    routes:
+      /api/:
+        dest: http://localhost:3000/v1/   # Upstream destination URL
+        timeout: 30s                       # Optional upstream timeout (e.g. 30s, 2m)
+        # noTLSverify: true                # Skip TLS certificate verification for upstream
+        # auth: ["user", "pass"]           # Per-route auth (overrides global-auth)
+        # auth: []                         # Explicitly disable auth for this route
+        add-header:
+          X-Proxy: RouteMUX               # Add or overwrite a header sent to upstream
+          X-Built-URL: ${scheme}://${header.host}${request_uri} #combined text and variable
+        delete-header:
+          - Cookie                         # Delete a specific header
+          - CF-*                           # Delete all headers matching wildcard
 
-  /app/:
-    dest: http://localhost:8000/
-    timeout: 120s
+      /app/:
+        dest: http://localhost:8000/
+        timeout: 120s
 
-  # Load-balanced route
-  /lb/:
-    dest:
-      - http://localhost:4000/  weight=2
-      - http://localhost:4001/  weight=1
-    load-balancer-mode: round-robin   # or "random" (default)
+      # Load-balanced route
+      /lb/:
+        dest:
+          - http://localhost:4000/  weight=2
+          - http://localhost:4001/  weight=1
+        load-balancer-mode: round-robin   # or "random" (default)
 
-  # Static response route
-  /health/:
-    dest: STATUS 200 healthy
+      # Static response route
+      /health/:
+        dest: STATUS 200 healthy
+
+  - domains: ["*"]                      # All other hostnames to match
+    routes:
+      "/":
+        dest: STATUS 200 No matched domain
 ```
+
+`vhost:` and `domains:` block/key can be omitted from config, only having routes as the root block, 
+then all the defines routes belong to the default host `["*"]`, i.e, all hostnames.
 
 ---
 
@@ -99,7 +121,7 @@ routes:
 ```
 routemux [global options] \
          --route PATH --dest URL [route options] \
-        [--route PATH2 --dest URL [route options]] ...
+         [--route PATH2 --dest URL [route options]] ...
 ```
 
 ### Global Options
@@ -114,23 +136,29 @@ routemux [global options] \
 | `--global-auth USER:PASS` | HTTP Basic Auth for all routes |
 | `--trust-client-headers`  | Trust X-Forwarded-* headers from client (default: false) |
 
-### Route Options
-
-Route options must follow `--route`. The `--route` + route options block can be repeated for multiple routes.
+### Vhost and Route
 
 | Flag | Description |
 |------|-------------|
-| `--route PATH` | Route path prefix (e.g. `/api/`) |
+| `--vhost DOMAINS` | Specify list of hostnames (e.g. `"domain.com\|www.domain.com"`) to group routes under it (repeatable). Default is `'*'` |
+| `--route PATH` | Define a route (e.g. `/api/`) (repeatable under a vhost). If no preceding `--vhost` specified, then the routes are applied to `'*'`, i.e., all hosts |
+
+### Route Options
+
+Following are the route options must follow `--route`. The `--route` + route options block can be repeated for multiple routes under each `--vhost`.
+
+| Flag | Description |
+|------|-------------|
 | `--dest URL` | Upstream destination (repeatable — multiple `--dest` flags with URL and optional weight=<N> create a load-balanced route). Use `STATUS <code> [text]` for a static response. |
 | `--load-balancer-mode MODE` | Load balancer mode: `random` (default) or `round-robin` |
 | `--noTLSverify` | Skip TLS certificate verification for this upstream |
 | `--auth USER:PASS` | Per-route Basic Auth (overrides `--global-auth`) |
 | `--auth ""` | Explicitly disable auth for this route |
 | `--timeout DURATION` | Upstream request timeout (e.g. `30s`, `2m`) |
-| `--add-header "Name: Value"` | Add or overwrite a header (repeatable). Value be plain text, supported variables or combination of both |
+| `--add-header "Name: Value"` | Add or overwrite a header (repeatable). Value can be plain text, supported variables or combination of both |
 | `--delete-header NAME` | Delete a header (repeatable, supports wildcards) |
 
-### Other flags
+### General flags
 
 | Flag | Description |
 |------|-------------|
@@ -181,7 +209,41 @@ routemux \
 routemux \
   --route /health/ --dest "STATUS 200 healthy" \
   --route /api/    --dest http://localhost:3000/
+
+# Virtual hostname matching
+routemux \
+  --vhost 'example.com|www.example.com' \
+    --route /health/ --dest "STATUS 200 healthy" \
+    --route /app/ --dest --dest http://localhost:3000/ \
+  --vhost '[*]'
+    --route '/'  --dest http://localhost:3000/
 ```
+
+---
+
+## Virtual hosts
+
+Multiple host names or domains can be specified, that can group multiple routes under it.
+
+```yaml
+vhosts:
+  - domains: ["example.com", "www.example.com"]
+    routes:
+      /app/:
+        dest: http://localhost:3001/
+  - domains: ["host2.com"]
+    routes:
+      /api/:
+        dest: https://localhost:8080/
+  - domains: ["*"]
+    routes:
+      /:
+        dest: STATUS 200 Hostname not configured
+```
+
+
+`vhost:` can be omitted entirely, and root block can start with `routes:`, in such case all the routes will
+be applied to default (`["*"]`) all hostnames, all incoming connections.
 
 ---
 

@@ -17,7 +17,24 @@ import (
 type server struct {
 	cfg      *Config
 	bindIP   string // resolved from cfg.Listen
-	mux      *http.ServeMux
+	vhosts   []vhostEntry
+	singleMux bool // true when only one vhost AND it is a catch-all (*) — skip host matching
+}
+
+// vhostEntry holds a compiled vhost: its domain list and ready-to-use ServeMux.
+type vhostEntry struct {
+	domains []string        // lower-cased; "*" matches any host
+	mux     *http.ServeMux
+}
+
+// matchHost returns true if host matches this vhost entry.
+func (ve *vhostEntry) matchHost(host string) bool {
+	for _, d := range ve.domains {
+		if d == "*" || d == host {
+			return true
+		}
+	}
+	return false
 }
 
 func newServer(cfg *Config) (*server, error) {
@@ -27,7 +44,7 @@ func newServer(cfg *Config) (*server, error) {
 	}
 
 	s := &server{cfg: cfg, bindIP: bindIP}
-	if err := s.buildMux(); err != nil {
+	if err := s.buildVHosts(); err != nil {
 		return nil, err
 	}
 	return s, nil
@@ -37,12 +54,32 @@ func (s *server) listenAddr() string {
 	return fmt.Sprintf("%s:%d", s.bindIP, s.cfg.Port)
 }
 
-func (s *server) buildMux() error {
-	s.mux = http.NewServeMux()
+// buildVHosts compiles all vhosts into vhostEntry values, each with its own ServeMux.
+func (s *server) buildVHosts() error {
+	s.vhosts = nil
+	for _, vh := range s.cfg.VHosts {
+		domains := make([]string, len(vh.Domains))
+		for i, d := range vh.Domains {
+			domains[i] = strings.ToLower(d)
+		}
+		log.Printf("vhost [%s]:", strings.Join(domains, ", "))
+		mux, err := s.buildMux(vh.Routes)
+		if err != nil {
+			return err
+		}
+		s.vhosts = append(s.vhosts, vhostEntry{domains: domains, mux: mux})
+	}
+	s.singleMux = len(s.vhosts) == 1 && isCatchAll(s.vhosts[0].domains)
+	return nil
+}
+
+// buildMux builds a ServeMux for a single vhost's route map.
+func (s *server) buildMux(routes map[string]*RouteConfig) (*http.ServeMux, error) {
+	mux := http.NewServeMux()
 
 	// Sort routes longest-first so more specific paths win.
-	paths := make([]string, 0, len(s.cfg.Routes))
-	for p := range s.cfg.Routes {
+	paths := make([]string, 0, len(routes))
+	for p := range routes {
 		paths = append(paths, p)
 	}
 	sort.Slice(paths, func(i, j int) bool {
@@ -50,8 +87,7 @@ func (s *server) buildMux() error {
 	})
 
 	for _, path := range paths {
-		rc := s.cfg.Routes[path]
-		// Build the upstream picker (URLs already validated and parsed in applyDestEntries).
+		rc := routes[path]
 		var picker *upstreamPicker
 		if rc.StatusCode == 0 {
 			picker = newUpstreamPicker(rc.Upstreams, rc.LBMode)
@@ -59,15 +95,14 @@ func (s *server) buildMux() error {
 
 		handler, err := s.buildRouteHandler(path, picker, rc)
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		pattern := path
-		// Go's ServeMux needs a trailing slash to match all sub-paths.
 		if !strings.HasSuffix(pattern, "/") {
 			pattern += "/"
 		}
-		s.mux.Handle(pattern, handler)
+		mux.Handle(pattern, handler)
 		if rc.StatusCode != 0 {
 			log.Printf("  route %s  →  STATUS %d", pattern, rc.StatusCode)
 		} else {
@@ -78,7 +113,7 @@ func (s *server) buildMux() error {
 			log.Printf("  route %s  →  %s", pattern, strings.Join(urls, ", "))
 		}
 	}
-	return nil
+	return mux, nil
 }
 
 // buildRouteHandler creates the http.Handler for one route.
@@ -315,7 +350,7 @@ func (s *server) run() error {
 	addr := s.listenAddr()
 	srv := &http.Server{
 		Addr:    addr,
-		Handler: s.mux,
+		Handler: s.handler(),
 	}
 
 	if s.cfg.TLSCert != "" {
@@ -323,6 +358,59 @@ func (s *server) run() error {
 		return srv.ListenAndServeTLS(s.cfg.TLSCert, s.cfg.TLSKey)
 	}
 	return srv.ListenAndServe()
+}
+
+// isCatchAll returns true if the domain list contains "*" or is empty,
+// meaning the vhost matches any host.
+func isCatchAll(domains []string) bool {
+	for _, d := range domains {
+		if d == "*" || d == "" {
+			return true
+		}
+	}
+	return false
+}
+
+// handler returns the top-level HTTP handler.
+// When there is only one catch-all vhost (singleMux), it returns the mux directly
+// with no host matching overhead. Otherwise it dispatches based on r.Host.
+func (s *server) handler() http.Handler {
+	if s.singleMux {
+		return s.vhosts[0].mux
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Strip port from Host header for matching.
+		host := strings.ToLower(r.Host)
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			host = h
+		}
+		for i := range s.vhosts {
+			if s.vhosts[i].matchHost(host) {
+				s.vhosts[i].mux.ServeHTTP(w, r)
+				return
+			}
+		}
+		// No vhost matched — close the connection immediately without sending
+		// any response body (equivalent to nginx's 444). This leaks no
+		// information about what vhosts exist on this server.
+		closeConnection(w)
+	})
+}
+
+// closeConnection terminates the connection without sending an HTTP response.
+// Used when no vhost matches — equivalent to nginx's 444 status.
+// For HTTP/1.x, hijacks and closes the TCP connection directly.
+// For HTTP/2 (which does not support hijacking), falls back to 400 Bad Request
+// with an empty body — the closest valid HTTP response to "go away".
+func closeConnection(w http.ResponseWriter) {
+	if hj, ok := w.(http.Hijacker); ok {
+		if conn, _, err := hj.Hijack(); err == nil {
+			conn.Close()
+			return
+		}
+	}
+	// Fallback for HTTP/2 or hijack failure.
+	w.WriteHeader(http.StatusBadRequest)
 }
 
 // schemeOf returns the actual scheme of the incoming connection.

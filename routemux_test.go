@@ -22,6 +22,16 @@ func evalConst(ph parsedHeaderValue) string {
 	return ph.segments[0].value
 }
 
+
+// makeConfig creates a Config with a single catch-all vhost — shorthand for tests.
+// Use makeConfigVHosts for multi-vhost tests.
+func makeConfig(port int, routes map[string]*RouteConfig) *Config {
+	return &Config{
+		Port:   port,
+		VHosts: []VHost{{Domains: []string{"*"}, Routes: routes}},
+	}
+}
+
 // mustUpstream parses a URL at test time and returns a ready Upstream.
 func mustUpstream(rawURL string, weight int) Upstream {
 	parsed, err := url.Parse(rawURL)
@@ -79,11 +89,11 @@ routes:
 	if cfg.GlobalAuth == nil || cfg.GlobalAuth.User != "admin" || cfg.GlobalAuth.Password != "pass" {
 		t.Errorf("global-auth = %+v", cfg.GlobalAuth)
 	}
-	if len(cfg.Routes) != 2 {
-		t.Fatalf("want 2 routes, got %d", len(cfg.Routes))
+	if len(cfg.VHosts[0].Routes) != 2 {
+		t.Fatalf("want 2 routes, got %d", len(cfg.VHosts[0].Routes))
 	}
 
-	api := cfg.Routes["/api/"]
+	api := cfg.VHosts[0].Routes["/api/"]
 	if api == nil {
 		t.Fatal("/api/ route missing")
 	}
@@ -132,7 +142,7 @@ routes:
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := cfg.Routes["/public/"]
+	r := cfg.VHosts[0].Routes["/public/"]
 	if r == nil {
 		t.Fatal("/public/ route missing")
 	}
@@ -169,7 +179,7 @@ func TestLoadConfigFile_InvalidYAML(t *testing.T) {
 // ---- CLI parser tests ----
 
 func TestCLI_GlobalFlags(t *testing.T) {
-	cfg := &Config{Port: 8080, Routes: map[string]*RouteConfig{}}
+	cfg := &Config{Port: 8080, VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{}}}}
 	err := applyCLI(cfg, []string{
 		"--listen", "127.0.0.1",
 		"--port", "9999",
@@ -197,7 +207,7 @@ func TestCLI_GlobalFlags(t *testing.T) {
 }
 
 func TestCLI_MultipleRoutes(t *testing.T) {
-	cfg := &Config{Port: 8080, Routes: map[string]*RouteConfig{}}
+	cfg := &Config{Port: 8080, VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{}}}}
 	err := applyCLI(cfg, []string{
 		"--route", "/a/",
 		"--dest", "http://a/",
@@ -210,21 +220,23 @@ func TestCLI_MultipleRoutes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cfg.Routes) != 2 {
-		t.Fatalf("want 2 routes, got %d", len(cfg.Routes))
+	// CLI routes go into the last VHost appended by applyCLI
+	cliVH := cfg.VHosts[len(cfg.VHosts)-1]
+	if len(cliVH.Routes) != 2 {
+		t.Fatalf("want 2 routes, got %d", len(cliVH.Routes))
 	}
-	a := cfg.Routes["/a/"]
+	a := cliVH.Routes["/a/"]
 	if a == nil || a.Upstreams[0].URL != "http://a/" || a.Timeout != "30s" || !a.NoTLSVerify {
 		t.Errorf("route /a/ = %+v", a)
 	}
-	b := cfg.Routes["/b/"]
+	b := cliVH.Routes["/b/"]
 	if b == nil || !b.AuthExplicit || b.Auth == nil || b.Auth.User != "u" || b.Auth.Password != "p" {
 		t.Errorf("route /b/ = %+v", b)
 	}
 }
 
 func TestCLI_ExplicitNoAuth(t *testing.T) {
-	cfg := &Config{Port: 8080, Routes: map[string]*RouteConfig{}}
+	cfg := &Config{Port: 8080, VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{}}}}
 	err := applyCLI(cfg, []string{
 		"--route", "/pub/",
 		"--dest", "http://pub/",
@@ -233,7 +245,7 @@ func TestCLI_ExplicitNoAuth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := cfg.Routes["/pub/"]
+	r := cfg.VHosts[len(cfg.VHosts)-1].Routes["/pub/"]
 	if !r.AuthExplicit {
 		t.Error("AuthExplicit should be true")
 	}
@@ -243,7 +255,7 @@ func TestCLI_ExplicitNoAuth(t *testing.T) {
 }
 
 func TestCLI_KeyValueSyntax(t *testing.T) {
-	cfg := &Config{Port: 8080, Routes: map[string]*RouteConfig{}}
+	cfg := &Config{Port: 8080, VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{}}}}
 	err := applyCLI(cfg, []string{
 		"--port=7777",
 		"--route=/x/",
@@ -255,13 +267,13 @@ func TestCLI_KeyValueSyntax(t *testing.T) {
 	if cfg.Port != 7777 {
 		t.Errorf("port = %d", cfg.Port)
 	}
-	if cfg.Routes["/x/"] == nil {
+	if cfg.VHosts[0].Routes["/x/"] == nil {
 		t.Error("route /x/ missing")
 	}
 }
 
 func TestCLI_UnknownFlag(t *testing.T) {
-	cfg := &Config{Port: 8080, Routes: map[string]*RouteConfig{}}
+	cfg := &Config{Port: 8080, VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{}}}}
 	err := applyCLI(cfg, []string{"--bogus", "val"})
 	if err == nil {
 		t.Error("expected error for unknown flag")
@@ -269,7 +281,7 @@ func TestCLI_UnknownFlag(t *testing.T) {
 }
 
 func TestCLI_DestWithoutRoute(t *testing.T) {
-	cfg := &Config{Port: 8080, Routes: map[string]*RouteConfig{}}
+	cfg := &Config{Port: 8080, VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{}}}}
 	err := applyCLI(cfg, []string{"--dest", "http://x/"})
 	if err == nil {
 		t.Error("expected error: --dest without --route")
@@ -300,10 +312,10 @@ routes:
 		t.Errorf("port = %d, want CLI value 2222", cfg.Port)
 	}
 	// Both file route and CLI route should be present
-	if cfg.Routes["/old/"] == nil {
+	if cfg.VHosts[0].Routes["/old/"] == nil {
 		t.Error("/old/ from file should be present")
 	}
-	if cfg.Routes["/new/"] == nil {
+	if cfg.VHosts[0].Routes["/new/"] == nil {
 		t.Error("/new/ from CLI should be present")
 	}
 }
@@ -341,13 +353,13 @@ func TestRouteHandler_BasicProxy(t *testing.T) {
 
 	cfg := &Config{
 		Port:   8080,
-		Routes: map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/v1/", 1)}}},
+		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/v1/", 1)}}}}},
 	}
 	srv, err := newServer(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ts := httptest.NewServer(srv.mux)
+	ts := httptest.NewServer(srv.vhosts[0].mux)
 	defer ts.Close()
 
 	resp, err := http.Get(ts.URL + "/api/users")
@@ -372,10 +384,10 @@ func TestRouteHandler_GlobalAuth(t *testing.T) {
 	cfg := &Config{
 		Port:       8080,
 		GlobalAuth: &Auth{"admin", "secret"},
-		Routes:     map[string]*RouteConfig{"/secure/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)}}},
+		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/secure/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)}}}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.mux)
+	ts := httptest.NewServer(srv.vhosts[0].mux)
 	defer ts.Close()
 
 	// No credentials → 401
@@ -410,16 +422,16 @@ func TestRouteHandler_RouteAuthOverridesGlobal(t *testing.T) {
 	cfg := &Config{
 		Port:       8080,
 		GlobalAuth: &Auth{"admin", "secret"},
-		Routes: map[string]*RouteConfig{
+		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{
 			"/public/": {
 				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
 				AuthExplicit: true,
 				Auth:         nil, // explicit no-auth overrides global
 			},
-		},
+		}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.mux)
+	ts := httptest.NewServer(srv.vhosts[0].mux)
 	defer ts.Close()
 
 	resp, _ := http.Get(ts.URL + "/public/")
@@ -437,16 +449,16 @@ func TestRouteHandler_PerRouteAuth(t *testing.T) {
 	cfg := &Config{
 		Port:       8080,
 		GlobalAuth: &Auth{"admin", "global"},
-		Routes: map[string]*RouteConfig{
+		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{
 			"/special/": {
 				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
 				AuthExplicit: true,
 				Auth:         &Auth{"special", "pass"},
 			},
-		},
+		}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.mux)
+	ts := httptest.NewServer(srv.vhosts[0].mux)
 	defer ts.Close()
 
 	// Global creds should NOT work
@@ -476,10 +488,10 @@ func TestRouteHandler_PathStripping(t *testing.T) {
 
 	cfg := &Config{
 		Port:   8080,
-		Routes: map[string]*RouteConfig{"/prefix/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/base/", 1)}}},
+		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/prefix/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/base/", 1)}}}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.mux)
+	ts := httptest.NewServer(srv.vhosts[0].mux)
 	defer ts.Close()
 
 	http.Get(ts.URL + "/prefix/foo/bar")
@@ -499,10 +511,10 @@ func TestRouteHandler_XForwardedHeaders(t *testing.T) {
 
 	cfg := &Config{
 		Port:   8080,
-		Routes: map[string]*RouteConfig{"/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)}}},
+		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)}}}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.mux)
+	ts := httptest.NewServer(srv.vhosts[0].mux)
 	defer ts.Close()
 
 	http.Get(ts.URL + "/")
@@ -517,14 +529,14 @@ func TestRouteHandler_XForwardedHeaders(t *testing.T) {
 // ---- Validation tests ----
 
 func TestValidate_NoRoutes(t *testing.T) {
-	cfg := &Config{Port: 8080, Routes: map[string]*RouteConfig{}}
+	cfg := &Config{Port: 8080, VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{}}}}
 	if err := cfg.validate(); err == nil {
 		t.Error("expected error for no routes")
 	}
 }
 
 func TestValidate_MissingDest(t *testing.T) {
-	cfg := &Config{Port: 8080, Routes: map[string]*RouteConfig{"/x/": {}}}
+	cfg := &Config{Port: 8080, VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/x/": {}}}}}
 	if err := cfg.validate(); err == nil {
 		t.Error("expected error for missing dest")
 	}
@@ -534,7 +546,7 @@ func TestValidate_TLSPartial(t *testing.T) {
 	cfg := &Config{
 		Port:    8080,
 		TLSCert: "/c.pem",
-		Routes:  map[string]*RouteConfig{"/x/": {Upstreams: []Upstream{mustUpstream("http://x/", 1)}}},
+		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/x/": {Upstreams: []Upstream{mustUpstream("http://x/", 1)}}}}},
 	}
 	if err := cfg.validate(); err == nil {
 		t.Error("expected error for tls-cert without tls-key")
@@ -554,15 +566,15 @@ func TestRouteHandler_AddHeader(t *testing.T) {
 
 	cfg := &Config{
 		Port: 8080,
-		Routes: map[string]*RouteConfig{
+		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{
 			"/api/": {
 				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
 				ParsedAddHeaders: map[string]parsedHeaderValue{"User-Agent": compileHeaderValue("RouteMUX"), "X-Custom": compileHeaderValue("hello")},
 			},
-		},
+		}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.mux)
+	ts := httptest.NewServer(srv.vhosts[0].mux)
 	defer ts.Close()
 
 	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
@@ -588,15 +600,15 @@ func TestRouteHandler_DeleteHeader(t *testing.T) {
 
 	cfg := &Config{
 		Port: 8080,
-		Routes: map[string]*RouteConfig{
+		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{
 			"/api/": {
 				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
 				DeleteHeaders: []string{"User-Agent", "Cookie"},
 			},
-		},
+		}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.mux)
+	ts := httptest.NewServer(srv.vhosts[0].mux)
 	defer ts.Close()
 
 	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
@@ -622,15 +634,15 @@ func TestRouteHandler_DeleteHostIgnored(t *testing.T) {
 
 	cfg := &Config{
 		Port: 8080,
-		Routes: map[string]*RouteConfig{
+		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{
 			"/api/": {
 				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
 				DeleteHeaders: []string{"Host"}, // should be silently ignored
 			},
-		},
+		}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.mux)
+	ts := httptest.NewServer(srv.vhosts[0].mux)
 	defer ts.Close()
 
 	http.Get(ts.URL + "/api/")
@@ -651,16 +663,16 @@ func TestRouteHandler_AddAndDeleteOrder(t *testing.T) {
 
 	cfg := &Config{
 		Port: 8080,
-		Routes: map[string]*RouteConfig{
+		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{
 			"/api/": {
 				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
 				DeleteHeaders: []string{"User-Agent"},
 				ParsedAddHeaders: map[string]parsedHeaderValue{"User-Agent": compileHeaderValue("RouteMUX")},
 			},
-		},
+		}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.mux)
+	ts := httptest.NewServer(srv.vhosts[0].mux)
 	defer ts.Close()
 
 	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
@@ -673,7 +685,7 @@ func TestRouteHandler_AddAndDeleteOrder(t *testing.T) {
 }
 
 func TestCLI_AddDeleteHeaders(t *testing.T) {
-	cfg := &Config{Port: 8080, Routes: map[string]*RouteConfig{}}
+	cfg := &Config{Port: 8080, VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{}}}}
 	err := applyCLI(cfg, []string{
 		"--route", "/api/",
 		"--dest", "http://backend/",
@@ -685,7 +697,7 @@ func TestCLI_AddDeleteHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := cfg.Routes["/api/"]
+	r := cfg.VHosts[0].Routes["/api/"]
 	if r == nil {
 		t.Fatal("route missing")
 	}
@@ -701,7 +713,7 @@ func TestCLI_AddDeleteHeaders(t *testing.T) {
 }
 
 func TestCLI_AddHeaderBadFormat(t *testing.T) {
-	cfg := &Config{Port: 8080, Routes: map[string]*RouteConfig{}}
+	cfg := &Config{Port: 8080, VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{}}}}
 	err := applyCLI(cfg, []string{
 		"--route", "/api/",
 		"--dest", "http://backend/",
@@ -728,7 +740,7 @@ routes:
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := cfg.Routes["/api/"]
+	r := cfg.VHosts[0].Routes["/api/"]
 	if r == nil {
 		t.Fatal("/api/ route missing")
 	}
@@ -755,15 +767,15 @@ func TestRouteHandler_AddHostHeader(t *testing.T) {
 
 	cfg := &Config{
 		Port: 8080,
-		Routes: map[string]*RouteConfig{
+		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{
 			"/api/": {
 				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
 				ParsedAddHeaders: map[string]parsedHeaderValue{"Host": compileHeaderValue("custom.example.com")},
 			},
-		},
+		}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.mux)
+	ts := httptest.NewServer(srv.vhosts[0].mux)
 	defer ts.Close()
 
 	http.Get(ts.URL + "/api/")
@@ -786,15 +798,15 @@ func TestRouteHandler_DeleteHostHeader_FallsBackToUpstream(t *testing.T) {
 
 	cfg := &Config{
 		Port: 8080,
-		Routes: map[string]*RouteConfig{
+		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{
 			"/api/": {
 				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
 				DeleteHeaders: []string{"Host"},
 			},
-		},
+		}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.mux)
+	ts := httptest.NewServer(srv.vhosts[0].mux)
 	defer ts.Close()
 
 	http.Get(ts.URL + "/api/")
@@ -817,10 +829,10 @@ func TestRouteHandler_ClientHostPassedThrough(t *testing.T) {
 
 	cfg := &Config{
 		Port:   8080,
-		Routes: map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)}}},
+		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)}}}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.mux)
+	ts := httptest.NewServer(srv.vhosts[0].mux)
 	defer ts.Close()
 
 	// The client sends Host: myapp.example.com
@@ -848,10 +860,10 @@ func TestRouteHandler_ProxyAuthStripsAuthorization(t *testing.T) {
 	cfg := &Config{
 		Port:       8080,
 		GlobalAuth: &Auth{"admin", "secret"},
-		Routes:     map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)}}},
+		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)}}}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.mux)
+	ts := httptest.NewServer(srv.vhosts[0].mux)
 	defer ts.Close()
 
 	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
@@ -875,10 +887,10 @@ func TestRouteHandler_NoProxyAuthPassesAuthorization(t *testing.T) {
 
 	cfg := &Config{
 		Port:   8080,
-		Routes: map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)}}},
+		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)}}}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.mux)
+	ts := httptest.NewServer(srv.vhosts[0].mux)
 	defer ts.Close()
 
 	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
@@ -903,15 +915,15 @@ func TestRouteHandler_ProxyAuthWithAddHeaderAuthOverride(t *testing.T) {
 	cfg := &Config{
 		Port:       8080,
 		GlobalAuth: &Auth{"admin", "secret"},
-		Routes: map[string]*RouteConfig{
+		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{
 			"/api/": {
 				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
 				ParsedAddHeaders: map[string]parsedHeaderValue{"Authorization": compileHeaderValue("Bearer upstream-token")},
 			},
-		},
+		}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.mux)
+	ts := httptest.NewServer(srv.vhosts[0].mux)
 	defer ts.Close()
 
 	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
@@ -934,15 +946,15 @@ func TestRouteHandler_NoProxyAuthDeleteAuthorization(t *testing.T) {
 
 	cfg := &Config{
 		Port: 8080,
-		Routes: map[string]*RouteConfig{
+		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{
 			"/api/": {
 				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
 				DeleteHeaders: []string{"Authorization"},
 			},
-		},
+		}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.mux)
+	ts := httptest.NewServer(srv.vhosts[0].mux)
 	defer ts.Close()
 
 	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
@@ -966,16 +978,16 @@ func TestDeleteHeader_WildcardPrefix(t *testing.T) {
 
 	cfg := &Config{
 		Port: 8080,
-		Routes: map[string]*RouteConfig{
+		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{
 			"/api/": {
 				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
 				DeleteHeaders:    []string{"CF-*"},
 				DeleteHasWildcard: true,
 			},
-		},
+		}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.mux)
+	ts := httptest.NewServer(srv.vhosts[0].mux)
 	defer ts.Close()
 
 	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
@@ -1005,16 +1017,16 @@ func TestDeleteHeader_WildcardSuffix(t *testing.T) {
 
 	cfg := &Config{
 		Port: 8080,
-		Routes: map[string]*RouteConfig{
+		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{
 			"/api/": {
 				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
 				DeleteHeaders:    []string{"*-Secret"},
 				DeleteHasWildcard: true,
 			},
-		},
+		}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.mux)
+	ts := httptest.NewServer(srv.vhosts[0].mux)
 	defer ts.Close()
 
 	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
@@ -1231,17 +1243,17 @@ func TestRouteHandler_VarRemoteAddr(t *testing.T) {
 
 	cfg := &Config{
 		Port: 8080,
-		Routes: map[string]*RouteConfig{
+		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{
 			"/api/": {
 				Upstreams:        []Upstream{mustUpstream(backend.URL+"/", 1)},
 				ParsedAddHeaders: map[string]parsedHeaderValue{"X-Real-IP": compileHeaderValue("${remote_addr}")},
 				AddHasVars:       true,
 				NeedsOriginal:    false,
 			},
-		},
+		}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.mux)
+	ts := httptest.NewServer(srv.vhosts[0].mux)
 	defer ts.Close()
 	http.Get(ts.URL + "/api/")
 	if gotHeader == "" {
@@ -1264,7 +1276,7 @@ func TestRouteHandler_VarHeaderCopiedAfterDelete(t *testing.T) {
 
 	cfg := &Config{
 		Port: 8080,
-		Routes: map[string]*RouteConfig{
+		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{
 			"/api/": {
 				Upstreams:        []Upstream{mustUpstream(backend.URL+"/", 1)},
 				DeleteHeaders:    []string{"User-Agent"},
@@ -1272,10 +1284,10 @@ func TestRouteHandler_VarHeaderCopiedAfterDelete(t *testing.T) {
 				AddHasVars:       true,
 				NeedsOriginal:    true,
 			},
-		},
+		}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.mux)
+	ts := httptest.NewServer(srv.vhosts[0].mux)
 	defer ts.Close()
 
 	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
@@ -1300,16 +1312,16 @@ func TestRouteHandler_VarScheme(t *testing.T) {
 
 	cfg := &Config{
 		Port: 8080,
-		Routes: map[string]*RouteConfig{
+		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{
 			"/api/": {
 				Upstreams:        []Upstream{mustUpstream(backend.URL+"/", 1)},
 				ParsedAddHeaders: map[string]parsedHeaderValue{"X-Scheme": compileHeaderValue("${scheme}")},
 				AddHasVars:       true,
 			},
-		},
+		}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.mux)
+	ts := httptest.NewServer(srv.vhosts[0].mux)
 	defer ts.Close()
 	http.Get(ts.URL + "/api/")
 	if gotScheme != "http" {
@@ -1327,17 +1339,17 @@ func TestRouteHandler_VarConcatenation(t *testing.T) {
 
 	cfg := &Config{
 		Port: 8080,
-		Routes: map[string]*RouteConfig{
+		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{
 			"/api/": {
 				Upstreams:        []Upstream{mustUpstream(backend.URL+"/", 1)},
 				ParsedAddHeaders: map[string]parsedHeaderValue{"X-Origin": compileHeaderValue("${scheme}://${header.Host}")},
 				AddHasVars:       true,
 				NeedsOriginal:    true,
 			},
-		},
+		}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.mux)
+	ts := httptest.NewServer(srv.vhosts[0].mux)
 	defer ts.Close()
 
 	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
@@ -1362,10 +1374,10 @@ func TestTrustClientHeaders_False_DiscardXFF(t *testing.T) {
 	cfg := &Config{
 		Port:               8080,
 		TrustClientHeaders: false,
-		Routes:             map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)}}},
+		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)}}}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.mux)
+	ts := httptest.NewServer(srv.vhosts[0].mux)
 	defer ts.Close()
 
 	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
@@ -1390,10 +1402,10 @@ func TestTrustClientHeaders_True_AppendXFF(t *testing.T) {
 	cfg := &Config{
 		Port:               8080,
 		TrustClientHeaders: true,
-		Routes:             map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)}}},
+		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)}}}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.mux)
+	ts := httptest.NewServer(srv.vhosts[0].mux)
 	defer ts.Close()
 
 	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
@@ -1422,10 +1434,10 @@ func TestTrustClientHeaders_False_SetsXForwardedHeaders(t *testing.T) {
 	cfg := &Config{
 		Port:               8080,
 		TrustClientHeaders: false,
-		Routes:             map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)}}},
+		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)}}}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.mux)
+	ts := httptest.NewServer(srv.vhosts[0].mux)
 	defer ts.Close()
 
 	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
@@ -1455,10 +1467,10 @@ func TestTrustClientHeaders_True_LeavesXForwardedHeadersUntouched(t *testing.T) 
 	cfg := &Config{
 		Port:               8080,
 		TrustClientHeaders: true,
-		Routes:             map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)}}},
+		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)}}}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.mux)
+	ts := httptest.NewServer(srv.vhosts[0].mux)
 	defer ts.Close()
 
 	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
@@ -1583,10 +1595,10 @@ func TestApplyDestEntries_StatusInList_Error(t *testing.T) {
 func TestStatusRoute_200(t *testing.T) {
 	cfg := &Config{
 		Port:   8080,
-		Routes: map[string]*RouteConfig{"/health/": {StatusCode: 200, StatusText: "OK"}},
+		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/health/": {StatusCode: 200, StatusText: "OK"}}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.mux)
+	ts := httptest.NewServer(srv.vhosts[0].mux)
 	defer ts.Close()
 
 	resp, err := http.Get(ts.URL + "/health/")
@@ -1606,10 +1618,10 @@ func TestStatusRoute_200(t *testing.T) {
 func TestStatusRoute_EmptyBody(t *testing.T) {
 	cfg := &Config{
 		Port:   8080,
-		Routes: map[string]*RouteConfig{"/ping/": {StatusCode: 204, StatusText: ""}},
+		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/ping/": {StatusCode: 204, StatusText: ""}}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.mux)
+	ts := httptest.NewServer(srv.vhosts[0].mux)
 	defer ts.Close()
 
 	resp, _ := http.Get(ts.URL + "/ping/")
@@ -1627,10 +1639,10 @@ func TestStatusRoute_WithAuth(t *testing.T) {
 	cfg := &Config{
 		Port:       8080,
 		GlobalAuth: &Auth{User: "admin", Password: "secret"},
-		Routes:     map[string]*RouteConfig{"/health/": {StatusCode: 200, StatusText: "healthy"}},
+		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/health/": {StatusCode: 200, StatusText: "healthy"}}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.mux)
+	ts := httptest.NewServer(srv.vhosts[0].mux)
 	defer ts.Close()
 
 	resp, _ := http.Get(ts.URL + "/health/")
@@ -1737,7 +1749,7 @@ func TestCLI_RepeatedDest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rc := cfg.Routes["/api/"]
+	rc := cfg.VHosts[0].Routes["/api/"]
 	if rc == nil {
 		t.Fatal("route /api/ not found")
 	}
@@ -1763,7 +1775,7 @@ func TestCLI_SingleDest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rc := cfg.Routes["/api/"]
+	rc := cfg.VHosts[0].Routes["/api/"]
 	if len(rc.Upstreams) != 1 {
 		t.Fatalf("expected 1 upstream, got %d", len(rc.Upstreams))
 	}
@@ -1783,7 +1795,7 @@ func TestCLI_StatusDest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rc := cfg.Routes["/health/"]
+	rc := cfg.VHosts[0].Routes["/health/"]
 	if rc.StatusCode != 200 {
 		t.Errorf("StatusCode = %d, want 200", rc.StatusCode)
 	}
@@ -1831,5 +1843,398 @@ func TestParseAll_AutoDiscovered_InvalidYAML_ShowsRealError(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "no routes configured") {
 		t.Errorf("should show real YAML error, not 'no routes configured': %v", err)
+	}
+}
+// ---- VHost tests ----
+
+func TestVHost_ExactMatch(t *testing.T) {
+	var gotHost string
+	backend1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHost = "backend1"
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend1.Close()
+	backend2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHost = "backend2"
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend2.Close()
+
+	cfg := &Config{
+		Port: 8080,
+		VHosts: []VHost{
+			{
+				Domains: []string{"app.example.com"},
+				Routes:  map[string]*RouteConfig{"/": {Upstreams: []Upstream{mustUpstream(backend1.URL+"/", 1)}}},
+			},
+			{
+				Domains: []string{"api.example.com"},
+				Routes:  map[string]*RouteConfig{"/": {Upstreams: []Upstream{mustUpstream(backend2.URL+"/", 1)}}},
+			},
+		},
+	}
+	srv, err := newServer(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	// Request to app.example.com → backend1
+	req, _ := http.NewRequest("GET", ts.URL+"/", nil)
+	req.Host = "app.example.com"
+	http.DefaultClient.Do(req)
+	if gotHost != "backend1" {
+		t.Errorf("app.example.com → got %q, want backend1", gotHost)
+	}
+
+	// Request to api.example.com → backend2
+	req, _ = http.NewRequest("GET", ts.URL+"/", nil)
+	req.Host = "api.example.com"
+	http.DefaultClient.Do(req)
+	if gotHost != "backend2" {
+		t.Errorf("api.example.com → got %q, want backend2", gotHost)
+	}
+}
+
+func TestVHost_CatchAll(t *testing.T) {
+	var gotBackend string
+	specific := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBackend = "specific"
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer specific.Close()
+	catchAll := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBackend = "catchall"
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer catchAll.Close()
+
+	cfg := &Config{
+		Port: 8080,
+		VHosts: []VHost{
+			{
+				Domains: []string{"specific.example.com"},
+				Routes:  map[string]*RouteConfig{"/": {Upstreams: []Upstream{mustUpstream(specific.URL+"/", 1)}}},
+			},
+			{
+				Domains: []string{"*"},
+				Routes:  map[string]*RouteConfig{"/": {Upstreams: []Upstream{mustUpstream(catchAll.URL+"/", 1)}}},
+			},
+		},
+	}
+	srv, err := newServer(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	// Specific domain → specific backend
+	req, _ := http.NewRequest("GET", ts.URL+"/", nil)
+	req.Host = "specific.example.com"
+	http.DefaultClient.Do(req)
+	if gotBackend != "specific" {
+		t.Errorf("specific domain → got %q, want specific", gotBackend)
+	}
+
+	// Unknown domain → catch-all backend
+	req, _ = http.NewRequest("GET", ts.URL+"/", nil)
+	req.Host = "unknown.example.com"
+	http.DefaultClient.Do(req)
+	if gotBackend != "catchall" {
+		t.Errorf("unknown domain → got %q, want catchall", gotBackend)
+	}
+}
+
+func TestVHost_MultiDomain(t *testing.T) {
+	var hit bool
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hit = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := &Config{
+		Port: 8080,
+		VHosts: []VHost{
+			{
+				Domains: []string{"example.com", "www.example.com"},
+				Routes:  map[string]*RouteConfig{"/": {Upstreams: []Upstream{mustUpstream(backend.URL+"/", 1)}}},
+			},
+		},
+	}
+	srv, err := newServer(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	for _, host := range []string{"example.com", "www.example.com"} {
+		hit = false
+		req, _ := http.NewRequest("GET", ts.URL+"/", nil)
+		req.Host = host
+		http.DefaultClient.Do(req)
+		if !hit {
+			t.Errorf("host %q should have matched vhost", host)
+		}
+	}
+}
+
+func TestVHost_NoMatch_ClosesConnection(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := &Config{
+		Port: 8080,
+		VHosts: []VHost{
+			{
+				Domains: []string{"only.example.com"},
+				Routes:  map[string]*RouteConfig{"/": {Upstreams: []Upstream{mustUpstream(backend.URL+"/", 1)}}},
+			},
+			{
+				Domains: []string{"other.example.com"},
+				Routes:  map[string]*RouteConfig{"/": {Upstreams: []Upstream{mustUpstream(backend.URL+"/", 1)}}},
+			},
+		},
+	}
+	srv, err := newServer(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	// Unmatched host — connection should be closed with no usable response.
+	// The HTTP client will either get an EOF/connection-reset error or a 400
+	// (HTTP/2 fallback). Either way, no 2xx/4xx route-level response.
+	req, _ := http.NewRequest("GET", ts.URL+"/", nil)
+	req.Host = "nomatch.example.com"
+	resp, err := http.DefaultClient.Do(req)
+	if err == nil && resp.StatusCode == http.StatusOK {
+		t.Error("unmatched host should not return 200")
+	}
+	// Should not reach a backend route (no 200 from backend)
+	if err == nil && resp.StatusCode >= 200 && resp.StatusCode < 400 {
+		t.Errorf("unmatched host should close connection, got status %d", resp.StatusCode)
+	}
+}
+
+func TestVHost_CaseInsensitiveMatch(t *testing.T) {
+	var hit bool
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hit = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := &Config{
+		Port: 8080,
+		VHosts: []VHost{
+			{
+				Domains: []string{"Example.COM"},
+				Routes:  map[string]*RouteConfig{"/": {Upstreams: []Upstream{mustUpstream(backend.URL+"/", 1)}}},
+			},
+		},
+	}
+	srv, err := newServer(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/", nil)
+	req.Host = "example.com" // lowercase should match "Example.COM"
+	http.DefaultClient.Do(req)
+	if !hit {
+		t.Error("domain matching should be case-insensitive")
+	}
+}
+
+func TestVHost_SingleMuxShortCircuit(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	// Single catch-all vhost → singleMux=true, no host matching needed
+	cfg := &Config{
+		Port: 8080,
+		VHosts: []VHost{{
+			Domains: []string{"*"},
+			Routes:  map[string]*RouteConfig{"/": {Upstreams: []Upstream{mustUpstream(backend.URL+"/", 1)}}},
+		}},
+	}
+	srv, _ := newServer(cfg)
+	if !srv.singleMux {
+		t.Error("single catch-all vhost should set singleMux=true")
+	}
+
+	// Single specific-domain vhost → singleMux=false, host matching must be enforced
+	cfg2 := &Config{
+		Port: 8080,
+		VHosts: []VHost{{
+			Domains: []string{"host.com"},
+			Routes:  map[string]*RouteConfig{"/": {Upstreams: []Upstream{mustUpstream(backend.URL+"/", 1)}}},
+		}},
+	}
+	srv2, _ := newServer(cfg2)
+	if srv2.singleMux {
+		t.Error("single specific-domain vhost should NOT set singleMux — host matching must be enforced")
+	}
+
+	// Verify unmatched host gets 404 even with a single vhost
+	ts := httptest.NewServer(srv2.handler())
+	defer ts.Close()
+	req, _ := http.NewRequest("GET", ts.URL+"/", nil)
+	req.Host = "other.com"
+	resp, err2 := http.DefaultClient.Do(req)
+	// Unmatched host should close connection — client gets error or non-2xx
+	if err2 == nil && resp.StatusCode >= 200 && resp.StatusCode < 400 {
+		t.Errorf("unmatched host should close connection, got status %d", resp.StatusCode)
+	}
+
+	// Matched host should succeed
+	req2, _ := http.NewRequest("GET", ts.URL+"/", nil)
+	req2.Host = "host.com"
+	resp2, _ := http.DefaultClient.Do(req2)
+	if resp2.StatusCode != http.StatusOK {
+		t.Errorf("matched host should get 200, got %d", resp2.StatusCode)
+	}
+}
+
+func TestVHost_YAML_MultiVHost(t *testing.T) {
+	yml := `
+global:
+  port: 9090
+vhosts:
+  - domains: [app.example.com, www.app.example.com]
+    routes:
+      /api/:
+        dest: http://localhost:3000/
+  - domains: ["*"]
+    routes:
+      /:
+        dest: http://localhost:8080/
+`
+	f, _ := os.CreateTemp("", "routemux-*.yml")
+	f.WriteString(yml)
+	f.Close()
+	defer os.Remove(f.Name())
+
+	cfg, err := loadConfigFile(f.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.VHosts) != 2 {
+		t.Fatalf("want 2 vhosts, got %d", len(cfg.VHosts))
+	}
+	if cfg.VHosts[0].Domains[0] != "app.example.com" {
+		t.Errorf("vhost[0] domain = %q", cfg.VHosts[0].Domains[0])
+	}
+	if cfg.VHosts[0].Domains[1] != "www.app.example.com" {
+		t.Errorf("vhost[0] domain[1] = %q", cfg.VHosts[0].Domains[1])
+	}
+	if cfg.VHosts[1].Domains[0] != "*" {
+		t.Errorf("vhost[1] domain = %q", cfg.VHosts[1].Domains[0])
+	}
+	if cfg.Port != 9090 {
+		t.Errorf("port = %d, want 9090", cfg.Port)
+	}
+}
+
+func TestVHost_YAML_BackwardCompat(t *testing.T) {
+	// Old-style top-level routes: should become a single catch-all vhost
+	yml := `
+global:
+  port: 8080
+routes:
+  /api/:
+    dest: http://localhost:3000/
+  /:
+    dest: http://localhost:8080/
+`
+	f, _ := os.CreateTemp("", "routemux-*.yml")
+	f.WriteString(yml)
+	f.Close()
+	defer os.Remove(f.Name())
+
+	cfg, err := loadConfigFile(f.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.VHosts) != 1 {
+		t.Fatalf("want 1 vhost (catch-all), got %d", len(cfg.VHosts))
+	}
+	if cfg.VHosts[0].Domains[0] != "*" {
+		t.Errorf("backward compat vhost domain = %q, want *", cfg.VHosts[0].Domains[0])
+	}
+	if len(cfg.VHosts[0].Routes) != 2 {
+		t.Errorf("want 2 routes, got %d", len(cfg.VHosts[0].Routes))
+	}
+}
+
+func TestVHost_CLI_VHostFlag(t *testing.T) {
+	cfg, err := parseAll([]string{
+		"--vhost", "app.example.com|www.app.example.com",
+		"--route", "/api/",
+		"--dest", "http://localhost:3000/",
+		"--vhost", "*",
+		"--route", "/",
+		"--dest", "http://localhost:8080/",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Find vhosts by domain rather than index (order may vary)
+	var appVH, starVH *VHost
+	for i := range cfg.VHosts {
+		for _, d := range cfg.VHosts[i].Domains {
+			if d == "app.example.com" {
+				appVH = &cfg.VHosts[i]
+			}
+			if d == "*" {
+				starVH = &cfg.VHosts[i]
+			}
+		}
+	}
+	if appVH == nil {
+		t.Fatal("vhost app.example.com not found")
+	}
+	if starVH == nil {
+		t.Fatal("vhost * not found")
+	}
+	if len(appVH.Domains) != 2 {
+		t.Errorf("app vhost domains = %v", appVH.Domains)
+	}
+	if appVH.Routes["/api/"] == nil {
+		t.Error("app vhost missing /api/ route")
+	}
+	if starVH.Routes["/"] == nil {
+		t.Error("catch-all vhost missing / route")
+	}
+}
+
+func TestVHost_CLI_BackwardCompat(t *testing.T) {
+	// Routes without --vhost → single catch-all vhost
+	cfg, err := parseAll([]string{
+		"--route", "/api/",
+		"--dest", "http://localhost:3000/",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.VHosts) != 1 {
+		t.Fatalf("want 1 vhost, got %d", len(cfg.VHosts))
+	}
+	if cfg.VHosts[0].Domains[0] != "*" {
+		t.Errorf("want catch-all, got %q", cfg.VHosts[0].Domains[0])
+	}
+	if cfg.VHosts[0].Routes["/api/"] == nil {
+		t.Error("route /api/ missing")
 	}
 }

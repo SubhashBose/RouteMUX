@@ -10,7 +10,7 @@ import (
 	"github.com/SubhashBose/GoPkg-selfupdater"
 )
 
-var version = "1.2"
+var version = "0.2"
 
 // parseAll merges config file + CLI args into a final Config.
 // CLI args take precedence over config file.
@@ -37,7 +37,7 @@ func parseAll(args []string) (*Config, error) {
 	}
 
 	// --- 2. Load config file base ---
-	base := &Config{Port: 8080, Routes: map[string]*RouteConfig{}}
+	base := &Config{Port: 8080}
 	if configPath != "" {
 		var err error
 		base, err = loadConfigFile(configPath)
@@ -146,12 +146,22 @@ func expandArgs(in []string) []string {
 
 func applyCLI(cfg *Config, rawArgs []string) error {
 	args := expandArgs(rawArgs)
+	// Current vhost being built. Routes without --vhost go into the implicit catch-all.
+	var curVHostDomains []string // nil = implicit catch-all (backward compat)
+	var curRoutes map[string]*RouteConfig
+	getCurrentRoutes := func() map[string]*RouteConfig {
+		if curRoutes == nil {
+			curRoutes = map[string]*RouteConfig{}
+		}
+		return curRoutes
+	}
+
 	// current route being built from CLI (nil if not inside --route block)
 	var curPath string
 	var curRoute *RouteConfig
 
 	var flushErr error
-	flush := func() {
+	flushRoute := func() {
 		if curPath != "" && curRoute != nil {
 			if len(curRoute.destEntries) > 0 {
 				if err := applyDestEntries(curRoute, curRoute.destEntries, curPath); err != nil {
@@ -159,8 +169,44 @@ func applyCLI(cfg *Config, rawArgs []string) error {
 					return
 				}
 			}
-			cfg.Routes[curPath] = curRoute
+			getCurrentRoutes()[curPath] = curRoute
+			curPath = ""
+			curRoute = nil
 		}
+	}
+	flushVHost := func() {
+		flushRoute()
+		if flushErr != nil {
+			return
+		}
+		if curRoutes == nil {
+			return
+		}
+		if curVHostDomains == nil {
+			// No --vhost flag: implicit catch-all.
+			// Merge into an existing catch-all VHost if present (e.g. loaded from config file),
+			// so CLI routes and file routes share the same vhost rather than creating a second one.
+			for i := range cfg.VHosts {
+				for _, d := range cfg.VHosts[i].Domains {
+					if d == "*" {
+						if cfg.VHosts[i].Routes == nil {
+							cfg.VHosts[i].Routes = map[string]*RouteConfig{}
+						}
+						for k, v := range curRoutes {
+							cfg.VHosts[i].Routes[k] = v
+						}
+						curRoutes = nil
+						return
+					}
+				}
+			}
+			// No existing catch-all — create one.
+			cfg.VHosts = append(cfg.VHosts, VHost{Domains: []string{"*"}, Routes: curRoutes})
+		} else {
+			cfg.VHosts = append(cfg.VHosts, VHost{Domains: curVHostDomains, Routes: curRoutes})
+		}
+		curRoutes = nil
+		curVHostDomains = nil
 	}
 
 	i := 0
@@ -210,8 +256,22 @@ func applyCLI(cfg *Config, rawArgs []string) error {
 			}
 			cfg.GlobalAuth = a
 			i += 2
+		case "--vhost":
+			flushVHost() // save previous vhost
+			if flushErr != nil {
+				return flushErr
+			}
+			if i+1 >= len(args) {
+				return fmt.Errorf("--vhost requires a value (domain or domain1|domain2)")
+			}
+			// Split pipe-separated domains: domain.com|www.domain.com
+			curVHostDomains = strings.Split(args[i+1], "|")
+			for j, d := range curVHostDomains {
+				curVHostDomains[j] = strings.TrimSpace(d)
+			}
+			i += 2
 		case "--route":
-			flush() // save previous route
+			flushRoute() // save previous route
 			if flushErr != nil {
 				return flushErr
 			}
@@ -220,7 +280,7 @@ func applyCLI(cfg *Config, rawArgs []string) error {
 			}
 			curPath = args[i+1]
 			// inherit existing route if present, else create new
-			if existing, ok := cfg.Routes[curPath]; ok {
+			if existing, ok := getCurrentRoutes()[curPath]; ok {
 				curRoute = existing
 			} else {
 				curRoute = &RouteConfig{}
@@ -327,7 +387,7 @@ func applyCLI(cfg *Config, rawArgs []string) error {
 			return fmt.Errorf("unknown argument: %q", arg)
 		}
 	}
-	flush()
+	flushVHost()
 	if flushErr != nil {
 		return flushErr
 	}
@@ -406,15 +466,21 @@ Global options:
   --trust-client-headers  Trust X-Forwarded-* headers from client (default: false)
   --global-auth U:P     HTTP Basic Auth applied to all routes (format: USER:PASSWORD)
 
-Route options (must follow --route PATH): 
-  --route PATH          Define a route (e.g. /api/)
+Vhost and Route:
+  --vhost DOMAINS       Specify list of hostnames (e.g. "domain.com|www.domain.com") to
+                        group routes under it (repeatable). Default is '*'
+  --route PATH          Define a route (e.g. /api/) (repeatable under a vhost)
+                        If no preceding --vhost specified, then the routes are applied to 
+                        '*', i.e., all hosts
+
+Route options (must follow --route PATH):
   --dest URL            Upstream destination URL (repeatable).
                         Repeated --dest <URL> [weight=<N>] per route forms load-balancer,
                         where weight is optional, default is 1.
                         --dest STATUS <code> [text] is also supported, where a HTTP
                         response code is returned with optional static text body.
   --load-balancer-mode  Load balancer mode, "round-robin" or "random", (default: random) 
-  --noTLSverify         Skip TLS verification for upstream
+  --noTLSverify         Skip TLS verification for upstream(s)
   --auth U:P            Per-route Basic Auth (overrides global-auth; "" disables auth)
   --timeout DURATION    Upstream timeout (e.g. 30s, 2m)
   --add-header K:V      Add/overwrite a header on upstream request (repeatable)
@@ -422,7 +488,7 @@ Route options (must follow --route PATH):
   --delete-header K     Delete a header from the upstream request (repeatable)
                         Can take wildcards (e.g. --delete-header *cookie*)
 
-Other flags:
+General flags:
   --help, -h            Show this help
   --upgrade             Self-upgrade RouteMUX to the latest version
 
@@ -439,28 +505,29 @@ Config file (config.yml) example:
     global-auth: ["USER", "PASSWORD"]
     trust-client-headers: false
 
-  routes:
-    "/path/":
-      dest: http://localhost:3000/
-      noTLSverify: false
-      auth: ["USER", "PASSWORD"]
-      timeout: 30s
-      add-header:
-        User-Agent: RouteMUX
-        X-Built-URL: ${scheme}://${header.host}${request_uri}
-      delete-header:
-        - *cookie*
-        - Authorization
-    "/load-balancer/":
-      dest:
-        - http://localhost:3000/
-        - http://localhost:3001/ weight=5
-      load-balancer-mode: round-robin
-    "/health/":
-      dest: STATUS 200 Health is ok
+  vhosts:
+    - domains: ["example.com", "www.example.com"]
+      routes:
+        "/path/":
+          dest: http://localhost:3000/
+          noTLSverify: false
+          auth: ["USER", "PASSWORD"]
+          timeout: 30s
+          add-header:
+            User-Agent: RouteMUX
+            X-Built-URL: ${scheme}://${header.host}${request_uri}
+          delete-header:
+            - *cookie*
+            - Authorization
+        "/load-balancer/":
+          dest:
+            - http://localhost:3000/
+            - http://localhost:3001/ weight=5
+          load-balancer-mode: round-robin
+        "/health/":
+          dest: STATUS 200 Health is ok
 
-The 'add-header' values can be static strings or the following supported variables,
-it can be a combination of variables and text as well:
+The 'add-header' values can be a combination of text and following supported variables:
   ${remote_addr}: client IP (no port)
   ${remote_port}: client port
   ${scheme}: "http" or "https"
