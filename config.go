@@ -11,13 +11,21 @@ import (
 
 // Config is the top-level runtime configuration structure.
 type Config struct {
-	Listen     string
-	Port       int
-	TLSCert    string
-	TLSKey     string
-	GlobalAuth          *Auth
-	TrustClientHeaders  bool
-	Routes              map[string]*RouteConfig
+	Listen             string
+	Port               int
+	TLSCert            string
+	TLSKey             string
+	GlobalAuth         *Auth
+	TrustClientHeaders bool
+	VHosts             []VHost // ordered list; matched top-to-bottom per request
+}
+
+// VHost groups a set of routes under one or more domain names.
+// Domains is a list of hostnames (e.g. ["example.com", "www.example.com"]).
+// Use ["*"] or [""] to match all hosts (catch-all / backward-compat mode).
+type VHost struct {
+	Domains []string
+	Routes  map[string]*RouteConfig
 }
 
 // Auth holds HTTP Basic Auth credentials.
@@ -52,12 +60,17 @@ type RouteConfig struct {
 }
 
 func (c *Config) validate() error {
-	if len(c.Routes) == 0 {
+	if len(c.VHosts) == 0 {
 		return fmt.Errorf("no routes configured")
 	}
-	for path, r := range c.Routes {
-		if r.StatusCode == 0 && len(r.Upstreams) == 0 {
-			return fmt.Errorf("route %q has no dest", path)
+	for _, vh := range c.VHosts {
+		if len(vh.Routes) == 0 {
+			return fmt.Errorf("vhost %v has no routes", vh.Domains)
+		}
+		for path, r := range vh.Routes {
+			if r.StatusCode == 0 && len(r.Upstreams) == 0 {
+				return fmt.Errorf("%v route %q has no dest", vh.Domains, path)
+			}
 		}
 	}
 	if (c.TLSCert == "") != (c.TLSKey == "") {
@@ -71,7 +84,13 @@ func (c *Config) validate() error {
 
 type fileConfig struct {
 	Global fileGlobal           `yaml:"global"`
-	Routes map[string]fileRoute `yaml:"routes"`
+	Routes map[string]fileRoute `yaml:"routes"` // backward-compat: top-level routes → single catch-all vhost
+	VHosts []fileVHost          `yaml:"vhosts"`
+}
+
+type fileVHost struct {
+	Domains []string             `yaml:"domains"`
+	Routes  map[string]fileRoute `yaml:"routes"`
 }
 
 type fileGlobal struct {
@@ -161,7 +180,6 @@ func loadConfigFile(path string) (*Config, error) {
 		TLSCert:            fc.Global.TLSCert,
 		TLSKey:             fc.Global.TLSKey,
 		TrustClientHeaders: fc.Global.TrustClientHeaders,
-		Routes:             make(map[string]*RouteConfig, len(fc.Routes)),
 	}
 	if cfg.Port == 0 {
 		cfg.Port = 8080
@@ -176,7 +194,38 @@ func loadConfigFile(path string) (*Config, error) {
 		return nil, fmt.Errorf("global-auth must be a two-element list [USER, PASSWORD]")
 	}
 
-	for path, fr := range fc.Routes {
+	// Backward compat: top-level routes: → single catch-all vhost.
+	if len(fc.Routes) > 0 {
+		if len(fc.VHosts) > 0 {
+			return nil, fmt.Errorf("cannot use both top-level \"routes\" and \"vhosts\" in the same config")
+		}
+		vh, err := parseFileVHost(fc.Routes, []string{"*"})
+		if err != nil {
+			return nil, err
+		}
+		cfg.VHosts = []VHost{vh}
+		return cfg, nil
+	}
+
+	// New vhosts: format.
+	for i, fvh := range fc.VHosts {
+		if len(fvh.Domains) == 0 {
+			return nil, fmt.Errorf("vhosts[%d]: domains list must not be empty", i)
+		}
+		vh, err := parseFileVHost(fvh.Routes, fvh.Domains)
+		if err != nil {
+			return nil, err
+		}
+		cfg.VHosts = append(cfg.VHosts, vh)
+	}
+
+	return cfg, nil
+}
+
+// parseFileVHost converts a map of fileRoutes into a VHost.
+func parseFileVHost(fileRoutes map[string]fileRoute, domains []string) (VHost, error) {
+	routes := make(map[string]*RouteConfig, len(fileRoutes))
+	for path, fr := range fileRoutes {
 		rc := &RouteConfig{
 			NoTLSVerify:       fr.NoTLSVerify,
 			Timeout:           fr.Timeout,
@@ -188,22 +237,19 @@ func loadConfigFile(path string) (*Config, error) {
 		}
 		rc.AddHasVars = hasNonConstHeader(rc.ParsedAddHeaders)
 		rc.NeedsOriginal = hasHeaderNameVar(rc.ParsedAddHeaders)
-		// Parse dest entries into Upstreams or StatusCode/StatusText.
 		if err := applyDestEntries(rc, fr.Dest.entries, path); err != nil {
-			return nil, err
+			return VHost{}, err
 		}
 		if fr.authPresent {
 			if len(fr.Auth) == 2 {
 				rc.Auth = &Auth{User: fr.Auth[0], Password: fr.Auth[1]}
 			} else if len(fr.Auth) != 0 {
-				return nil, fmt.Errorf("route %q: auth must be a two-element list [USER, PASSWORD]", path)
+				return VHost{}, fmt.Errorf("route %q: auth must be a two-element list [USER, PASSWORD]", path)
 			}
-			// len == 0 with authPresent means explicit no-auth; rc.Auth stays nil
 		}
-		cfg.Routes[path] = rc
+		routes[path] = rc
 	}
-
-	return cfg, nil
+	return VHost{Domains: domains, Routes: routes}, nil
 }
 
 // parseDestField checks if a dest value is a STATUS directive.
