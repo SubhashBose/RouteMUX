@@ -52,7 +52,7 @@ type RouteConfig struct {
 	Auth               *Auth             // nil = inherit global-auth; explicitly cleared = no auth
 	AuthExplicit       bool              // true when auth was set explicitly (even as empty)
 	Timeout            string            // e.g. "30s", "2m"
-	ParsedAddHeaders   map[string]parsedHeaderValue // compiled add-header values (parsed at startup)
+	ParsedAddHeaders   map[string]parsedHeaderValue // compiled dest-dest-add-header values (parsed at startup)
 	NeedsOriginal      bool              // true if any header value references ${header.X}
 	AddHasVars         bool              // true if any header value contains a variable (non-const)
 	DeleteHeaders      []string          // headers to remove from upstream request
@@ -110,8 +110,8 @@ type fileRoute struct {
 	Auth        []string          `yaml:"auth"` // ["USER", "PASSWORD"] or absent
 	Timeout     string            `yaml:"timeout"`
 	LBMode      string            `yaml:"load-balancer-mode"`
-	AddHeaders  map[string]string `yaml:"add-header"`
-	DeleteHeaders []string        `yaml:"delete-header"`
+	AddHeaders  map[string]string `yaml:"dest-add-header"`
+	DeleteHeaders []string        `yaml:"dest-del-header"`
 
 	// authPresent records whether the "auth" key existed in the YAML at all.
 	authPresent bool

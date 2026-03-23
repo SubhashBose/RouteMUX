@@ -73,7 +73,7 @@ func applyDeleteHeaders(h http.Header, deleteList []string, hasWild bool) {
 //
 //   - 2+ IPs: Director built the chain, ReverseProxy appended one extra.
 //             Strip the last entry.
-//   - 1 IP:  Director deleted XFF (delete-header config), ReverseProxy
+//   - 1 IP:  Director deleted XFF (dest-del-header config), ReverseProxy
 //             re-added just the client IP. Delete it entirely.
 type xffRoundTripper struct {
 	base http.RoundTripper
@@ -95,7 +95,7 @@ func (t *xffRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 
 // ---- Parsed header value system ----
 //
-// add-header values are compiled once at config load time into a slice of
+// dest-dest-add-header values are compiled once at config load time into a slice of
 // segments. At request time, evaluation is a simple linear scan with no
 // string parsing — just concatenation of literals and resolved variables.
 //
@@ -129,7 +129,7 @@ type segment struct {
 	value string // literal text or header name for segHeaderName
 }
 
-// parsedHeaderValue is the compiled form of a single add-header value.
+// parsedHeaderValue is the compiled form of a single dest-add-header value.
 // If isConst is true, the value is a plain string in segments[0].value
 // and eval returns it directly with no allocation.
 type parsedHeaderValue struct {
@@ -137,7 +137,7 @@ type parsedHeaderValue struct {
 	isConst  bool
 }
 
-// compileHeaderValue parses a raw add-header value string into a
+// compileHeaderValue parses a raw dest-add-header value string into a
 // parsedHeaderValue. Called once per header at config load / CLI parse time.
 func compileHeaderValue(raw string) parsedHeaderValue {
 	var segs []segment
@@ -242,7 +242,7 @@ func (ph parsedHeaderValue) eval(clientIP, clientPort, scheme, requestURI string
 	return b.String()
 }
 
-// compiledHeaders compiles a map of raw add-header strings into
+// compiledHeaders compiles a map of raw dest-add-header strings into
 // parsedHeaderValues. Called once at config load / CLI parse time.
 func compiledHeaders(raw map[string]string) map[string]parsedHeaderValue {
 	if len(raw) == 0 {

@@ -71,10 +71,10 @@ func serveWebSocket(w http.ResponseWriter, r *http.Request, destURL *url.URL, ro
 
 	// Determine the Host to send upstream.
 	// Default: pass client Host through unchanged.
-	// delete-header:Host → use upstream host instead.
-	// add-header:Host    → use user-supplied value.
-	// Determine Host: default to client Host, delete-header:Host falls back to
-	// upstream host. add-header:Host is handled below in the same loop as all
+	// dest-del-header:Host → use upstream host instead.
+	// dest-add-header:Host    → use user-supplied value.
+	// Determine Host: default to client Host, dest-del-header:Host falls back to
+	// upstream host. dest-add-header:Host is handled below in the same loop as all
 	// other headers — outHost starts as the default and gets overwritten there.
 	outHost := r.Host
 	for _, name := range rc.DeleteHeaders {
@@ -118,7 +118,7 @@ func serveWebSocket(w http.ResponseWriter, r *http.Request, destURL *url.URL, ro
 	}
 	// If proxy auth is active, strip Authorization so proxy credentials never
 	// reach upstream. The add/delete loop below runs after, so add-header or
-	// delete-header for Authorization still work normally.
+	// dest-del-header for Authorization still work normally.
 	if effectiveAuth != nil {
 		outHeaders.Del("Authorization")
 	}

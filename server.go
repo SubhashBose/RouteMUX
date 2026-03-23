@@ -200,8 +200,8 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 			req.URL.Host = destURL.Host
 			req.URL.Path = destPath + stripped
 			// Keep client Host by default (req.Host stays as-is).
-			// delete-header:Host → use upstream host (req.Host = "")
-			// add-header:Host   → use user-supplied value (req.Host = val)
+			// dest-del-header:Host → use upstream host (req.Host = "")
+			// dest-add-header:Host   → use user-supplied value (req.Host = val)
 			// Both are handled in the add/delete loop below.
 			// Preserve raw query
 			if destURL.RawQuery != "" && req.URL.RawQuery != "" {
@@ -255,7 +255,7 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 
 			// If proxy auth is active, strip Authorization so the proxy credentials
 			// never reach the upstream. The user-defined add/delete loop below runs
-			// afterwards, so add-header:Authorization or delete-header:Authorization
+			// afterwards, so dest-add-header:Authorization or dest-del-header:Authorization
 			// in the config still work as normal — no special casing needed.
 			if effectiveAuth != nil {
 				req.Header.Del("Authorization")
@@ -436,7 +436,7 @@ func closeConnection(w http.ResponseWriter) {
 }
 
 // schemeOf returns the actual scheme of the incoming connection.
-// Used only for $scheme variable resolution in add-header values.
+// Used only for $scheme variable resolution in dest-dest-add-header values.
 // Does NOT trust X-Forwarded-Proto from the client — use trust-client-headers
 // if routemux is behind a trusted upstream proxy.
 func schemeOf(r *http.Request) string {

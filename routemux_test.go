@@ -689,10 +689,10 @@ func TestCLI_AddDeleteHeaders(t *testing.T) {
 	err := applyCLI(cfg, []string{
 		"--route", "/api/",
 		"--dest", "http://backend/",
-		"--add-header", "User-Agent: RouteMUX",
-		"--add-header", "X-Env: production",
-		"--delete-header", "Cookie",
-		"--delete-header", "Authorization",
+		"--dest-add-header", "User-Agent: RouteMUX",
+		"--dest-add-header", "X-Env: production",
+		"--dest-del-header", "Cookie",
+		"--dest-del-header", "Authorization",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -717,10 +717,10 @@ func TestCLI_AddHeaderBadFormat(t *testing.T) {
 	err := applyCLI(cfg, []string{
 		"--route", "/api/",
 		"--dest", "http://backend/",
-		"--add-header", "NoColonHere",
+		"--dest-add-header", "NoColonHere",
 	})
 	if err == nil {
-		t.Error("expected error for missing colon in --add-header value")
+		t.Error("expected error for missing colon in --dest-add-header value")
 	}
 }
 
@@ -729,10 +729,10 @@ func TestLoadConfigFile_HeaderOptions(t *testing.T) {
 routes:
   /api/:
     dest: http://localhost:3000/
-    add-header:
+    dest-add-header:
       User-Agent: RouteMUX
       X-Env: production
-    delete-header:
+    dest-del-header:
       - Cookie
       - Authorization
 `)
@@ -903,7 +903,7 @@ func TestRouteHandler_NoProxyAuthPassesAuthorization(t *testing.T) {
 }
 
 func TestRouteHandler_ProxyAuthWithAddHeaderAuthOverride(t *testing.T) {
-	// When proxy auth is active but user also sets add-header: Authorization,
+	// When proxy auth is active but user also sets dest-add-header: Authorization,
 	// the user-supplied value should be sent (not stripped, not the proxy creds).
 	var gotAuth string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
