@@ -93,10 +93,10 @@ vhosts:
         # noTLSverify: true                # Skip TLS certificate verification for upstream
         # auth: ["user", "pass"]           # Per-route auth (overrides global-auth)
         # auth: []                         # Explicitly disable auth for this route
-        add-header:
+        dest-add-header:
           X-Proxy: RouteMUX               # Add or overwrite a header sent to upstream
           X-Built-URL: ${scheme}://${header.host}${request_uri} #combined text and variable
-        delete-header:
+        dest-del-header:
           - Cookie                         # Delete a specific header
           - CF-*                           # Delete all headers matching wildcard
 
@@ -122,7 +122,7 @@ vhosts:
 ```
 
 `vhost:` and `domains:` block/key can be omitted from config, only having routes as the root block, 
-then all the defines routes belong to the default host `["*"]`, i.e, all hostnames.
+then all the defined routes belong to the default host `["*"]`, i.e, all hostnames.
 
 ---
 
@@ -167,8 +167,8 @@ Following are the route options must follow `--route`. The `--route` + route opt
 | `--auth USER:PASS` | Per-route Basic Auth (overrides `--global-auth`) |
 | `--auth ""` | Explicitly disable auth for this route |
 | `--timeout DURATION` | Upstream request timeout (e.g. `30s`, `2m`) |
-| `--add-header "Name: Value"` | Add or overwrite a header (repeatable). Value can be plain text, supported variables or combination of both |
-| `--delete-header NAME` | Delete a header (repeatable, supports wildcards) |
+| `--dest-add-header "Name: Value"` | Add or overwrite a header (repeatable). Value can be plain text, supported variables or combination of both |
+| `--dest-del-header NAME` | Delete a header (repeatable, supports wildcards) |
 
 ### General flags
 
@@ -197,11 +197,11 @@ routemux \
 # Header manipulation with wildcard and variables
 routemux \
   --route /api/ --dest http://localhost:3000/ \
-  --add-header "X-Internal: true" \
-  --delete-header "Cookie" \
-  --delete-header "CF-*" \
-  --add-header 'X-Original-UA: ${header.User-Agent}' \
-  --add-header 'X-Built-URL: ${scheme}://${header.host}${request_uri}'
+  --dest-add-header "X-Internal: true" \
+  --dest-del-header "Cookie" \
+  --dest-del-header "CF-*" \
+  --dest-add-header 'X-Original-UA: ${header.User-Agent}' \
+  --dest-add-header 'X-Built-URL: ${scheme}://${header.host}${request_uri}'
 
 # HTTPS termination
 routemux \
@@ -301,7 +301,7 @@ routes:
     auth: []                          # disables auth for this route even with global-auth set
 ```
 
-When proxy auth is active on a route, the `Authorization` header is **automatically stripped** before forwarding to the upstream — the upstream never sees the proxy credentials. You can still set your own `Authorization` header to the upstream via `add-header`.
+When proxy auth is active on a route, the `Authorization` header is **automatically stripped** before forwarding to the upstream — the upstream never sees the proxy credentials. You can still set your own `Authorization` header to the upstream via `dest-add-header`.
 
 ---
 
@@ -310,15 +310,15 @@ When proxy auth is active on a route, the `Authorization` header is **automatica
 Headers are processed in this order for each request:
 
 1. Proxy auth active → `Authorization` header deleted
-2. `delete-header` patterns applied
-3. `add-header` values set (always wins — runs last)
+2. `dest-del-header` patterns applied
+3. `dest-add-header` values set (always wins — runs last)
 
-### Wildcards in `delete-header`
+### Wildcards in `dest-del-header`
 
 Wildcard patterns use `*` as a glob character:
 
 ```yaml
-delete-header:
+dest-del-header:
   - CF-*          # deletes CF-Ray, CF-Connecting-IP, CF-IPCountry, etc.
   - *-Secret      # deletes X-Secret, Api-Secret, etc.
   - X-*-Internal  # deletes X-Foo-Internal, X-Bar-Internal, etc.
@@ -328,9 +328,9 @@ Wildcard matching is **case-insensitive**.
 
 > **Performance note:** routes with no wildcards take a fast path (direct map lookup per pattern). The wildcard path (iterating the header map) is only taken when at least one delete pattern contains `*`, and this is determined once at startup — not per request.
 
-### Variables in `add-header`
+### Variables in `dest-add-header`
 
-Header values can reference request properties using `${variable}` syntax, and multiple variable and text can be combined to form the value, i.e, `${var1}text${var2}`. Values are syntex parsed upfront when loading configuration. Variables are only resolved when at least one `add-header` is parsed to have variables — routes without variables take a zero-overhead fast path.
+Header values can reference request properties using `${variable}` syntax, and multiple variable and text can be combined to form the value, i.e, `${var1}text${var2}`. Values are syntex parsed upfront when loading configuration. Variables are only resolved when at least one `dest-add-header` is parsed to have variables — routes without variables take a zero-overhead fast path.
 
 | Variable | Value |
 |----------|-------|
@@ -347,7 +347,7 @@ Use `\${` to send a literal  sign (e.g. `\${remote_addr}` → `${remote_addr}`).
 routes:
   /api/:
     dest: http://localhost:3000/
-    add-header:
+    dest-add-header:
       X-Real-IP:       ${remote_addr}          # client IP
       X-Real-Port:     ${remote_port}          # client port
       X-Scheme:        ${scheme}               # http or https
@@ -357,7 +357,7 @@ routes:
       X-Literal:       \${remote_addr}         # literal "$remote_addr"
       X-Built-URL:     ${scheme}://${header.host}${request_uri}  # combining variable and strings
       X-Text:          Plain text content
-    delete-header:
+    dest-del-header:
       - User-Agent    # deleted from upstream — but ${header.User-Agent}
                       # still captures the original value
 ```
@@ -367,9 +367,9 @@ routes:
 
 | Header | Behaviour |
 |--------|-----------|
-| `Host` | Passed through from client by default. `delete-header: Host` uses the upstream host. `add-header: Host: custom.example.com` sets a custom value. |
+| `Host` | Passed through from client by default. `dest-del-header: Host` uses the upstream host. `dest-add-header: Host: custom.example.com` sets a custom value. |
 | `Authorization` | Passed through when no proxy auth. Stripped when proxy auth is active (to prevent credential leakage). |
-| `X-Forwarded-For` | Behaviour depends on `trust-client-headers` (see below). `delete-header: X-Forwarded-For` suppresses it entirely. |
+| `X-Forwarded-For` | Behaviour depends on `trust-client-headers` (see below). `dest-del-header: X-Forwarded-For` suppresses it entirely. |
 | `X-Forwarded-Host` | Set to original client `Host` when `trust-client-headers: false`. Left untouched when `true`. |
 | `X-Forwarded-Proto` | Set from actual TLS state when `trust-client-headers: false`. Left untouched when `true`. |
 
