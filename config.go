@@ -17,7 +17,8 @@ type Config struct {
 	TLSKey             string
 	GlobalAuth         *Auth
 	TrustClientHeaders bool
-	VHosts             []VHost // ordered list; matched top-to-bottom per request
+	VHosts             []VHost    // ordered list; matched top-to-bottom per request
+	IPFilter           *IPFilter  // nil = no IP filtering
 }
 
 // VHost groups a set of routes under one or more domain names.
@@ -99,7 +100,8 @@ type fileGlobal struct {
 	TLSCert    string   `yaml:"tls-cert"`
 	TLSKey     string   `yaml:"tls-key"`
 	GlobalAuth          []string `yaml:"global-auth"`   // ["USER", "PASSWORD"]
-	TrustClientHeaders  bool     `yaml:"trust-client-headers"`
+	TrustClientHeaders  bool            `yaml:"trust-client-headers"`
+	IPFilterCfg         *IPFilterConfig `yaml:"ip-filter"`
 }
 
 type fileRoute struct {
@@ -183,6 +185,14 @@ func loadConfigFile(path string) (*Config, error) {
 	}
 	if cfg.Port == 0 {
 		cfg.Port = 8080
+	}
+
+	if fc.Global.IPFilterCfg != nil {
+		f, err := buildIPFilter(fc.Global.IPFilterCfg)
+		if err != nil {
+			return nil, fmt.Errorf("ip-filter: %w", err)
+		}
+		cfg.IPFilter = f
 	}
 
 	if len(fc.Global.GlobalAuth) == 2 {
