@@ -47,6 +47,12 @@ func newServer(cfg *Config) (*server, error) {
 	if err := s.buildVHosts(); err != nil {
 		return nil, err
 	}
+	if cfg.IPFilter != nil {
+		if err := cfg.IPFilter.Load(); err != nil {
+			return nil, fmt.Errorf("ip-filter: %w", err)
+		}
+		cfg.IPFilter.StartRefresh()
+	}
 	return s, nil
 }
 
@@ -372,9 +378,25 @@ func isCatchAll(domains []string) bool {
 }
 
 // handler returns the top-level HTTP handler.
-// When there is only one catch-all vhost (singleMux), it returns the mux directly
-// with no host matching overhead. Otherwise it dispatches based on r.Host.
+// IP filter (if configured) is checked first, before vhost dispatch.
+// When there is only one catch-all vhost (singleMux), vhost dispatch is skipped.
 func (s *server) handler() http.Handler {
+	inner := s.vhostHandler()
+	if s.cfg.IPFilter == nil {
+		return inner
+	}
+	ipf := s.cfg.IPFilter
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !ipf.Allow(r.RemoteAddr) {
+			closeConnection(w)
+			return
+		}
+		inner.ServeHTTP(w, r)
+	})
+}
+
+// vhostHandler returns the handler that dispatches by Host header.
+func (s *server) vhostHandler() http.Handler {
 	if s.singleMux {
 		return s.vhosts[0].mux
 	}

@@ -246,6 +246,29 @@ func applyCLI(cfg *Config, rawArgs []string) error {
 		case "--trust-client-headers":
 			cfg.TrustClientHeaders = true
 			i++
+		case "--ip-filter-allow", "--ip-filter-block":
+			if i+1 >= len(args) {
+				return fmt.Errorf("%s requires a value", arg)
+			}
+			list := filterAllowed
+			if arg == "--ip-filter-block" {
+				list = filterBlocked
+			}
+			if cfg.IPFilter == nil {
+				cfg.IPFilter = &IPFilter{}
+			}
+			src, err := parseFilterEntry(args[i+1], list)
+			if err != nil {
+				return fmt.Errorf("%s: %w", arg, err)
+			}
+			cfg.IPFilter.sources = append(cfg.IPFilter.sources, src)
+			// Inline CIDRs rebuild immediately; dynamic sources load at server start.
+			if src.kind == sourceCIDR {
+				cfg.IPFilter.mu.Lock()
+				cfg.IPFilter.rebuildLocked()
+				cfg.IPFilter.mu.Unlock()
+			}
+			i += 2
 		case "--global-auth":
 			if i+1 >= len(args) {
 				return fmt.Errorf("--global-auth requires a value")
@@ -457,40 +480,49 @@ Usage:
            [--route PATH2 --dest URL [route options]] ...
 
 Global options:
-  --config PATH         Config file (default: `+bindir+` or
-                        ./config.yml or ~/.config/routemux/config.yml)
-  --listen ADDR         IP address or interface name to listen on (default: all interfaces)
-  --port PORT           Port to listen on (default: 8080)
-  --tls-cert FILE       TLS certificate file (enables HTTPS)
-  --tls-key  FILE       TLS key file (enables HTTPS)
-  --trust-client-headers  Trust X-Forwarded-* headers from client (default: false)
-  --global-auth U:P     HTTP Basic Auth applied to all routes (format: USER:PASSWORD)
+  --config PATH            Config file (default: `+bindir+` or
+                           ./config.yml or ~/.config/routemux/config.yml)
+  --listen ADDR            IP address or interface name to listen on (default: all interfaces)
+  --port PORT              Port to listen on (default: 8080)
+  --tls-cert FILE          TLS certificate file (enables HTTPS)
+  --tls-key  FILE          TLS key file (enables HTTPS)
+  --trust-client-headers   Trust X-Forwarded-* headers from client (default: false)
+  --ip-filter-allow ENTRY  Allow an IP, CIDR, file, or URL (repeatable)
+  --ip-filter-block ENTRY  Block an IP, CIDR, file, or URL (repeatable)
+                           ENTRY formats:
+                             10.0.0.1              bare IP (→ /32 or /128)
+                             10.0.0.0/8            CIDR range
+                             /path/to/list.txt     local file
+                             /path/to/list.txt refresh=6h
+                             https://example.com/list
+                             https://example.com/list refresh=12h cache=/path
+  --global-auth U:P        HTTP Basic Auth applied to all routes (format: USER:PASSWORD)
 
 Vhost and Route:
-  --vhost DOMAINS       Specify list of hostnames (e.g. "domain.com|www.domain.com") to
-                        group routes under it (repeatable). Default is '*'
-  --route PATH          Define a route (e.g. /api/) (repeatable under a vhost)
-                        If no preceding --vhost specified, then the routes are applied to 
-                        '*', i.e., all hosts
+  --vhost DOMAINS          Specify list of hostnames (e.g. "domain.com|www.domain.com") to
+                           group routes under it (repeatable). Default is '*'
+  --route PATH             Define a route (e.g. /api/) (repeatable under a vhost)
+                           If no preceding --vhost specified, then the routes are applied to 
+                           '*', i.e., all hosts
 
 Route options (must follow --route PATH):
-  --dest URL            Upstream destination URL (repeatable).
-                        Repeated --dest <URL> [weight=<N>] per route forms load-balancer,
-                        where weight is optional, default is 1.
-                        --dest STATUS <code> [text] is also supported, where a HTTP
-                        response code is returned with optional static text body.
-  --load-balancer-mode  Load balancer mode, "round-robin" or "random", (default: random) 
-  --noTLSverify         Skip TLS verification for upstream(s)
-  --auth U:P            Per-route Basic Auth (overrides global-auth; "" disables auth)
-  --timeout DURATION    Upstream timeout (e.g. 30s, 2m)
-  --add-header K:V      Add/overwrite a header on upstream request (repeatable)
-                        Can be combination of variables and text
-  --delete-header K     Delete a header from the upstream request (repeatable)
-                        Can take wildcards (e.g. --delete-header *cookie*)
+  --dest URL               Upstream destination URL (repeatable).
+                           Repeated --dest <URL> [weight=<N>] per route forms load-balancer,
+                           where weight is optional, default is 1.
+                           --dest STATUS <code> [text] is also supported, where a HTTP
+                           response code is returned with optional static text body.
+  --load-balancer-mode     Load balancer mode, "round-robin" or "random", (default: random) 
+  --noTLSverify            Skip TLS verification for upstream(s)
+  --auth U:P               Per-route Basic Auth (overrides global-auth; "" disables auth)
+  --timeout DURATION       Upstream timeout (e.g. 30s, 2m)
+  --add-header K:V         Add/overwrite a header on upstream request (repeatable)
+                           Can be combination of variables and text
+  --delete-header K        Delete a header from the upstream request (repeatable)
+                           Can take wildcards (e.g. --delete-header *cookie*)
 
 General flags:
-  --help, -h            Show this help
-  --upgrade             Self-upgrade RouteMUX to the latest version
+  --help, -h               Show this help
+  --upgrade                Self-upgrade RouteMUX to the latest version
 
 Sets of --route followed by route options can be repeated to define multiple routes.
 Options in command line and config.yml file are combined, where command line options takes precedence.
@@ -504,6 +536,11 @@ Config file (config.yml) example:
     tls-key: ""
     global-auth: ["USER", "PASSWORD"]
     trust-client-headers: false
+    ip-filter:
+      blocked:
+        - 10.0.0.0/8
+      allowed:
+        - 172.16.0.0/12
 
   vhosts:
     - domains: ["example.com", "www.example.com"]
@@ -533,5 +570,7 @@ The 'add-header' values can be a combination of text and following supported var
   ${scheme}: "http" or "https"
   ${request_uri}: full request URI including query string
   ${header.Name}: value of 'Name' from the original client headers
+
+Full documentation: https://github.com/SubhashBose/RouteMUX
 `)
 }

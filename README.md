@@ -1,18 +1,20 @@
 # RouteMUX
 
-A lightweight, flexible reverse proxy written in Go. Routes HTTP and WebSocket traffic to upstream destinations with per-route configuration for authentication, header manipulation, TLS, timeouts, and weighted load-balancing to multiple upstreams.
+A lightweight, flexible, and easy configurable reverse proxy written in Go. Routes HTTP and WebSocket traffic to upstream destinations with virtual hosts and per-route configuration for authentication, header manipulation, TLS, timeouts, and weighted load-balancing to multiple upstreams. It is a high performance and multithreaded (thanks to Go) cross-platform server with small memory footprint.
 
 ## Features
 
 - **Path-based routing** — forward different URL paths to different upstream services
+- **Virtual host** - virtual host configuration to accept connection for multiple domain names, and forward to specific set of routes per domain
 - **HTTP & WebSocket** — transparently proxies both HTTP and WebSocket connections
 - **TLS termination** — serve HTTPS with your own certificate; connect to HTTPS upstreams with optional verification skip
 - **HTTP Basic Auth** — global auth for all routes, per-route override, or explicit disable
 - **Header manipulation** — add, overwrite, or delete upstream request headers per route, with wildcard support (`CF-*`, `X-*`) and variable interpolation (`${remote_addr}`, `${header.User-Agent}`, etc.)
-- **Config file + CLI** — configure via `config.yml`, command-line flags, or both; CLI takes precedence
+- **Config file + CLI** — full configuration via `config.yml` as well as command-line flags, or combining both; CLI takes precedence.
 - **Trusted proxy support** — `trust-client-headers` mode for deployments behind an upstream proxy
 - **Load balancing** — weighted random or weighted round-robin across multiple upstream destinations
 - **Static responses** — return a fixed HTTP status code and body directly from RouteMUX, no upstream needed
+- **IP filter** — allow or block connections by IP address or CIDR range, loaded from inline values, local files, or remote URLs with optional periodic refresh
 - **Zero external dependencies** - standalone binary available in 15 OS and architecture combinations.
 
 ---
@@ -73,6 +75,14 @@ global:
   # tls-key:  /path/to/key.pem
   # global-auth: ["admin", "s3cr3t"]   # HTTP Basic Auth applied to all routes
   # trust-client-headers: true   # default: false
+  # ip-filter:
+  #   blocked:
+  #     - 10.0.0.0/8
+  #   allowed:
+  #     - 192.168.0.0/16
+  #     - 127.0.0.1
+  #     - ::1
+  #     - https://www.cloudflare.com/ips-v4 cache=./cachelist refresh=5h
 
 vhosts:                                    
   - domains: ["example.com", "www.example.com"] # Hostname to match following routes group
@@ -135,6 +145,8 @@ routemux [global options] \
 | `--tls-key FILE` | TLS key file — required when `--tls-cert` is set |
 | `--global-auth USER:PASS` | HTTP Basic Auth for all routes |
 | `--trust-client-headers`  | Trust X-Forwarded-* headers from client (default: false) |
+| `--ip-filter-allow ENTRY` | Allow an IP, CIDR, file, or URL (repeatable) |
+| `--ip-filter-block ENTRY` | Block an IP, CIDR, file, or URL (repeatable) |
 
 ### Vhost and Route
 
@@ -415,6 +427,87 @@ The format is `STATUS <code> [text]` where:
 Auth still applies to STATUS routes — a route with `global-auth` or per-route `auth` will require credentials before returning the static response.
 
 STATUS is only valid as a single `dest` string. Mixing STATUS with other upstreams in a list is an error.
+
+---
+
+## IP Filter
+
+RouteMUX can allow or block incoming connections by IP address before any routing or authentication takes place. The filter is evaluated against the connecting IP (`r.RemoteAddr`) — not any forwarded header.
+
+### Filter modes
+
+| Configuration | Behaviour |
+|---|---|
+| `blocked` only | Allow all connections except those from blocked IPs |
+| `allowed` only | Block all connections except those from allowed IPs |
+| Both `allowed` and `blocked` | Allow only IPs that are in `allowed` **and not** in `blocked` — blocked always wins |
+| Neither | No filtering — all connections pass through |
+
+### Source formats
+
+Each entry in `allowed` or `blocked` can be:
+
+| Format | Example |
+|---|---|
+| Bare IP address (→ `/32` or `/128`) | `127.0.0.1`, `::1` |
+| CIDR range | `10.0.0.0/8`, `2001:db8::/32` |
+| Local file (one CIDR/IP per line) | `/etc/routemux/blocklist.txt` |
+| Local file with polling | `/etc/routemux/blocklist.txt refresh=6h` |
+| Remote URL | `https://example.com/blocklist` |
+| Remote URL with refresh and cache | `https://example.com/blocklist refresh=12h cache=/var/cache/blocklist.txt` |
+
+Files and URLs contain one IP or CIDR per line. Lines starting with `#` and blank lines are ignored.
+
+The `refresh=` interval uses Go duration syntax: `30m`, `6h`, `24h`, etc. For file sources, RouteMUX polls the file's modification time — it only re-reads when the file has actually changed. For URL sources, RouteMUX re-fetches on the interval regardless.
+
+The `cache=` option (URL sources only) persists the fetched list to a local file. On startup, if the URL fetch fails (e.g. no network), RouteMUX falls back to the cache file. On every successful fetch, the cache file is updated atomically.
+
+### YAML configuration
+
+```yaml
+global:
+  ip-filter:
+    blocked:
+      - 10.0.0.0/8                                          # CIDR range
+      - 172.16.0.0/12
+      - https://example.com/blocklist refresh=12h cache=/var/cache/bl.txt
+    allowed:
+      - 192.168.0.0/16
+      - 127.0.0.1                                           # bare IP → /32
+      - ::1                                                 # IPv6 loopback
+      - /etc/routemux/allowlist.txt refresh=6h              # local file
+```
+
+> **Note:** when `listen` is set to `0.0.0.0` (or left blank), connections to any `127.x.x.x` address will appear to the server as coming from `127.0.0.1` due to how the Linux kernel handles loopback routing. Use `127.0.0.0/8` to cover all loopback addresses, or add `::1` for IPv6 loopback (`localhost` on many modern systems resolves to `::1` via `nss-myhostname`).
+
+### CLI flags
+
+```bash
+# Block a range, allow specific IPs
+routemux \
+  --ip-filter-block 10.0.0.0/8 \
+  --ip-filter-block 172.16.0.0/12 \
+  --ip-filter-allow 192.168.0.0/16 \
+  --ip-filter-allow 127.0.0.1 \
+  --ip-filter-allow ::1 \
+  --route / --dest http://localhost:3000/
+
+# Allow list from a URL with refresh and persistent cache
+routemux \
+  --ip-filter-allow "https://example.com/allowlist refresh=12h cache=/tmp/al.txt" \
+  --route / --dest http://localhost:3000/
+
+# Allow list from a local file with polling
+routemux \
+  --ip-filter-block "/etc/blocklist.txt refresh=5m" \
+  --route / --dest http://localhost:3000/
+```
+
+The `--ip-filter-allow` and `--ip-filter-block` flags are repeatable and accept the same formats as the YAML config.
+
+### Unmatched connections
+
+When a connection is blocked by the IP filter, RouteMUX closes the TCP connection immediately without sending any HTTP response — the same silent-close behaviour used for unmatched vhosts. The client sees a connection reset or EOF, with no information about why.
 
 ---
 

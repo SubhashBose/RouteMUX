@@ -5,38 +5,54 @@ global:
   #tls-key:  /path/to/key.pem
   global-auth: ["admin", "s3cr3t"]   # HTTP Basic Auth for all routes
   #trust-client-headers: true
+  ip-filter:
+    blocked:
+      - 10.0.0.0/8
+      #- ./allowIPs.txt refresh=2h
+    allowed:
+      - 172.16.0.0/12
+      - 127.0.0.1
+      - ::1
+      - https://www.cloudflare.com/ips-v4 cache=/tmp/cacheCFlist refresh=5h
 
-routes:
-  /api/:
-    dest: http://localhost:3000/v1/
-    timeout: 30s
-    #noTLSverify: true
-    auth: ["apiuser", "apipass"]   # overrides global-auth for this route
-    add-header:                # add-header supersedes delete-header
-      #Host: somesite.com      # Overwrite client HOST header
-      x-Proxy-Server: RouteMUX
-      x-forwarded-for: 1.1.1.1  # By default X-Forwarded-For is set to client sent header appended with proxy's connecting IP
-      X-Real-IP:     ${remote_addr}        # client IP
-      X-Original-UA: ${header.User-Agent}  # copy from original client headers
-      x-rebuilt-url: ${scheme}://${header.host}${request_uri}
-      
-    delete-header: 
-      - Host           # If HOST header is deleted, then upstream host will be used
-      - 'X-*'
+vhosts:
+  - domains: ["example.com", "www.example.com"]
+    routes:
+      /api/:
+        dest: http://localhost:3000/v1/
+        timeout: 30s
+        #noTLSverify: true
+        auth: ["apiuser", "apipass"]   # overrides global-auth for this route
+        add-header:                # add-header supersedes delete-header
+          #Host: somesite.com      # Overwrite client HOST header
+          x-Proxy-Server: RouteMUX
+          x-forwarded-for: 1.1.1.1  # By default X-Forwarded-For is set to client sent header appended with proxy's connecting IP
+          X-Real-IP:     ${remote_addr}        # client IP
+          X-Original-UA: ${header.User-Agent}  # copy from original client headers
+          x-rebuilt-url: ${scheme}://${header.host}${request_uri}
+          
+        delete-header: 
+          - Host           # If HOST header is deleted, then upstream host will be used
+          - 'X-*'
 
-  /app/:
-    dest: 
-      - http://localhost:8000/ weight=2
-      - http://localhost:8001/
-      - http://localhost:8002/ weight=1
-    load-balancer-mode: round-robin  # default is 'random'
-    timeout: 120s
+      /app/:
+        dest: 
+          - http://localhost:8000/ weight=2
+          - http://localhost:8001/
+          - http://localhost:8002/ weight=1
+        load-balancer-mode: round-robin  # default is 'random'
+        timeout: 120s
 
-  /health/:
-    dest: STATUS 200 Health is OK
-    auth: ""   # disable global auth
+      /health/:
+        dest: STATUS 200 Health is OK
+        auth: ""   # disable global auth
 
-  # Public route — explicitly disables auth even when global-auth is set:
-  # /public/:
-  #   dest: http://localhost:9000/
-  #   auth: []
+      # Public route — explicitly disables auth even when global-auth is set:
+      # /public/:
+      #   dest: http://localhost:9000/
+      #   auth: []
+
+  - domains: ["*"]
+    routes:
+      /:
+        dest: http://localhost:9000/
