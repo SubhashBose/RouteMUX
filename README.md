@@ -21,12 +21,34 @@ A lightweight, flexible, and easy configurable reverse proxy written in Go. Rout
 
 ## Download & Update
 
-Download the appropriate binary from the [release](https://github.com/SubhashBose/RouteMUX/releases) section.
+Precompiled binaries for a wide range of platforms are available in the [release](https://github.com/SubhashBose/RouteMUX/releases) section.
 
-The installed binary can self update to the latest release version
+
+| OS       | Architecture   | Download Link |
+|----------|--------|---------------|
+| Linux    | AMD 64-bit  | [Download](https://github.com/SubhashBose/RouteMUX/releases/latest/download/routemux-linux-amd64) |
+| Linux    | i386 32-bit  | [Download](https://github.com/SubhashBose/RouteMUX/releases/latest/download/routemux-linux-386) |
+| Linux    | ARM 64-bit  | [Download](https://github.com/SubhashBose/RouteMUX/releases/latest/download/routemux-linux-arm64) |
+| Linux    | ARM 32-bit   | [Download](https://github.com/SubhashBose/RouteMUX/releases/latest/download/routemux-linux-arm) |
+| Linux    | RISC-V 64-bit   | [Download](https://github.com/SubhashBose/RouteMUX/releases/latest/download/routemux-linux-riscv64) |
+| Windows  | AMD 64-bit  | [Download](https://github.com/SubhashBose/RouteMUX/releases/latest/download/routemux-windows-amd64.exe) |
+| Windows  | i386 32-bit  | [Download](https://github.com/SubhashBose/RouteMUX/releases/latest/download/routemux-windows-386.exe) |
+| Windows  | ARM 64-bit  | [Download](https://github.com/SubhashBose/RouteMUX/releases/latest/download/routemux-windows-arm64.exe) |
+| Windows  | ARM 32-bit   | [Download](https://github.com/SubhashBose/RouteMUX/releases/latest/download/routemux-windows-arm.exe) |
+| MacOS    | Apple Silicon  | [Download](https://github.com/SubhashBose/RouteMUX/releases/latest/download/routemux-darwin-arm64) |
+| MacOS    | Intel 64-bit  | [Download](https://github.com/SubhashBose/RouteMUX/releases/latest/download/routemux-darwin-amd64) |
+| FreeBSD  | AMD 64-bit  | [Download](https://github.com/SubhashBose/RouteMUX/releases/latest/download/routemux-freebsd-amd64) |
+| FreeBSD  | i386 32-bit  | [Download](https://github.com/SubhashBose/RouteMUX/releases/latest/download/routemux-freebsd-386) |
+| FreeBSD  | ARM 64-bit  | [Download](https://github.com/SubhashBose/RouteMUX/releases/latest/download/routemux-freebsd-arm64) |
+| FreeBSD  | ARM 32-bit   | [Download](https://github.com/SubhashBose/RouteMUX/releases/latest/download/routemux-freebsd-arm) |
+
+
+### Update
+
+The binary can self update to the latest release version with the `--upgrade` flag.
 
 ```bash
-routemux --upgrade
+./routemux --upgrade
 ```
 
 ---
