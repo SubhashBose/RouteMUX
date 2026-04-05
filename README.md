@@ -14,6 +14,7 @@ A lightweight, flexible, and easy configurable reverse proxy written in Go. Rout
 - **Trusted proxy support** — `trust-client-headers` mode for deployments behind an upstream proxy
 - **Load balancing** — weighted random or weighted round-robin across multiple upstream destinations
 - **Static responses** — return a fixed HTTP status code and body directly from RouteMUX, no upstream needed
+- **Response header manipulation** — add, overwrite, or delete response headers sent back to the client per route, with wildcard support and variable interpolation
 - **IP filter** — allow or block connections by IP address or CIDR range, loaded from inline values, local files, or remote URLs with optional periodic refresh
 - **Zero external dependencies** - standalone binary available in 15 OS and architecture combinations.
 
@@ -119,8 +120,12 @@ vhosts:
           X-Proxy: RouteMUX               # Add or overwrite a header sent to upstream
           X-Built-URL: ${scheme}://${header.host}${request_uri} #combined text and variable
         dest-del-header:
-          - Cookie                         # Delete a specific header
+          - Cookie                         # Delete a specific header to upstream
           - CF-*                           # Delete all headers matching wildcard
+        client-add-header:                 # Add or overwrite a header sent to client
+          Access-Control-Allow-Origin: ${scheme}://${header.host}  
+        client-del-header:                 # Delete header sent to client
+          - CF-*
 
       /app/:
         dest: http://localhost:8000/
@@ -136,6 +141,12 @@ vhosts:
       # Static response route
       /health/:
         dest: STATUS 200 healthy
+
+      # HTTP 302 redirection using static response and client header manipulation
+      /redirect/:
+        dest: STATUS 302 Redirection to new site
+        client-add-header:
+          Location: https://google.com
 
   - domains: ["*"]                      # All other hostnames to match
     routes:
@@ -191,6 +202,8 @@ Following are the route options must follow `--route`. The `--route` + route opt
 | `--timeout DURATION` | Upstream request timeout (e.g. `30s`, `2m`) |
 | `--dest-add-header "Name: Value"` | Add or overwrite a header (repeatable). Value can be plain text, supported variables or combination of both |
 | `--dest-del-header NAME` | Delete a header (repeatable, supports wildcards) |
+| `--client-add-header "Name: Value"` | Add or overwrite a response header sent to client (repeatable). Supports same variables as `--dest-add-header`; `${header.Name}` resolves from the upstream response headers |
+| `--client-del-header NAME` | Delete a header from the upstream response (repeatable, supports wildcards) |
 
 ### General flags
 
@@ -221,9 +234,10 @@ routemux \
   --route /api/ --dest http://localhost:3000/ \
   --dest-add-header "X-Internal: true" \
   --dest-del-header "Cookie" \
-  --dest-del-header "CF-*" \
   --dest-add-header 'X-Original-UA: ${header.User-Agent}' \
-  --dest-add-header 'X-Built-URL: ${scheme}://${header.host}${request_uri}'
+  --dest-add-header 'X-Built-URL: ${scheme}://${header.host}${request_uri}' \
+  --client-add-header 'Access-Control-Allow-Origin: ${scheme}://${header.host}' \
+  --client-del-header "CF-*" \
 
 # HTTPS termination
 routemux \
@@ -327,7 +341,9 @@ When proxy auth is active on a route, the `Authorization` header is **automatica
 
 ---
 
-## Header Manipulation
+## Upstream Request Header Manipulation
+
+In between Headers received from client and sent to upstream specified by `dest` can be manipulated.
 
 Headers are processed in this order for each request:
 
@@ -356,6 +372,7 @@ Header values can reference request properties using `${variable}` syntax, and m
 
 | Variable | Value |
 |----------|-------|
+| `${host}` | Original client `Host` header value |
 | `${remote_addr}` | Client IP address (no port) |
 | `${remote_port}` | Client port |
 | `${scheme}` | Request scheme — `http` or `https` |
@@ -394,6 +411,70 @@ routes:
 | `X-Forwarded-For` | Behaviour depends on `trust-client-headers` (see below). `dest-del-header: X-Forwarded-For` suppresses it entirely. |
 | `X-Forwarded-Host` | Set to original client `Host` when `trust-client-headers: false`. Left untouched when `true`. |
 | `X-Forwarded-Proto` | Set from actual TLS state when `trust-client-headers: false`. Left untouched when `true`. |
+
+---
+
+## Client Response Header Manipulation
+
+In addition to manipulating headers sent **to** the upstream (`dest-add-header`, `dest-del-header`), RouteMUX can manipulate headers in the **response sent back to the client**.
+
+Processing order per response:
+
+1. `client-del-header` patterns applied to upstream response headers
+2. `client-add-header` values set (always wins — runs last)
+
+```yaml
+routes:
+  /api/:
+    dest: http://localhost:3000/
+    client-add-header:
+      X-Served-By:   RouteMUX
+      Cache-Control: no-store
+      X-Client-IP:   ${remote_addr}          # client IP in the response
+      X-Request-Host: ${host}                # original Host header
+    client-del-header:
+      - Server                               # remove server banner
+      - X-Powered-By
+      - X-Internal-*                         # wildcard: all X-Internal-* headers
+```
+
+### Variables in `client-add-header`
+
+The same `${variable}` syntax as `dest-add-header`, with one difference:
+
+| Variable | Value |
+|----------|-------|
+| `${host}` | Client `Host` header value |
+| `${remote_addr}` | Client IP address (no port) |
+| `${remote_port}` | Client port |
+| `${scheme}` | Cleint request scheme — `http` or `https` |
+| `${request_uri}` | Client request URI including query string |
+| `${header.Name}` | Value of `Name` from the **upstream response** headers (not the client request headers) |
+
+This means `${header.Content-Type}` in a `client-add-header` value resolves to the `Content-Type` the upstream sent back — useful for echo/transform patterns.
+
+### Works with static (`STATUS`) routes
+
+`client-add-header` and `client-del-header` apply to STATUS routes too. Since there is no upstream response, `${header.Name}` resolves to an empty string.
+
+```yaml
+routes:
+  /health/:
+    dest: STATUS 200 healthy
+    client-add-header:
+      Cache-Control: no-store
+      X-Served-By:   RouteMUX
+
+  /maintenance/:
+    dest: STATUS 503 Service Unavailable
+    client-add-header:
+      Retry-After: "3600"
+  
+  /redirect/:
+    dest: STATUS 302 Redirection to new site
+    client-add-header:
+      Location: https://google.com
+```
 
 ---
 
