@@ -127,6 +127,8 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 	// -- Static STATUS response route --
 	if rc.StatusCode != 0 {
 		var h http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			manipulateClientHeaders(w.Header(), nil, r, rc)
+
 			w.WriteHeader(rc.StatusCode)
 			if rc.StatusText != "" {
 				fmt.Fprint(w, rc.StatusText)
@@ -298,27 +300,13 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 		ModifyResponse: func(resp *http.Response) error {
 			// ${header.X} in client-add-header resolves from the upstream response headers.
 			// Snapshot before we modify so add-header can reference headers we're about to delete.
-			var respHeaders http.Header
+			var originalRespHeaders http.Header
 			if rc.ClientNeedsRespHeaders {
-				respHeaders = resp.Header.Clone()
+				originalRespHeaders = resp.Header.Clone()
 			}
-			// Apply client-side response header manipulation.
-			// delete first, then add (add always wins).
-			if len(rc.ClientDelHeaders) > 0 {
-				applyDeleteHeaders(resp.Header, rc.ClientDelHeaders, rc.ClientDelHasWildcard)
-			}
-			if len(rc.ParsedClientAddHeaders) > 0 {
-				req := resp.Request
-				clientIP, clientPort, _ := net.SplitHostPort(req.RemoteAddr)
-				var scheme, requestURI string
-				if rc.ClientAddHasVars {
-					scheme = schemeOf(req)
-					requestURI = req.RequestURI
-				}
-				for name, ph := range rc.ParsedClientAddHeaders {
-					resp.Header.Set(name, ph.eval(requestHost, clientIP, clientPort, scheme, requestURI, respHeaders))
-				}
-			}
+			resp.Request.Host = requestHost
+
+			manipulateClientHeaders(resp.Header, originalRespHeaders, resp.Request, rc)
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
@@ -378,6 +366,38 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 	})
 
 	return h, nil
+}
+
+// manipulateClientHeaders applies client-side response header manipulation
+// (client-del-header and client-add-header) to respHeaders.
+//
+//   - delete runs first, then add/overwrite — add always wins
+//   - originalHeaders is a snapshot of the upstream response headers taken
+//     before deletion, so ${header.X} in add values sees the original values;
+//     pass nil for STATUS routes (no upstream response headers)
+//   - returns error to satisfy http.ReverseProxy.ModifyResponse signature;
+//     always returns nil
+func manipulateClientHeaders(respHeaders http.Header, originalHeaders http.Header, req *http.Request, rc *RouteConfig) {
+	respHeaders.Set("Via", "RouteMUX")
+	// Apply client-side response header manipulation.
+	// Delete first, then add (add always wins).
+	if len(rc.ClientDelHeaders) > 0 {
+		applyDeleteHeaders(respHeaders, rc.ClientDelHeaders, rc.ClientDelHasWildcard)
+	}
+	if len(rc.ParsedClientAddHeaders) > 0 {
+		// clientIP/clientPort only parsed when needed — eval() for const headers
+		// returns segments[0].value immediately without using them, but we still
+		// avoid the SplitHostPort call entirely when all headers are constant.
+		var clientIP, clientPort, scheme, requestURI string
+		if rc.ClientAddHasVars {
+			clientIP, clientPort, _ = net.SplitHostPort(req.RemoteAddr)
+			scheme = schemeOf(req)
+			requestURI = req.RequestURI
+		}
+		for name, ph := range rc.ParsedClientAddHeaders {
+			respHeaders.Set(name, ph.eval(req.Host, clientIP, clientPort, scheme, requestURI, originalHeaders))
+		}
+	}
 }
 
 func (s *server) run() error {

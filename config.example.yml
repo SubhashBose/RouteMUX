@@ -30,10 +30,22 @@ vhosts:
           X-Real-IP:     ${remote_addr}        # client IP
           X-Original-UA: ${header.User-Agent}  # copy from original client headers
           x-rebuilt-url: ${scheme}://${header.host}${request_uri}
-          
+        
         dest-del-header: 
           - Host           # If HOST header is deleted, then upstream host will be used
           - 'X-*'
+
+        client-add-header:               # headers added to the response sent back to the client
+          X-Served-By: RouteMUX
+          Cache-Control: no-store
+          X-Client-IP: ${remote_addr}    # client IP address
+          X-Request-Host: ${host}        # original Host header from client
+          #X-Upstream-Id: ${header.X-Node-Id}  # from upstream response header
+
+        client-del-header:               # headers removed from upstream response
+          - Server
+          - X-Powered-By
+          - X-Internal-*
 
       /app/:
         dest: 
@@ -46,6 +58,15 @@ vhosts:
       /health/:
         dest: STATUS 200 Health is OK
         auth: ""   # disable global auth
+        client-add-header:
+          Cache-Control: no-store
+          X-Served-By: RouteMUX
+      
+      # HTTP 302 redirection using static response and client header manipulation
+      /redirect/:
+        dest: STATUS 302 Redirection to new site
+        client-add-header:
+          Location: https://google.com
 
       # Public route — explicitly disables auth even when global-auth is set:
       # /public/:

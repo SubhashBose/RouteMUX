@@ -1111,7 +1111,7 @@ func TestHasWildcard(t *testing.T) {
 
 func evalHeader(raw, clientIP, clientPort, scheme, requestURI string, orig http.Header) string {
 	ph := compileHeaderValue(raw)
-	return ph.eval(clientIP, clientPort, scheme, requestURI, orig)
+	return ph.eval("example.com", clientIP, clientPort, scheme, requestURI, orig)
 }
 
 func TestCompile_PlainValue(t *testing.T) {
@@ -2482,5 +2482,62 @@ routes:
 	}
 	if !rc.ClientDelHasWildcard {
 		t.Error("ClientDelHasWildcard should be true")
+	}
+}
+func TestManipulateClientHeaders_ViaAlwaysSet(t *testing.T) {
+	// Via: RouteMUX is unconditionally added to all responses
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL+"/", 1)}},
+	})
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	resp, _ := http.Get(ts.URL + "/api/")
+	if resp.Header.Get("Via") != "RouteMUX" {
+		t.Errorf("Via header should always be RouteMUX, got %q", resp.Header.Get("Via"))
+	}
+}
+
+func TestManipulateClientHeaders_ViaCanBeDeleted(t *testing.T) {
+	// User can suppress Via: RouteMUX via client-del-header: Via
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/api/": {
+			Upstreams:        []Upstream{mustUpstream(backend.URL+"/", 1)},
+			ClientDelHeaders: []string{"Via"},
+		},
+	})
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	resp, _ := http.Get(ts.URL + "/api/")
+	if resp.Header.Get("Via") != "" {
+		t.Errorf("Via should be deletable via client-del-header, got %q", resp.Header.Get("Via"))
+	}
+}
+
+func TestManipulateClientHeaders_ViaOnStatus(t *testing.T) {
+	// Via: RouteMUX is also set on STATUS routes
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/health/": {StatusCode: 200, StatusText: "ok"},
+	})
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	resp, _ := http.Get(ts.URL + "/health/")
+	if resp.Header.Get("Via") != "RouteMUX" {
+		t.Errorf("Via header should be RouteMUX on STATUS route, got %q", resp.Header.Get("Via"))
 	}
 }

@@ -557,6 +557,10 @@ Route options (must follow --route PATH):
                            Can be combination of variables and text
   --dest-del-header K      Delete a header from the upstream request (repeatable)
                            Can take wildcards (e.g. --dest-del-header *cookie*)
+  --client-add-header K:V  Add/overwrite a header on upstream response sent to client
+                           (repeatable) Can be combination of variables and text
+  --client-del-header K    Delete a header from the upstream response (repeatable)
+						   Can take wildcards (e.g. --client-del-header *cookie*)
 
 General flags:
   --help, -h               Show this help
@@ -594,6 +598,10 @@ Config file (config.yml) example:
           dest-del-header:
             - *cookie*
             - Authorization
+          client-add-header:
+            Served-By: RouteMUX
+          client-del-header:
+            - Server
         "/load-balancer/":
           dest:
             - http://localhost:3000/
@@ -602,12 +610,18 @@ Config file (config.yml) example:
         "/health/":
           dest: STATUS 200 Health is ok
 
-The 'dest-add-header' values can be a combination of text and following supported variables:
+The 'domains' and set of 'route' under it is repeatable for different hosts.
+The 'vhost' and 'domains' can be omitted if there is no host/domain configuration needed. 
+All routes are applied to all incoming requests, i.e., ['*'] domains.
+
+The 'dest-add-header' or 'client-add-header' values can be a combination of text and following supported variables:
+  ${host}: client host header
   ${remote_addr}: client IP (no port)
   ${remote_port}: client port
-  ${scheme}: "http" or "https"
+  ${scheme}:      "http" or "https" client scheme
   ${request_uri}: full request URI including query string
-  ${header.Name}: value of 'Name' from the original client headers
+  ${header.Name}: value of 'Name' header from the original client headers (in case of 'dest-add-header')
+                  or upstream response headers (in case of 'client-add-header')
 
 Full documentation: https://github.com/SubhashBose/RouteMUX
 `)
