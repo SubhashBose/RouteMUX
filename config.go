@@ -57,6 +57,12 @@ type RouteConfig struct {
 	AddHasVars         bool              // true if any header value contains a variable (non-const)
 	DeleteHeaders      []string          // headers to remove from upstream request
 	DeleteHasWildcard  bool              // true if any DeleteHeaders entry contains '*'
+	// Client-side response header manipulation (applied to upstream response before client)
+	ParsedClientAddHeaders  map[string]parsedHeaderValue // compiled client-add-header values
+	ClientNeedsRespHeaders  bool              // true if any client-add-header refs ${header.X}
+	ClientAddHasVars        bool              // true if any client-add-header has a variable
+	ClientDelHeaders        []string          // headers to remove from upstream response
+	ClientDelHasWildcard    bool              // true if any ClientDelHeaders entry contains '*'
 	destEntries        []string          // temporary: accumulates --dest CLI args before parsing
 }
 
@@ -112,6 +118,8 @@ type fileRoute struct {
 	LBMode      string            `yaml:"load-balancer-mode"`
 	AddHeaders  map[string]string `yaml:"dest-add-header"`
 	DeleteHeaders []string        `yaml:"dest-del-header"`
+	ClientAddHeaders  map[string]string `yaml:"client-add-header"`
+	ClientDelHeaders  []string          `yaml:"client-del-header"`
 
 	// authPresent records whether the "auth" key existed in the YAML at all.
 	authPresent bool
@@ -247,6 +255,11 @@ func parseFileVHost(fileRoutes map[string]fileRoute, domains []string) (VHost, e
 		}
 		rc.AddHasVars = hasNonConstHeader(rc.ParsedAddHeaders)
 		rc.NeedsOriginal = hasHeaderNameVar(rc.ParsedAddHeaders)
+		rc.ParsedClientAddHeaders = compiledHeaders(fr.ClientAddHeaders)
+		rc.ClientAddHasVars = hasNonConstHeader(rc.ParsedClientAddHeaders)
+		rc.ClientNeedsRespHeaders = hasHeaderNameVar(rc.ParsedClientAddHeaders)
+		rc.ClientDelHeaders = fr.ClientDelHeaders
+		rc.ClientDelHasWildcard = hasWildcard(fr.ClientDelHeaders)
 		if err := applyDestEntries(rc, fr.Dest.entries, path); err != nil {
 			return VHost{}, err
 		}

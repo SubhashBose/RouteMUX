@@ -2238,3 +2238,249 @@ func TestVHost_CLI_BackwardCompat(t *testing.T) {
 		t.Error("route /api/ missing")
 	}
 }
+// ---- client-add-header / client-del-header tests ----
+
+func TestClientHeader_AddPlain(t *testing.T) {
+	var gotHeader string
+	// The backend (upstream) does NOT set X-Served-By — we add it in the response to client
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/api/": {
+			Upstreams: []Upstream{mustUpstream(backend.URL+"/", 1)},
+			ParsedClientAddHeaders: map[string]parsedHeaderValue{
+				"X-Served-By": compileHeaderValue("RouteMUX"),
+			},
+		},
+	})
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/api/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotHeader = resp.Header.Get("X-Served-By")
+	if gotHeader != "RouteMUX" {
+		t.Errorf("X-Served-By = %q, want RouteMUX", gotHeader)
+	}
+}
+
+func TestClientHeader_DelHeader(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Powered-By", "Go")
+		w.Header().Set("Server", "go-httpd")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/api/": {
+			Upstreams:       []Upstream{mustUpstream(backend.URL+"/", 1)},
+			ClientDelHeaders: []string{"X-Powered-By", "Server"},
+		},
+	})
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	resp, _ := http.Get(ts.URL + "/api/")
+	if resp.Header.Get("X-Powered-By") != "" {
+		t.Error("X-Powered-By should be deleted from response")
+	}
+	if resp.Header.Get("Server") != "" {
+		t.Error("Server should be deleted from response")
+	}
+}
+
+func TestClientHeader_DelWildcard(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Internal-Trace", "abc123")
+		w.Header().Set("X-Internal-Id", "42")
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/api/": {
+			Upstreams:            []Upstream{mustUpstream(backend.URL+"/", 1)},
+			ClientDelHeaders:     []string{"X-Internal-*"},
+			ClientDelHasWildcard: true,
+		},
+	})
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	resp, _ := http.Get(ts.URL + "/api/")
+	if resp.Header.Get("X-Internal-Trace") != "" {
+		t.Error("X-Internal-Trace should be deleted")
+	}
+	if resp.Header.Get("X-Internal-Id") != "" {
+		t.Error("X-Internal-Id should be deleted")
+	}
+	if resp.Header.Get("Content-Type") == "" {
+		t.Error("Content-Type should NOT be deleted")
+	}
+}
+
+func TestClientHeader_VarRemoteAddr(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/api/": {
+			Upstreams: []Upstream{mustUpstream(backend.URL+"/", 1)},
+			ParsedClientAddHeaders: map[string]parsedHeaderValue{
+				"X-Client-IP": compileHeaderValue("${remote_addr}"),
+			},
+			ClientAddHasVars: true,
+		},
+	})
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	resp, _ := http.Get(ts.URL + "/api/")
+	got := resp.Header.Get("X-Client-IP")
+	if got == "" {
+		t.Error("X-Client-IP should be set to client IP")
+	}
+	if strings.Contains(got, ":") {
+		t.Errorf("X-Client-IP should be IP only (no port), got %q", got)
+	}
+}
+
+func TestClientHeader_VarRespHeader(t *testing.T) {
+	// ${header.X-Upstream-Id} should resolve from the upstream RESPONSE headers
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Upstream-Id", "node-42")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/api/": {
+			Upstreams: []Upstream{mustUpstream(backend.URL+"/", 1)},
+			ParsedClientAddHeaders: map[string]parsedHeaderValue{
+				"X-Node": compileHeaderValue("served-by-${header.X-Upstream-Id}"),
+			},
+			ClientAddHasVars:       true,
+			ClientNeedsRespHeaders: true,
+		},
+	})
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	resp, _ := http.Get(ts.URL + "/api/")
+	got := resp.Header.Get("X-Node")
+	if got != "served-by-node-42" {
+		t.Errorf("X-Node = %q, want served-by-node-42", got)
+	}
+}
+
+func TestClientHeader_DelThenAdd(t *testing.T) {
+	// Delete runs before add — add always wins
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Version", "upstream-v1")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/api/": {
+			Upstreams:        []Upstream{mustUpstream(backend.URL+"/", 1)},
+			ClientDelHeaders: []string{"X-Version"},
+			ParsedClientAddHeaders: map[string]parsedHeaderValue{
+				"X-Version": compileHeaderValue("proxy-v2"),
+			},
+		},
+	})
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	resp, _ := http.Get(ts.URL + "/api/")
+	got := resp.Header.Get("X-Version")
+	if got != "proxy-v2" {
+		t.Errorf("X-Version = %q, want proxy-v2 (add should win over del)", got)
+	}
+}
+
+func TestCLI_ClientAddDelHeader(t *testing.T) {
+	cfg, err := parseAll([]string{
+		"--route", "/api/",
+		"--dest", "http://localhost:3000/",
+		"--client-add-header", "X-Served-By: RouteMUX",
+		"--client-del-header", "Server",
+		"--client-del-header", "X-Powered-*",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc := cfg.VHosts[0].Routes["/api/"]
+	if rc == nil {
+		t.Fatal("route /api/ not found")
+	}
+	if evalConst(rc.ParsedClientAddHeaders["X-Served-By"]) != "RouteMUX" {
+		t.Errorf("X-Served-By = %q", evalConst(rc.ParsedClientAddHeaders["X-Served-By"]))
+	}
+	if len(rc.ClientDelHeaders) != 2 {
+		t.Errorf("ClientDelHeaders = %v, want 2 entries", rc.ClientDelHeaders)
+	}
+	if !rc.ClientDelHasWildcard {
+		t.Error("ClientDelHasWildcard should be true (X-Powered-*)")
+	}
+}
+
+func TestLoadConfigFile_ClientHeaders(t *testing.T) {
+	yml := `
+global:
+  port: 8080
+routes:
+  /api/:
+    dest: http://localhost:3000/
+    client-add-header:
+      X-Served-By: RouteMUX
+      X-Node: node-${remote_addr}
+    client-del-header:
+      - Server
+      - X-Powered-*
+`
+	f, _ := os.CreateTemp("", "routemux-*.yml")
+	f.WriteString(yml)
+	f.Close()
+	defer os.Remove(f.Name())
+
+	cfg, err := loadConfigFile(f.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc := cfg.VHosts[0].Routes["/api/"]
+	if rc == nil {
+		t.Fatal("route /api/ not found")
+	}
+	if evalConst(rc.ParsedClientAddHeaders["X-Served-By"]) != "RouteMUX" {
+		t.Errorf("X-Served-By = %q", evalConst(rc.ParsedClientAddHeaders["X-Served-By"]))
+	}
+	if rc.ParsedClientAddHeaders["X-Node"].isConst {
+		t.Error("X-Node should not be const (has variable)")
+	}
+	if !rc.ClientAddHasVars {
+		t.Error("ClientAddHasVars should be true")
+	}
+	if len(rc.ClientDelHeaders) != 2 {
+		t.Errorf("ClientDelHeaders = %v, want 2", rc.ClientDelHeaders)
+	}
+	if !rc.ClientDelHasWildcard {
+		t.Error("ClientDelHasWildcard should be true")
+	}
+}

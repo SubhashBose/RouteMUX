@@ -180,6 +180,7 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 		effectiveAuth = rc.Auth // may be nil (no auth)
 	}
 
+	var requestHost string
 	// -- Reverse proxy --
 	proxy := &httputil.ReverseProxy{
 		Transport: transport,
@@ -219,6 +220,7 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 				originalHeaders = req.Header.Clone()
 				originalHeaders.Set("Host", req.Host)
 			}
+			requestHost = req.Host
 
 			// Parse client address once — reused for XFF and {remote_addr}/{remote_port} variables.
 			clientIP, clientPort, _ := net.SplitHostPort(req.RemoteAddr)
@@ -284,7 +286,7 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 					requestURI = req.RequestURI
 				}
 				for name, ph := range rc.ParsedAddHeaders {
-					resolved := ph.eval(clientIP, clientPort, scheme, requestURI, originalHeaders)
+					resolved := ph.eval(requestHost, clientIP, clientPort, scheme, requestURI, originalHeaders)
 					if strings.EqualFold(name, "host") {
 						req.Host = resolved
 						continue
@@ -292,6 +294,32 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 					req.Header.Set(name, resolved)
 				}
 			}
+		},
+		ModifyResponse: func(resp *http.Response) error {
+			// ${header.X} in client-add-header resolves from the upstream response headers.
+			// Snapshot before we modify so add-header can reference headers we're about to delete.
+			var respHeaders http.Header
+			if rc.ClientNeedsRespHeaders {
+				respHeaders = resp.Header.Clone()
+			}
+			// Apply client-side response header manipulation.
+			// delete first, then add (add always wins).
+			if len(rc.ClientDelHeaders) > 0 {
+				applyDeleteHeaders(resp.Header, rc.ClientDelHeaders, rc.ClientDelHasWildcard)
+			}
+			if len(rc.ParsedClientAddHeaders) > 0 {
+				req := resp.Request
+				clientIP, clientPort, _ := net.SplitHostPort(req.RemoteAddr)
+				var scheme, requestURI string
+				if rc.ClientAddHasVars {
+					scheme = schemeOf(req)
+					requestURI = req.RequestURI
+				}
+				for name, ph := range rc.ParsedClientAddHeaders {
+					resp.Header.Set(name, ph.eval(requestHost, clientIP, clientPort, scheme, requestURI, respHeaders))
+				}
+			}
+			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			log.Printf("proxy error [%s → %s]: %v", r.URL.Path, r.URL.Host, err)

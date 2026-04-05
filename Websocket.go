@@ -126,13 +126,14 @@ func serveWebSocket(w http.ResponseWriter, r *http.Request, destURL *url.URL, ro
 	if len(rc.ParsedAddHeaders) > 0 {
 		// clientIP and clientPort already parsed above — reused here.
 		// scheme and requestURI only computed when a variable header is present.
-		var scheme, requestURI string
+		var scheme, requestURI, requestHost string
 		if rc.AddHasVars {
 			scheme = "ws"
 			if destURL.Scheme == "wss" || destURL.Scheme == "https" {
 				scheme = "wss"
 			}
 			requestURI = r.RequestURI
+			requestHost = r.Host
 		}
 		// Build snapshot with Host injected so ${header.Host} works.
 		// Only needed when at least one header references ${header.X}.
@@ -142,7 +143,7 @@ func serveWebSocket(w http.ResponseWriter, r *http.Request, destURL *url.URL, ro
 			originalWS.Set("Host", r.Host)
 		}
 		for name, ph := range rc.ParsedAddHeaders {
-			resolved := ph.eval(clientIP, clientPort, scheme, requestURI, originalWS)
+			resolved := ph.eval(requestHost, clientIP, clientPort, scheme, requestURI, originalWS)
 			if strings.EqualFold(name, "host") {
 				outHost = resolved // overwrite the default/delete-derived host
 				continue

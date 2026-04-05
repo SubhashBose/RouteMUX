@@ -382,6 +382,44 @@ func applyCLI(cfg *Config, rawArgs []string) error {
 				curRoute.DeleteHasWildcard = true
 			}
 			i += 2
+		case "--client-add-header":
+			if curRoute == nil {
+				return fmt.Errorf("--client-add-header must follow --route")
+			}
+			if i+1 >= len(args) {
+				return fmt.Errorf("--client-add-header requires a value (format: 'Name: Value')")
+			}
+			name, val, err := parseHeaderString(args[i+1])
+			if err != nil {
+				return fmt.Errorf("--client-add-header: %w", err)
+			}
+			if curRoute.ParsedClientAddHeaders == nil {
+				curRoute.ParsedClientAddHeaders = map[string]parsedHeaderValue{}
+			}
+			ph := compileHeaderValue(val)
+			curRoute.ParsedClientAddHeaders[name] = ph
+			if !ph.isConst {
+				curRoute.ClientAddHasVars = true
+			}
+			for _, seg := range ph.segments {
+				if seg.kind == segHeaderName {
+					curRoute.ClientNeedsRespHeaders = true
+					break
+				}
+			}
+			i += 2
+		case "--client-del-header":
+			if curRoute == nil {
+				return fmt.Errorf("--client-del-header must follow --route")
+			}
+			if i+1 >= len(args) {
+				return fmt.Errorf("--client-del-header requires a value")
+			}
+			curRoute.ClientDelHeaders = append(curRoute.ClientDelHeaders, args[i+1])
+			if strings.Contains(args[i+1], "*") {
+				curRoute.ClientDelHasWildcard = true
+			}
+			i += 2
 		case "--load-balancer-mode":
 			if curRoute == nil {
 				return fmt.Errorf("--load-balancer-mode must follow --route")

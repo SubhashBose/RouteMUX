@@ -117,6 +117,7 @@ type segKind int
 
 const (
 	segLiteral    segKind = iota
+	segHost               // ${host}
 	segRemoteAddr         // ${remote_addr}
 	segRemotePort         // ${remote_port}
 	segScheme             // ${scheme}
@@ -199,6 +200,8 @@ func compileHeaderValue(raw string) parsedHeaderValue {
 // Unknown names become literal text "{name}".
 func resolveVarName(name string) segment {
 	switch name {
+	case "host":
+		return segment{kind: segHost}
 	case "remote_addr":
 		return segment{kind: segRemoteAddr}
 	case "remote_port":
@@ -218,7 +221,7 @@ func resolveVarName(name string) segment {
 // eval resolves a parsedHeaderValue against the current request context.
 // For constant values (isConst == true) this is a single field read — no
 // allocation, no iteration.
-func (ph parsedHeaderValue) eval(clientIP, clientPort, scheme, requestURI string, original http.Header) string {
+func (ph parsedHeaderValue) eval(host, clientIP, clientPort, scheme, requestURI string, original http.Header) string {
 	if ph.isConst {
 		return ph.segments[0].value
 	}
@@ -227,6 +230,8 @@ func (ph parsedHeaderValue) eval(clientIP, clientPort, scheme, requestURI string
 		switch seg.kind {
 		case segLiteral:
 			b.WriteString(seg.value)
+		case segHost:
+			b.WriteString(host)
 		case segRemoteAddr:
 			b.WriteString(clientIP)
 		case segRemotePort:
