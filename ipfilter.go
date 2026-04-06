@@ -526,3 +526,17 @@ func parseFilterEntry(raw string) (filterSource, error) {
 	}
 	return src, nil
 }
+
+// addToCIDRList adds a parsed filterSource to a lazily-initialised *CIDRList.
+// Inline CIDRs are immediately appended to cl.nets; dynamic sources (file/URL)
+// are loaded later via CIDRList.Load(). If *clp is nil it is allocated.
+func addToCIDRList(clp **CIDRList, src filterSource) {
+	if *clp == nil {
+		*clp = &CIDRList{}
+	}
+	cl := *clp
+	cl.sources = append(cl.sources, src)
+	if src.kind == sourceCIDR {
+		cl.nets = append(cl.nets, src.cidr)
+	}
+}
