@@ -16,7 +16,7 @@ A lightweight, flexible, and easy configurable reverse proxy written in Go. Rout
 - **Static responses** — return a fixed HTTP status code and body directly from RouteMUX, no upstream needed
 - **Response header manipulation** — add, overwrite, or delete response headers sent back to the client per route, with wildcard support and variable interpolation
 - **IP filter** — allow or block connections by IP address or CIDR range, loaded from inline values, local files, or remote URLs with optional periodic refresh
-- **Zero external dependencies** - standalone binary available in 15 OS and architecture combinations.
+- **Zero external dependencies** - standalone binary (~7 MB size) available in 15 OS and architecture combinations.
 
 ---
 
@@ -26,22 +26,22 @@ Precompiled binaries for a wide range of platforms are available in the [release
 
 
 | OS       | Architecture   | Download Link |
-|----------|--------|---------------|
-| Linux    | AMD 64-bit  | [Download](https://github.com/SubhashBose/RouteMUX/releases/latest/download/routemux-linux-amd64) |
-| Linux    | i386 32-bit  | [Download](https://github.com/SubhashBose/RouteMUX/releases/latest/download/routemux-linux-386) |
-| Linux    | ARM 64-bit  | [Download](https://github.com/SubhashBose/RouteMUX/releases/latest/download/routemux-linux-arm64) |
-| Linux    | ARM 32-bit   | [Download](https://github.com/SubhashBose/RouteMUX/releases/latest/download/routemux-linux-arm) |
-| Linux    | RISC-V 64-bit   | [Download](https://github.com/SubhashBose/RouteMUX/releases/latest/download/routemux-linux-riscv64) |
-| Windows  | AMD 64-bit  | [Download](https://github.com/SubhashBose/RouteMUX/releases/latest/download/routemux-windows-amd64.exe) |
-| Windows  | i386 32-bit  | [Download](https://github.com/SubhashBose/RouteMUX/releases/latest/download/routemux-windows-386.exe) |
-| Windows  | ARM 64-bit  | [Download](https://github.com/SubhashBose/RouteMUX/releases/latest/download/routemux-windows-arm64.exe) |
-| Windows  | ARM 32-bit   | [Download](https://github.com/SubhashBose/RouteMUX/releases/latest/download/routemux-windows-arm.exe) |
+|----------|----------------|---------------|
+| Linux    | AMD 64-bit     | [Download](https://github.com/SubhashBose/RouteMUX/releases/latest/download/routemux-linux-amd64) |
+| Linux    | i386 32-bit    | [Download](https://github.com/SubhashBose/RouteMUX/releases/latest/download/routemux-linux-386) |
+| Linux    | ARM 64-bit     | [Download](https://github.com/SubhashBose/RouteMUX/releases/latest/download/routemux-linux-arm64) |
+| Linux    | ARM 32-bit     | [Download](https://github.com/SubhashBose/RouteMUX/releases/latest/download/routemux-linux-arm) |
+| Linux    | RISC-V 64-bit  | [Download](https://github.com/SubhashBose/RouteMUX/releases/latest/download/routemux-linux-riscv64) |
+| Windows  | AMD 64-bit     | [Download](https://github.com/SubhashBose/RouteMUX/releases/latest/download/routemux-windows-amd64.exe) |
+| Windows  | i386 32-bit    | [Download](https://github.com/SubhashBose/RouteMUX/releases/latest/download/routemux-windows-386.exe) |
+| Windows  | ARM 64-bit     | [Download](https://github.com/SubhashBose/RouteMUX/releases/latest/download/routemux-windows-arm64.exe) |
+| Windows  | ARM 32-bit     | [Download](https://github.com/SubhashBose/RouteMUX/releases/latest/download/routemux-windows-arm.exe) |
 | MacOS    | Apple Silicon  | [Download](https://github.com/SubhashBose/RouteMUX/releases/latest/download/routemux-darwin-arm64) |
-| MacOS    | Intel 64-bit  | [Download](https://github.com/SubhashBose/RouteMUX/releases/latest/download/routemux-darwin-amd64) |
-| FreeBSD  | AMD 64-bit  | [Download](https://github.com/SubhashBose/RouteMUX/releases/latest/download/routemux-freebsd-amd64) |
-| FreeBSD  | i386 32-bit  | [Download](https://github.com/SubhashBose/RouteMUX/releases/latest/download/routemux-freebsd-386) |
-| FreeBSD  | ARM 64-bit  | [Download](https://github.com/SubhashBose/RouteMUX/releases/latest/download/routemux-freebsd-arm64) |
-| FreeBSD  | ARM 32-bit   | [Download](https://github.com/SubhashBose/RouteMUX/releases/latest/download/routemux-freebsd-arm) |
+| MacOS    | Intel 64-bit   | [Download](https://github.com/SubhashBose/RouteMUX/releases/latest/download/routemux-darwin-amd64) |
+| FreeBSD  | AMD 64-bit     | [Download](https://github.com/SubhashBose/RouteMUX/releases/latest/download/routemux-freebsd-amd64) |
+| FreeBSD  | i386 32-bit    | [Download](https://github.com/SubhashBose/RouteMUX/releases/latest/download/routemux-freebsd-386) |
+| FreeBSD  | ARM 64-bit     | [Download](https://github.com/SubhashBose/RouteMUX/releases/latest/download/routemux-freebsd-arm64) |
+| FreeBSD  | ARM 32-bit     | [Download](https://github.com/SubhashBose/RouteMUX/releases/latest/download/routemux-freebsd-arm) |
 
 
 ### Update
@@ -96,8 +96,11 @@ global:
   port: 8080        # Port to listen on (default: 8080)
   # tls-cert: /path/to/cert.pem
   # tls-key:  /path/to/key.pem
-  # global-auth: ["admin", "s3cr3t"]   # HTTP Basic Auth applied to all routes
-  # trust-client-headers: true   # default: false
+  global-auth: ["admin", "s3cr3t"]   # HTTP Basic Auth applied to all routes
+  # trust-client-headers: true    # (default: false) Trust X-Forwarded-* from all connections
+  trusted-proxies:              # Trust X-Forwarded-* from these IPs only
+    - 10.0.0.0/8
+    - 172.16.0.0/12
   # ip-filter:
   #   blocked:
   #     - 10.0.0.0/8
@@ -106,9 +109,6 @@ global:
   #     - 127.0.0.1
   #     - ::1
   #     - https://www.cloudflare.com/ips-v4 cache=./cachelist refresh=5h
-  # trusted-proxies:              # Trust X-Forwarded-* from these IPs only
-  #   - 10.0.0.0/8
-  #   - 172.16.0.0/12
 
 vhosts:                                    
   - domains: ["example.com", "www.example.com"] # Hostname to match following routes group
@@ -181,9 +181,9 @@ routemux [global options] \
 | `--tls-key FILE` | TLS key file — required when `--tls-cert` is set |
 | `--global-auth USER:PASS` | HTTP Basic Auth for all routes |
 | `--trust-client-headers`  | Trust X-Forwarded-* headers from client (default: false) |
+| `--trusted-proxy ENTRY`   | Trust X-Forwarded-* headers from these IP/CIDR/file/URL list (repeatable) |
 | `--ip-filter-allow ENTRY` | Allow an IP, CIDR, file, or URL (repeatable) |
 | `--ip-filter-block ENTRY` | Block an IP, CIDR, file, or URL (repeatable) |
-| `--trusted-proxy ENTRY` | Trust X-Forwarded-* headers from this IP/CIDR/file/URL (repeatable) |
 
 ### Vhost and Route
 
@@ -412,9 +412,9 @@ routes:
 |--------|-----------|
 | `Host` | Passed through from client by default. `dest-del-header: Host` uses the upstream host. `dest-add-header: Host: custom.example.com` sets a custom value. |
 | `Authorization` | Passed through when no proxy auth. Stripped when proxy auth is active (to prevent credential leakage). |
-| `X-Forwarded-For` | Behaviour depends on `trust-client-headers` (see below). `dest-del-header: X-Forwarded-For` suppresses it entirely. |
-| `X-Forwarded-Host` | Set to original client `Host` when `trust-client-headers: false`. Left untouched when `true`. |
-| `X-Forwarded-Proto` | Set from actual TLS state when `trust-client-headers: false`. Left untouched when `true`. |
+| `X-Forwarded-For` | Adds connecting IP. Behavior (overwrite or append) depends on `trust-client-headers` and `trusted-proxies` (see [below](#trusted-proxy-behavior)). `dest-del-header: X-Forwarded-For` suppresses it entirely. |
+| `X-Forwarded-Host` | Set to original client `Host`. Left untouched when `trust-client-headers: true` or remote ip is in `trusted-proxies`. |
+| `X-Forwarded-Proto` | Set from actual TLS (http/https) state. Left untouched when `trust-client-headers: true` or remote ip is in `trusted-proxies`. |
 
 ---
 
@@ -687,7 +687,7 @@ routemux   --trusted-proxy 10.0.0.0/8   --trusted-proxy 172.16.0.0/12   --route 
 
 The `trusted-proxies` list supports the same entry formats as `ip-filter`: bare IPs, CIDRs, local files, and remote URLs with optional `refresh=` and `cache=` options.
 
-### Behaviour comparison
+### <a name="trusted-proxy-behavior"></a>Behaviour comparison
 
 | Header | Default (untrusted) | Trusted (`trust-client-headers` or `trusted-proxies` match) |
 |--------|---------------------|--------------------------------------------------------------|
