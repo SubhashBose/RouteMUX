@@ -53,6 +53,12 @@ func newServer(cfg *Config) (*server, error) {
 		}
 		cfg.IPFilter.StartRefresh()
 	}
+	if cfg.TrustedProxies != nil {
+		if err := cfg.TrustedProxies.Load(); err != nil {
+			return nil, fmt.Errorf("trusted-proxies: %w", err)
+		}
+		cfg.TrustedProxies.StartRefresh()
+	}
 	return s, nil
 }
 
@@ -227,19 +233,22 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 			// Parse client address once — reused for XFF and {remote_addr}/{remote_port} variables.
 			clientIP, clientPort, _ := net.SplitHostPort(req.RemoteAddr)
 
-			// X-Forwarded-* handling depends on trust-client-headers setting.
+			// X-Forwarded-* handling depends on trust-client-headers setting
+			// or whether the connecting IP is in trusted-proxies.
 			//
-			// false (default — secure, routemux is the entry point):
-			//   X-Forwarded-For   → discard client chain, set to connecting IP only
-			//   X-Forwarded-Host  → set to original client Host
-			//   X-Forwarded-Proto → set from actual TLS state (never trust client)
-			//
-			// true (routemux sits behind a trusted upstream proxy):
+			// trust mode (TrustClientHeaders=true OR connecting IP in TrustedProxies):
 			//   X-Forwarded-For   → append connecting IP to existing chain
 			//   X-Forwarded-Host  → leave untouched (upstream proxy already set it)
 			//   X-Forwarded-Proto → leave untouched (upstream proxy already set it)
+			//
+			// default (secure, routemux is the entry point):
+			//   X-Forwarded-For   → discard client chain, set to connecting IP only
+			//   X-Forwarded-Host  → set to original client Host
+			//   X-Forwarded-Proto → set from actual TLS state (never trust client)
+			trusted := s.cfg.TrustClientHeaders ||
+				(s.cfg.TrustedProxies != nil && s.cfg.TrustedProxies.IsTrusted(req.RemoteAddr))
 			if clientIP != "" {
-				if s.cfg.TrustClientHeaders {
+				if trusted {
 					if prior, ok := req.Header["X-Forwarded-For"]; ok {
 						req.Header.Set("X-Forwarded-For", strings.Join(prior, ", ")+", "+clientIP)
 					} else {
@@ -251,8 +260,8 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 				}
 			}
 			// X-Forwarded-Host and X-Forwarded-Proto don't depend on clientIP —
-			// set them unconditionally when not trusting client headers.
-			if !s.cfg.TrustClientHeaders {
+			// set them unconditionally when not in trust mode.
+			if !trusted {
 				req.Header.Set("X-Forwarded-Host", req.Host)
 				req.Header.Set("X-Forwarded-Proto", schemeOf(req))
 			}

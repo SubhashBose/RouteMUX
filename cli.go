@@ -10,7 +10,7 @@ import (
 	"github.com/SubhashBose/GoPkg-selfupdater"
 )
 
-var version = "0.2"
+var version = "0.3"
 
 // parseAll merges config file + CLI args into a final Config.
 // CLI args take precedence over config file.
@@ -246,27 +246,49 @@ func applyCLI(cfg *Config, rawArgs []string) error {
 		case "--trust-client-headers":
 			cfg.TrustClientHeaders = true
 			i++
+		case "--trusted-proxy":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--trusted-proxy requires a value")
+			}
+			src, err := parseFilterEntry(args[i+1])
+			if err != nil {
+				return fmt.Errorf("--trusted-proxy: %w", err)
+			}
+			if cfg.TrustedProxies == nil {
+				cfg.TrustedProxies = &TrustedProxies{list: &CIDRList{}}
+			}
+			cfg.TrustedProxies.list.sources = append(cfg.TrustedProxies.list.sources, src)
+			if src.kind == sourceCIDR {
+				cfg.TrustedProxies.list.nets = append(cfg.TrustedProxies.list.nets, src.cidr)
+			}
+			i += 2
 		case "--ip-filter-allow", "--ip-filter-block":
 			if i+1 >= len(args) {
 				return fmt.Errorf("%s requires a value", arg)
 			}
-			list := filterAllowed
-			if arg == "--ip-filter-block" {
-				list = filterBlocked
-			}
 			if cfg.IPFilter == nil {
 				cfg.IPFilter = &IPFilter{}
 			}
-			src, err := parseFilterEntry(args[i+1], list)
+			src, err := parseFilterEntry(args[i+1])
 			if err != nil {
 				return fmt.Errorf("%s: %w", arg, err)
 			}
-			cfg.IPFilter.sources = append(cfg.IPFilter.sources, src)
-			// Inline CIDRs rebuild immediately; dynamic sources load at server start.
-			if src.kind == sourceCIDR {
-				cfg.IPFilter.mu.Lock()
-				cfg.IPFilter.rebuildLocked()
-				cfg.IPFilter.mu.Unlock()
+			if arg == "--ip-filter-allow" {
+				if cfg.IPFilter.allowed == nil {
+					cfg.IPFilter.allowed = &CIDRList{}
+				}
+				cfg.IPFilter.allowed.sources = append(cfg.IPFilter.allowed.sources, src)
+				if src.kind == sourceCIDR {
+					cfg.IPFilter.allowed.nets = append(cfg.IPFilter.allowed.nets, src.cidr)
+				}
+			} else {
+				if cfg.IPFilter.blocked == nil {
+					cfg.IPFilter.blocked = &CIDRList{}
+				}
+				cfg.IPFilter.blocked.sources = append(cfg.IPFilter.blocked.sources, src)
+				if src.kind == sourceCIDR {
+					cfg.IPFilter.blocked.nets = append(cfg.IPFilter.blocked.nets, src.cidr)
+				}
 			}
 			i += 2
 		case "--global-auth":
@@ -525,6 +547,8 @@ Global options:
   --tls-cert FILE          TLS certificate file (enables HTTPS)
   --tls-key  FILE          TLS key file (enables HTTPS)
   --trust-client-headers   Trust X-Forwarded-* headers from client (default: false)
+  --trusted-proxy ENTRY    Trust X-Forwarded-* headers from specific proxy IPs (repeatable)
+                           ENTRY: IP, CIDR, file path, or URL — same format as --ip-filter-allow
   --ip-filter-allow ENTRY  Allow an IP, CIDR, file, or URL (repeatable)
   --ip-filter-block ENTRY  Block an IP, CIDR, file, or URL (repeatable)
                            ENTRY formats:
@@ -578,6 +602,8 @@ Config file (config.yml) example:
     tls-key: ""
     global-auth: ["USER", "PASSWORD"]
     trust-client-headers: false
+    trusted-proxy:
+	  - 192.168.0.0/16
     ip-filter:
       blocked:
         - 10.0.0.0/8
@@ -587,7 +613,7 @@ Config file (config.yml) example:
   vhosts:
     - domains: ["example.com", "www.example.com"]
       routes:
-        "/path/":
+        "/api/":
            dest: http://localhost:3000/
            noTLSverify: false
            auth: ["USER", "PASSWORD"]
@@ -608,7 +634,7 @@ Config file (config.yml) example:
              - http://localhost:3000/
              - http://localhost:3001/ weight=5
            load-balancer-mode: round-robin
-		   
+
         "/health/":
            dest: STATUS 200 Health is ok
 

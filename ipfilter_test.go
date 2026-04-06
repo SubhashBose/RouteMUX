@@ -35,15 +35,24 @@ func mustNet(cidr string) net.IPNet {
 
 func filterWithNets(allowed, blocked []string) *IPFilter {
 	f := &IPFilter{}
-	for _, s := range allowed {
-		f.sources = append(f.sources, filterSource{kind: sourceCIDR, list: filterAllowed, cidr: mustNet(s)})
+	if len(allowed) > 0 {
+		cl := &CIDRList{}
+		for _, s := range allowed {
+			n := mustNet(s)
+			cl.sources = append(cl.sources, filterSource{kind: sourceCIDR, cidr: n})
+			cl.nets = append(cl.nets, n)
+		}
+		f.allowed = cl
 	}
-	for _, s := range blocked {
-		f.sources = append(f.sources, filterSource{kind: sourceCIDR, list: filterBlocked, cidr: mustNet(s)})
+	if len(blocked) > 0 {
+		cl := &CIDRList{}
+		for _, s := range blocked {
+			n := mustNet(s)
+			cl.sources = append(cl.sources, filterSource{kind: sourceCIDR, cidr: n})
+			cl.nets = append(cl.nets, n)
+		}
+		f.blocked = cl
 	}
-	f.mu.Lock()
-	f.rebuildLocked()
-	f.mu.Unlock()
 	return f
 }
 
@@ -127,7 +136,7 @@ func TestIPFilter_IPv6(t *testing.T) {
 // ---- parseFilterEntry tests ----
 
 func TestParseFilterEntry_InlineCIDR(t *testing.T) {
-	src, err := parseFilterEntry("10.0.0.0/8", filterBlocked)
+	src, err := parseFilterEntry("10.0.0.0/8")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +149,7 @@ func TestParseFilterEntry_InlineCIDR(t *testing.T) {
 }
 
 func TestParseFilterEntry_FilePath(t *testing.T) {
-	src, err := parseFilterEntry("/etc/blocklist.txt refresh=6h", filterBlocked)
+	src, err := parseFilterEntry("/etc/blocklist.txt refresh=6h")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +165,7 @@ func TestParseFilterEntry_FilePath(t *testing.T) {
 }
 
 func TestParseFilterEntry_URL(t *testing.T) {
-	src, err := parseFilterEntry("https://example.com/list refresh=12h cache=/tmp/cache.txt", filterBlocked)
+	src, err := parseFilterEntry("https://example.com/list refresh=12h cache=/tmp/cache.txt")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +184,7 @@ func TestParseFilterEntry_URL(t *testing.T) {
 }
 
 func TestParseFilterEntry_URLNoRefresh(t *testing.T) {
-	src, err := parseFilterEntry("https://example.com/list", filterAllowed)
+	src, err := parseFilterEntry("https://example.com/list")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,28 +197,28 @@ func TestParseFilterEntry_URLNoRefresh(t *testing.T) {
 }
 
 func TestParseFilterEntry_InvalidRefresh(t *testing.T) {
-	_, err := parseFilterEntry("10.0.0.0/8 refresh=notaduration", filterBlocked)
+	_, err := parseFilterEntry("10.0.0.0/8 refresh=notaduration")
 	if err == nil {
 		t.Error("expected error for invalid refresh duration")
 	}
 }
 
 func TestParseFilterEntry_CIDRWithRefresh_Error(t *testing.T) {
-	_, err := parseFilterEntry("10.0.0.0/8 refresh=1h", filterBlocked)
+	_, err := parseFilterEntry("10.0.0.0/8 refresh=1h")
 	if err == nil {
 		t.Error("expected error: inline CIDR does not support refresh=")
 	}
 }
 
 func TestParseFilterEntry_FileWithCache_Error(t *testing.T) {
-	_, err := parseFilterEntry("/etc/list.txt cache=/tmp/cache.txt", filterBlocked)
+	_, err := parseFilterEntry("/etc/list.txt cache=/tmp/cache.txt")
 	if err == nil {
 		t.Error("expected error: file source does not support cache=")
 	}
 }
 
 func TestParseFilterEntry_UnknownOption(t *testing.T) {
-	_, err := parseFilterEntry("https://example.com/list unknown=val", filterBlocked)
+	_, err := parseFilterEntry("https://example.com/list unknown=val")
 	if err == nil {
 		t.Error("expected error for unknown option")
 	}
@@ -346,18 +355,19 @@ func TestFileSource_MtimeRefresh(t *testing.T) {
 	fmt.Fprintln(f, "10.0.0.0/8")
 	f.Close()
 
-	filter := &IPFilter{}
-	idx := len(filter.sources)
-	filter.sources = append(filter.sources, filterSource{
+	// Use CIDRList directly for the blocked source
+	cl := &CIDRList{}
+	src := filterSource{
 		kind:    sourceFile,
-		list:    filterBlocked,
 		path:    f.Name(),
 		refresh: 50 * time.Millisecond,
-	})
+	}
+	cl.sources = append(cl.sources, src)
+	filter := &IPFilter{blocked: cl}
 
 	// Initial load
-	cidrs, _ := loadSource(&filter.sources[idx])
-	filter.setDynamic(idx, filterBlocked, cidrs)
+	cidrs, _ := loadSource(&cl.sources[0])
+	cl.setDynamic(0, cidrs)
 
 	if filter.Allow("10.1.2.3:80") {
 		t.Error("10.1.2.3 should be blocked after initial load")
@@ -370,8 +380,8 @@ func TestFileSource_MtimeRefresh(t *testing.T) {
 	f2.Close()
 
 	// Manually trigger a reload (simulating the ticker)
-	cidrs2, _ := loadSource(&filter.sources[idx])
-	filter.setDynamic(idx, filterBlocked, cidrs2)
+	cidrs2, _ := loadSource(&cl.sources[0])
+	cl.setDynamic(0, cidrs2)
 
 	if !filter.Allow("10.1.2.3:80") {
 		t.Error("10.1.2.3 should be allowed after file update")
@@ -405,9 +415,6 @@ func TestBuildIPFilter_InlineCIDRs(t *testing.T) {
 	if f == nil {
 		t.Fatal("expected non-nil IPFilter")
 	}
-	f.mu.Lock()
-	f.rebuildLocked()
-	f.mu.Unlock()
 	// 192.168.1.1 is in allowed, not in blocked → allowed
 	if !f.Allow("192.168.1.1:80") {
 		t.Error("192.168.1.1 should be allowed")
@@ -521,7 +528,7 @@ routes:
 // ---- Bare IP auto-expansion tests ----
 
 func TestParseFilterEntry_BareIPv4(t *testing.T) {
-	src, err := parseFilterEntry("127.0.0.1", filterAllowed)
+	src, err := parseFilterEntry("127.0.0.1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -534,7 +541,7 @@ func TestParseFilterEntry_BareIPv4(t *testing.T) {
 }
 
 func TestParseFilterEntry_BareIPv6(t *testing.T) {
-	src, err := parseFilterEntry("::1", filterAllowed)
+	src, err := parseFilterEntry("::1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -667,12 +674,15 @@ func TestCLI_IPFilterFile(t *testing.T) {
 	if cfg.IPFilter == nil {
 		t.Fatal("IPFilter should be set")
 	}
-	// File sources load at server start via Load() — just verify source was registered
-	if len(cfg.IPFilter.sources) != 1 {
-		t.Errorf("expected 1 source, got %d", len(cfg.IPFilter.sources))
+	// File sources load at server start via Load() — verify source registered in blocked list
+	if cfg.IPFilter.blocked == nil {
+		t.Fatal("blocked CIDRList should be set")
 	}
-	if cfg.IPFilter.sources[0].kind != sourceFile {
-		t.Errorf("source kind = %v, want sourceFile", cfg.IPFilter.sources[0].kind)
+	if len(cfg.IPFilter.blocked.sources) != 1 {
+		t.Errorf("expected 1 source, got %d", len(cfg.IPFilter.blocked.sources))
+	}
+	if cfg.IPFilter.blocked.sources[0].kind != sourceFile {
+		t.Errorf("source kind = %v, want sourceFile", cfg.IPFilter.blocked.sources[0].kind)
 	}
 }
 
@@ -683,5 +693,200 @@ func TestCLI_IPFilterInvalidEntry(t *testing.T) {
 	})
 	if err == nil {
 		t.Error("expected error for invalid refresh duration")
+	}
+}
+
+// ---- TrustedProxies tests ----
+
+func TestTrustedProxies_IsTrusted(t *testing.T) {
+	cl := &CIDRList{}
+	for _, cidr := range []string{"10.0.0.0/8", "192.168.0.0/16"} {
+		n := mustNet(cidr)
+		cl.sources = append(cl.sources, filterSource{kind: sourceCIDR, cidr: n})
+		cl.nets = append(cl.nets, n)
+	}
+	tp := &TrustedProxies{list: cl}
+
+	tests := []struct {
+		addr    string
+		trusted bool
+	}{
+		{"10.1.2.3:54321", true},
+		{"192.168.1.1:54321", true},
+		{"172.16.0.1:54321", false},
+		{"1.2.3.4:54321", false},
+	}
+	for _, tt := range tests {
+		if got := tp.IsTrusted(tt.addr); got != tt.trusted {
+			t.Errorf("IsTrusted(%q) = %v, want %v", tt.addr, got, tt.trusted)
+		}
+	}
+}
+
+func TestTrustedProxies_XFFBehaviour(t *testing.T) {
+	// When connecting from a trusted proxy, X-Forwarded-For should be appended
+	// (not overwritten) and X-Forwarded-Host/Proto should be left untouched.
+	var gotXFF, gotXFH, gotXFP string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotXFF = r.Header.Get("X-Forwarded-For")
+		gotXFH = r.Header.Get("X-Forwarded-Host")
+		gotXFP = r.Header.Get("X-Forwarded-Proto")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL+"/", 1)}},
+	})
+	// Trust loopback — test server connects via 127.0.0.1
+	cl := &CIDRList{}
+	n := mustNet("127.0.0.0/8")
+	cl.sources = append(cl.sources, filterSource{kind: sourceCIDR, cidr: n})
+	cl.nets = append(cl.nets, n)
+	cfg.TrustedProxies = &TrustedProxies{list: cl}
+
+	srv, err := newServer(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
+	req.Header.Set("X-Forwarded-For", "1.2.3.4")
+	req.Header.Set("X-Forwarded-Host", "original.example.com")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	http.DefaultClient.Do(req)
+
+	// Trusted proxy: existing XFF should be preserved/appended, not overwritten
+	if gotXFF == "127.0.0.1" {
+		t.Error("trusted proxy: XFF should append, not overwrite")
+	}
+	if !strings.Contains(gotXFF, "1.2.3.4") {
+		t.Errorf("trusted proxy: XFF should contain original chain, got %q", gotXFF)
+	}
+	// XFH and XFP should be left untouched
+	if gotXFH != "original.example.com" {
+		t.Errorf("trusted proxy: X-Forwarded-Host should be untouched, got %q", gotXFH)
+	}
+	if gotXFP != "https" {
+		t.Errorf("trusted proxy: X-Forwarded-Proto should be untouched, got %q", gotXFP)
+	}
+}
+
+func TestTrustedProxies_UntrustedOverwrites(t *testing.T) {
+	// When NOT from a trusted proxy, XFF should be overwritten with connecting IP
+	var gotXFF string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotXFF = r.Header.Get("X-Forwarded-For")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL+"/", 1)}},
+	})
+	// Trust only 10.0.0.0/8 — test client is 127.0.0.1, so untrusted
+	cl := &CIDRList{}
+	n := mustNet("10.0.0.0/8")
+	cl.sources = append(cl.sources, filterSource{kind: sourceCIDR, cidr: n})
+	cl.nets = append(cl.nets, n)
+	cfg.TrustedProxies = &TrustedProxies{list: cl}
+
+	srv, err := newServer(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
+	req.Header.Set("X-Forwarded-For", "evil-spoofed-ip")
+	http.DefaultClient.Do(req)
+
+	// Untrusted: spoofed XFF should be discarded, only real IP kept
+	if gotXFF == "evil-spoofed-ip" {
+		t.Error("untrusted client: spoofed XFF should be overwritten")
+	}
+	if strings.Contains(gotXFF, "evil") {
+		t.Errorf("untrusted: XFF should not contain spoofed value, got %q", gotXFF)
+	}
+}
+
+func TestBuildTrustedProxies_Nil(t *testing.T) {
+	tp, err := buildTrustedProxies(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tp != nil {
+		t.Error("nil config should return nil TrustedProxies")
+	}
+}
+
+func TestLoadConfigFile_TrustedProxies(t *testing.T) {
+	yml := `
+global:
+  port: 8080
+  trusted-proxies:
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+routes:
+  /:
+    dest: http://localhost:3000/
+`
+	f, _ := os.CreateTemp("", "routemux-*.yml")
+	f.WriteString(yml)
+	f.Close()
+	defer os.Remove(f.Name())
+
+	cfg, err := loadConfigFile(f.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TrustedProxies == nil {
+		t.Fatal("TrustedProxies should be set")
+	}
+	if !cfg.TrustedProxies.IsTrusted("10.1.2.3:80") {
+		t.Error("10.1.2.3 should be trusted")
+	}
+	if cfg.TrustedProxies.IsTrusted("1.2.3.4:80") {
+		t.Error("1.2.3.4 should not be trusted")
+	}
+}
+
+func TestCLI_TrustedProxy(t *testing.T) {
+	cfg, err := parseAll([]string{
+		"--trusted-proxy", "10.0.0.0/8",
+		"--trusted-proxy", "192.168.0.0/16",
+		"--route", "/", "--dest", "http://localhost:3000/",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TrustedProxies == nil {
+		t.Fatal("TrustedProxies should be set")
+	}
+	if !cfg.TrustedProxies.IsTrusted("10.1.2.3:80") {
+		t.Error("10.1.2.3 should be trusted")
+	}
+	if !cfg.TrustedProxies.IsTrusted("192.168.1.1:80") {
+		t.Error("192.168.1.1 should be trusted")
+	}
+	if cfg.TrustedProxies.IsTrusted("172.16.0.1:80") {
+		t.Error("172.16.0.1 should not be trusted")
+	}
+}
+
+func TestCIDRList_Contains(t *testing.T) {
+	cl := &CIDRList{}
+	for _, cidr := range []string{"10.0.0.0/8"} {
+		n := mustNet(cidr)
+		cl.nets = append(cl.nets, n)
+	}
+	if !cl.Contains(net.ParseIP("10.1.2.3")) {
+		t.Error("10.1.2.3 should be in 10.0.0.0/8")
+	}
+	if cl.Contains(net.ParseIP("192.168.1.1")) {
+		t.Error("192.168.1.1 should not be in 10.0.0.0/8")
 	}
 }

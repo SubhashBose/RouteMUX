@@ -11,7 +11,7 @@ A lightweight, flexible, and easy configurable reverse proxy written in Go. Rout
 - **HTTP Basic Auth** — global auth for all routes, per-route override, or explicit disable
 - **Header manipulation** — add, overwrite, or delete upstream request headers per route, with wildcard support (`CF-*`, `X-*`) and variable interpolation (`${remote_addr}`, `${header.User-Agent}`, etc.)
 - **Config file + CLI** — full configuration via `config.yml` as well as command-line flags, or combining both; CLI takes precedence.
-- **Trusted proxy support** — `trust-client-headers` mode for deployments behind an upstream proxy
+- **Trusted proxy support** — `trust-client-headers` global flag or per-IP `trusted-proxies` list for selective proxy trust
 - **Load balancing** — weighted random or weighted round-robin across multiple upstream destinations
 - **Static responses** — return a fixed HTTP status code and body directly from RouteMUX, no upstream needed
 - **Response header manipulation** — add, overwrite, or delete response headers sent back to the client per route, with wildcard support and variable interpolation
@@ -106,6 +106,9 @@ global:
   #     - 127.0.0.1
   #     - ::1
   #     - https://www.cloudflare.com/ips-v4 cache=./cachelist refresh=5h
+  # trusted-proxies:              # Trust X-Forwarded-* from these IPs only
+  #   - 10.0.0.0/8
+  #   - 172.16.0.0/12
 
 vhosts:                                    
   - domains: ["example.com", "www.example.com"] # Hostname to match following routes group
@@ -180,6 +183,7 @@ routemux [global options] \
 | `--trust-client-headers`  | Trust X-Forwarded-* headers from client (default: false) |
 | `--ip-filter-allow ENTRY` | Allow an IP, CIDR, file, or URL (repeatable) |
 | `--ip-filter-block ENTRY` | Block an IP, CIDR, file, or URL (repeatable) |
+| `--trusted-proxy ENTRY` | Trust X-Forwarded-* headers from this IP/CIDR/file/URL (repeatable) |
 
 ### Vhost and Route
 
@@ -648,19 +652,50 @@ The `timeout` setting is intentionally **not** applied to WebSocket connections 
 
 ---
 
-## Trusted Proxy Support (`trust-client-headers`)
+## Trusted Proxy Support
 
 By default, RouteMUX treats itself as the public entry point and does not trust `X-Forwarded-*` headers sent by clients. This is the safe default — a client could forge `X-Forwarded-For: 1.1.1.1` to spoof their IP or `X-Forwarded-Proto: https` to lie about the connection type.
 
-When RouteMUX sits behind a trusted upstream proxy (e.g. a cloud load balancer, CDN, or another RouteMUX instance), set `trust-client-headers: true` to preserve the chain the upstream proxy already built.
+RouteMUX offers two ways to enable trusted proxy behaviour:
+
+### Option 1 — `trust-client-headers: true` (global)
+
+Trusts `X-Forwarded-*` from **all** connecting clients. Use this only when RouteMUX is always behind a single trusted proxy such as a CDN or load balancer.
+
+```yaml
+global:
+  trust-client-headers: true
+```
+
+### Option 2 — `trusted-proxies` (per-IP)
+
+Trusts `X-Forwarded-*` only from specific IP addresses or ranges. Connections from other IPs are treated as untrusted — their forwarded headers are discarded. This is the safer choice when the proxy IP is known.
+
+```yaml
+global:
+  trusted-proxies:
+    - 10.0.0.0/8                        # internal load balancer range
+    - 172.16.0.0/12
+    - https://example.com/proxy-ips refresh=12h cache=/tmp/proxies.txt
+```
+
+CLI equivalent (repeatable, same entry formats as `--ip-filter-allow`):
+
+```bash
+routemux   --trusted-proxy 10.0.0.0/8   --trusted-proxy 172.16.0.0/12   --route / --dest http://localhost:3000/
+```
+
+The `trusted-proxies` list supports the same entry formats as `ip-filter`: bare IPs, CIDRs, local files, and remote URLs with optional `refresh=` and `cache=` options.
 
 ### Behaviour comparison
 
-| Header | `trust-client-headers: false` (default) | `trust-client-headers: true` |
-|--------|------------------------------------------|-------------------------------|
+| Header | Default (untrusted) | Trusted (`trust-client-headers` or `trusted-proxies` match) |
+|--------|---------------------|--------------------------------------------------------------|
 | `X-Forwarded-For` | Discard client chain — set to connecting IP only | Append connecting IP to existing chain |
 | `X-Forwarded-Host` | Set to original client `Host` header | Leave untouched |
 | `X-Forwarded-Proto` | Set from actual TLS state of connection | Leave untouched |
+
+> **Security note:** `trust-client-headers: true` trusts every connecting client unconditionally. Prefer `trusted-proxies` with explicit IP ranges when possible, so spoofed `X-Forwarded-*` headers from direct clients are always discarded.
 
 ---
 

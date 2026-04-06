@@ -18,7 +18,8 @@ type Config struct {
 	GlobalAuth         *Auth
 	TrustClientHeaders bool
 	VHosts             []VHost    // ordered list; matched top-to-bottom per request
-	IPFilter           *IPFilter  // nil = no IP filtering
+	IPFilter           *IPFilter        // nil = no IP filtering
+	TrustedProxies     *TrustedProxies  // nil = use global TrustClientHeaders
 }
 
 // VHost groups a set of routes under one or more domain names.
@@ -107,7 +108,8 @@ type fileGlobal struct {
 	TLSKey     string   `yaml:"tls-key"`
 	GlobalAuth          []string `yaml:"global-auth"`   // ["USER", "PASSWORD"]
 	TrustClientHeaders  bool            `yaml:"trust-client-headers"`
-	IPFilterCfg         *IPFilterConfig `yaml:"ip-filter"`
+	IPFilterCfg          *IPFilterConfig    `yaml:"ip-filter"`
+	TrustedProxiesCfg    TrustedProxiesConfig `yaml:"trusted-proxies"`
 }
 
 type fileRoute struct {
@@ -201,6 +203,13 @@ func loadConfigFile(path string) (*Config, error) {
 			return nil, fmt.Errorf("ip-filter: %w", err)
 		}
 		cfg.IPFilter = f
+	}
+	if len(fc.Global.TrustedProxiesCfg) > 0 {
+		tp, err := buildTrustedProxies(fc.Global.TrustedProxiesCfg)
+		if err != nil {
+			return nil, fmt.Errorf("trusted-proxies: %w", err)
+		}
+		cfg.TrustedProxies = tp
 	}
 
 	if len(fc.Global.GlobalAuth) == 2 {

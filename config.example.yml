@@ -4,8 +4,11 @@ global:
   #tls-cert: /path/to/cert.pem
   #tls-key:  /path/to/key.pem
   global-auth: ["admin", "s3cr3t"]   # HTTP Basic Auth for all routes
-  #trust-client-headers: true
-  ip-filter:
+  #trust-client-headers: true    # Trust X-Forwarded-* headers for all connections
+  trusted-proxies:               # Trust X-Forwarded-* headers only for these IPs/CIDRs
+    - 172.16.0.0/12
+    - https://www.cloudflare.com/ips-v4 cache=/tmp/cacheCFlist refresh=5h
+  ip-filter:                     # Block and allow IP addresses/ CIDR ranges
     blocked:
       - 10.0.0.0/8
       #- ./allowIPs.txt refresh=2h
