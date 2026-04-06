@@ -144,20 +144,7 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 		if rc.AuthExplicit {
 			effectiveAuth = rc.Auth
 		}
-		if effectiveAuth != nil {
-			inner := h
-			auth := effectiveAuth
-			h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				user, pass, ok := r.BasicAuth()
-				if !ok || user != auth.User || pass != auth.Password {
-					w.Header().Set("WWW-Authenticate", `Basic realm="routemux"`)
-					http.Error(w, "Unauthorized", http.StatusUnauthorized)
-					return
-				}
-				inner.ServeHTTP(w, r)
-			})
-		}
-		return h, nil
+		return requireBasicAuth(effectiveAuth, h), nil
 	}
 
 	// -- TLS transport wrapped in a RoundTripper that fixes X-Forwarded-For --
@@ -245,8 +232,14 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 			//   X-Forwarded-For   → discard client chain, set to connecting IP only
 			//   X-Forwarded-Host  → set to original client Host
 			//   X-Forwarded-Proto → set from actual TLS state (never trust client)
+			// trusted: global flag OR connecting IP is in trusted-proxies list.
+			// clientIP is already parsed above — reuse it to avoid double SplitHostPort.
+			var clientNetIP net.IP
+			if s.cfg.TrustedProxies != nil {
+				clientNetIP = net.ParseIP(clientIP)
+			}
 			trusted := s.cfg.TrustClientHeaders ||
-				(s.cfg.TrustedProxies != nil && s.cfg.TrustedProxies.IsTrusted(req.RemoteAddr))
+				(clientNetIP != nil && s.cfg.TrustedProxies.list.Contains(clientNetIP))
 			if clientIP != "" {
 				if trusted {
 					if prior, ok := req.Header["X-Forwarded-For"]; ok {
@@ -341,32 +334,17 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 	}
 
 	// Wrap with basic auth if needed.
-	if effectiveAuth != nil {
-		inner := h
-		auth := effectiveAuth
-		h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			user, pass, ok := r.BasicAuth()
-			if !ok || user != auth.User || pass != auth.Password {
-				w.Header().Set("WWW-Authenticate", `Basic realm="routemux"`)
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
-				return
-			}
-			inner.ServeHTTP(w, r)
-		})
-	}
+	h = requireBasicAuth(effectiveAuth, h)
 
 	// Wrap: intercept WebSocket upgrades before auth/timeout middleware.
 	finalHandler := h
 	h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isWebSocketUpgrade(r) {
 			// Apply auth check for WebSocket too, then tunnel.
-			if effectiveAuth != nil {
-				user, pass, ok := r.BasicAuth()
-				if !ok || user != effectiveAuth.User || pass != effectiveAuth.Password {
-					w.Header().Set("WWW-Authenticate", `Basic realm="routemux"`)
-					http.Error(w, "Unauthorized", http.StatusUnauthorized)
-					return
-				}
+			if effectiveAuth != nil && !checkBasicAuth(r, effectiveAuth) {
+				w.Header().Set("WWW-Authenticate", `Basic realm="routemux"`)
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
 			}
 			handleWS(w, r)
 			return
@@ -492,6 +470,29 @@ func closeConnection(w http.ResponseWriter) {
 	w.WriteHeader(http.StatusBadRequest)
 }
 
+
+// requireBasicAuth wraps handler h with HTTP Basic Auth enforcement.
+// If auth is nil, h is returned unchanged.
+func requireBasicAuth(auth *Auth, h http.Handler) http.Handler {
+	if auth == nil {
+		return h
+	}
+	inner := h
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !checkBasicAuth(r, auth) {
+			w.Header().Set("WWW-Authenticate", `Basic realm="routemux"`)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		inner.ServeHTTP(w, r)
+	})
+}
+
+// checkBasicAuth returns true if the request carries valid Basic Auth credentials.
+func checkBasicAuth(r *http.Request, auth *Auth) bool {
+	user, pass, ok := r.BasicAuth()
+	return ok && user == auth.User && pass == auth.Password
+}
 // schemeOf returns the actual scheme of the incoming connection.
 // Used only for $scheme variable resolution in dest-dest-add-header values.
 // Does NOT trust X-Forwarded-Proto from the client — use trust-client-headers

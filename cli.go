@@ -257,10 +257,7 @@ func applyCLI(cfg *Config, rawArgs []string) error {
 			if cfg.TrustedProxies == nil {
 				cfg.TrustedProxies = &TrustedProxies{list: &CIDRList{}}
 			}
-			cfg.TrustedProxies.list.sources = append(cfg.TrustedProxies.list.sources, src)
-			if src.kind == sourceCIDR {
-				cfg.TrustedProxies.list.nets = append(cfg.TrustedProxies.list.nets, src.cidr)
-			}
+			addToCIDRList(&cfg.TrustedProxies.list, src)
 			i += 2
 		case "--ip-filter-allow", "--ip-filter-block":
 			if i+1 >= len(args) {
@@ -274,21 +271,9 @@ func applyCLI(cfg *Config, rawArgs []string) error {
 				return fmt.Errorf("%s: %w", arg, err)
 			}
 			if arg == "--ip-filter-allow" {
-				if cfg.IPFilter.allowed == nil {
-					cfg.IPFilter.allowed = &CIDRList{}
-				}
-				cfg.IPFilter.allowed.sources = append(cfg.IPFilter.allowed.sources, src)
-				if src.kind == sourceCIDR {
-					cfg.IPFilter.allowed.nets = append(cfg.IPFilter.allowed.nets, src.cidr)
-				}
+				addToCIDRList(&cfg.IPFilter.allowed, src)
 			} else {
-				if cfg.IPFilter.blocked == nil {
-					cfg.IPFilter.blocked = &CIDRList{}
-				}
-				cfg.IPFilter.blocked.sources = append(cfg.IPFilter.blocked.sources, src)
-				if src.kind == sourceCIDR {
-					cfg.IPFilter.blocked.nets = append(cfg.IPFilter.blocked.nets, src.cidr)
-				}
+				addToCIDRList(&cfg.IPFilter.blocked, src)
 			}
 			i += 2
 		case "--global-auth":
