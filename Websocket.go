@@ -36,7 +36,7 @@ func dialUpstream(destURL *url.URL, noTLSVerify bool) (net.Conn, error) {
 }
 
 // serveWebSocket tunnels a WebSocket upgrade request to the upstream.
-func serveWebSocket(w http.ResponseWriter, r *http.Request, destURL *url.URL, routePath string, rc *RouteConfig, effectiveAuth *Auth, trustClientHeaders bool) {
+func serveWebSocket(w http.ResponseWriter, r *http.Request, destURL *url.URL, routePath string, rc *RouteConfig, effectiveAuth *Auth, cfg *Config) {
 	// --- 1. Hijack the client connection ---
 	hj, ok := w.(http.Hijacker)
 	if !ok {
@@ -97,9 +97,15 @@ func serveWebSocket(w http.ResponseWriter, r *http.Request, destURL *url.URL, ro
 	// Parse client address once — reused for XFF and $remote_addr/$remote_port variables.
 	clientIP, clientPort, _ := net.SplitHostPort(r.RemoteAddr)
 
+	var clientNetIP net.IP
+	if cfg.TrustedProxies != nil {
+		clientNetIP = net.ParseIP(clientIP)
+	}
+	trusted := cfg.TrustClientHeaders ||
+		(clientNetIP != nil && cfg.TrustedProxies.list.Contains(clientNetIP))
 	// X-Forwarded-* handling mirrors the HTTP proxy path.
 	if clientIP != "" {
-		if trustClientHeaders {
+		if trusted {
 			if prior, ok := outHeaders["X-Forwarded-For"]; ok {
 				outHeaders.Set("X-Forwarded-For", strings.Join(prior, ", ")+", "+clientIP)
 			} else {
@@ -112,10 +118,13 @@ func serveWebSocket(w http.ResponseWriter, r *http.Request, destURL *url.URL, ro
 	}
 	// X-Forwarded-Host and X-Forwarded-Proto don't depend on clientIP —
 	// set them unconditionally when not trusting client headers.
-	if !trustClientHeaders {
+	if !trusted {
 		outHeaders.Set("X-Forwarded-Host", r.Host)
 		outHeaders.Set("X-Forwarded-Proto", schemeOf(r))
 	}
+
+	XFFcopy:=outHeaders["X-Forwarded-For"]
+
 	// If proxy auth is active, strip Authorization so proxy credentials never
 	// reach upstream. The add/delete loop below runs after, so add-header or
 	// dest-del-header for Authorization still work normally.
@@ -143,7 +152,7 @@ func serveWebSocket(w http.ResponseWriter, r *http.Request, destURL *url.URL, ro
 			originalWS.Set("Host", r.Host)
 		}
 		for name, ph := range rc.ParsedAddHeaders {
-			resolved := ph.eval(requestHost, clientIP, clientPort, scheme, requestURI, originalWS)
+			resolved := ph.eval(requestHost, clientIP, clientPort, scheme, requestURI, XFFcopy, cfg, originalWS)
 			if strings.EqualFold(name, "host") {
 				outHost = resolved // overwrite the default/delete-derived host
 				continue

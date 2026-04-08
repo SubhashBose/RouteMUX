@@ -176,6 +176,7 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 	}
 
 	var requestHost string
+	var XFFcopy []string
 	// -- Reverse proxy --
 	proxy := &httputil.ReverseProxy{
 		Transport: transport,
@@ -259,6 +260,8 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 				req.Header.Set("X-Forwarded-Proto", schemeOf(req))
 			}
 
+			XFFcopy=req.Header["X-Forwarded-For"]
+
 			// If proxy auth is active, strip Authorization so the proxy credentials
 			// never reach the upstream. The user-defined add/delete loop below runs
 			// afterwards, so dest-add-header:Authorization or dest-del-header:Authorization
@@ -290,7 +293,7 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 					requestURI = req.RequestURI
 				}
 				for name, ph := range rc.ParsedAddHeaders {
-					resolved := ph.eval(requestHost, clientIP, clientPort, scheme, requestURI, originalHeaders)
+					resolved := ph.eval(requestHost, clientIP, clientPort, scheme, requestURI, XFFcopy, s.cfg, originalHeaders)
 					if strings.EqualFold(name, "host") {
 						req.Host = resolved
 						continue
@@ -320,7 +323,7 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 	// handleWS uses effectiveAuth which is declared above.
 	handleWS := func(w http.ResponseWriter, r *http.Request) {
 		upstream := picker.pick(lbMode)
-		serveWebSocket(w, r, upstream.ParsedURL, routePath, rc, effectiveAuth, s.cfg.TrustClientHeaders)
+		serveWebSocket(w, r, upstream.ParsedURL, routePath, rc, effectiveAuth, s.cfg)
 	}
 
 	var h http.Handler = proxy
@@ -382,7 +385,7 @@ func manipulateClientHeaders(respHeaders http.Header, originalHeaders http.Heade
 			requestURI = req.RequestURI
 		}
 		for name, ph := range rc.ParsedClientAddHeaders {
-			respHeaders.Set(name, ph.eval(req.Host, clientIP, clientPort, scheme, requestURI, originalHeaders))
+			respHeaders.Set(name, ph.eval(req.Host, clientIP, clientPort, scheme, requestURI, nil, nil, originalHeaders))
 		}
 	}
 }

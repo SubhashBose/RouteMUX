@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"path"
 	"strings"
+	"net"
 )
 
 // hasWildcard returns true if any entry in the list contains a '*' character.
@@ -122,6 +123,7 @@ const (
 	segRemotePort         // ${remote_port}
 	segScheme             // ${scheme}
 	segRequestURI         // ${request_uri}
+	segTrustedXFF         // ${trusted_xff}
 	segHeaderName         // ${header.Name} — carries the header name in seg.value
 )
 
@@ -210,6 +212,8 @@ func resolveVarName(name string) segment {
 		return segment{kind: segScheme}
 	case "request_uri":
 		return segment{kind: segRequestURI}
+	case "trusted_xff":
+		return segment{kind: segTrustedXFF}
 	}
 	if strings.HasPrefix(name, "header.") {
 		return segment{kind: segHeaderName, value: name[len("header."):]}
@@ -221,7 +225,7 @@ func resolveVarName(name string) segment {
 // eval resolves a parsedHeaderValue against the current request context.
 // For constant values (isConst == true) this is a single field read — no
 // allocation, no iteration.
-func (ph parsedHeaderValue) eval(host, clientIP, clientPort, scheme, requestURI string, original http.Header) string {
+func (ph parsedHeaderValue) eval(host, clientIP, clientPort, scheme, requestURI string, XFFcopy []string, cfg *Config, original http.Header) string {
 	if ph.isConst {
 		return ph.segments[0].value
 	}
@@ -240,6 +244,46 @@ func (ph parsedHeaderValue) eval(host, clientIP, clientPort, scheme, requestURI 
 			b.WriteString(scheme)
 		case segRequestURI:
 			b.WriteString(requestURI)
+		case segTrustedXFF:
+			evalTrustedXFF := func(xff []string, cfg *Config) string {
+				if cfg==nil {
+					return ""
+				}
+				if !cfg.TrustClientHeaders && cfg.TrustedProxies == nil {
+					return clientIP
+				}
+				if xff != nil {
+					ips := strings.Split(strings.Join(xff, ", "), ",")
+					
+					if cfg.TrustClientHeaders {
+						for _, ip := range ips {
+							ip = strings.TrimSpace(ip) 
+							if parsed := net.ParseIP(ip); parsed != nil {
+								// found the first valid IP
+								return ip
+							}
+						}
+					} else {
+						var ip string
+						for i := len(ips) - 1; i >= 0; i-- {
+							ip = strings.TrimSpace(ips[i])
+							parsed := net.ParseIP(ip)
+							if parsed == nil {
+								if i == len(ips)-1 {
+									return clientIP
+								}
+								return strings.TrimSpace(ips[i+1])
+							}
+							if !cfg.TrustedProxies.list.Contains(parsed) {
+								return ip
+							}
+						}
+						return ip
+					}
+				}
+				return clientIP
+			}
+			b.WriteString(evalTrustedXFF(XFFcopy, cfg))
 		case segHeaderName:
 			b.WriteString(original.Get(seg.value))
 		}
