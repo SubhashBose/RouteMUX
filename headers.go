@@ -225,6 +225,48 @@ func resolveVarName(name string) segment {
 // eval resolves a parsedHeaderValue against the current request context.
 // For constant values (isConst == true) this is a single field read — no
 // allocation, no iteration.
+// evalTrustedXFF resolves the ${trusted_xff} variable.
+// It walks the XFF chain right-to-left, skipping trusted IPs, and returns
+// the first untrusted IP. If all IPs are trusted, returns the leftmost.
+// If no trusted config, returns clientIP. If XFF is nil, returns clientIP.
+func evalTrustedXFF(xff []string, cfg *Config, clientIP string) string {
+	if cfg == nil || (!cfg.TrustClientHeaders && cfg.TrustedProxies == nil) {
+		return clientIP
+	}
+	if len(xff) == 0 {
+		return clientIP
+	}
+	// Flatten the XFF header values into individual IPs.
+	ips := strings.Split(strings.Join(xff, ", "), ",")
+	if cfg.TrustClientHeaders {
+		// All IPs trusted — return leftmost valid IP.
+		for _, ip := range ips {
+			ip = strings.TrimSpace(ip)
+			if net.ParseIP(ip) != nil {
+				return ip
+			}
+		}
+		return clientIP
+	}
+	// trusted-proxies mode — walk right-to-left, return first untrusted.
+	for i := len(ips) - 1; i >= 0; i-- {
+		ip := strings.TrimSpace(ips[i])
+		parsed := net.ParseIP(ip)
+		if parsed == nil {
+			// Malformed — stop here. Return last valid IP (one to the right).
+			if i == len(ips)-1 {
+				return clientIP
+			}
+			return strings.TrimSpace(ips[i+1])
+		}
+		if !cfg.TrustedProxies.list.Contains(parsed) {
+			return ip // first untrusted from right
+		}
+	}
+	// All trusted — return leftmost (ips[0]).
+	return strings.TrimSpace(ips[0])
+}
+
 func (ph parsedHeaderValue) eval(host, clientIP, clientPort, scheme, requestURI string, XFFcopy []string, cfg *Config, original http.Header) string {
 	if ph.isConst {
 		return ph.segments[0].value
@@ -245,45 +287,7 @@ func (ph parsedHeaderValue) eval(host, clientIP, clientPort, scheme, requestURI 
 		case segRequestURI:
 			b.WriteString(requestURI)
 		case segTrustedXFF:
-			evalTrustedXFF := func(xff []string, cfg *Config) string {
-				if cfg==nil {
-					return ""
-				}
-				if !cfg.TrustClientHeaders && cfg.TrustedProxies == nil {
-					return clientIP
-				}
-				if xff != nil {
-					ips := strings.Split(strings.Join(xff, ", "), ",")
-					
-					if cfg.TrustClientHeaders {
-						for _, ip := range ips {
-							ip = strings.TrimSpace(ip) 
-							if parsed := net.ParseIP(ip); parsed != nil {
-								// found the first valid IP
-								return ip
-							}
-						}
-					} else {
-						var ip string
-						for i := len(ips) - 1; i >= 0; i-- {
-							ip = strings.TrimSpace(ips[i])
-							parsed := net.ParseIP(ip)
-							if parsed == nil {
-								if i == len(ips)-1 {
-									return clientIP
-								}
-								return strings.TrimSpace(ips[i+1])
-							}
-							if !cfg.TrustedProxies.list.Contains(parsed) {
-								return ip
-							}
-						}
-						return ip
-					}
-				}
-				return clientIP
-			}
-			b.WriteString(evalTrustedXFF(XFFcopy, cfg))
+			b.WriteString(evalTrustedXFF(XFFcopy, cfg, clientIP))
 		case segHeaderName:
 			b.WriteString(original.Get(seg.value))
 		}
@@ -304,6 +308,18 @@ func compiledHeaders(raw map[string]string) map[string]parsedHeaderValue {
 	return out
 }
 
+
+// hasTrustedXFFVar returns true if any header value contains a ${trusted_xff} segment.
+func hasTrustedXFFVar(headers map[string]parsedHeaderValue) bool {
+	for _, ph := range headers {
+		for _, seg := range ph.segments {
+			if seg.kind == segTrustedXFF {
+				return true
+			}
+		}
+	}
+	return false
+}
 // hasNonConstHeader returns true if any header value contains any variable
 // reference. Used to decide whether to compute scheme/URI at request time.
 func hasNonConstHeader(headers map[string]parsedHeaderValue) bool {

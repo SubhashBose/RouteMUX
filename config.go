@@ -62,6 +62,7 @@ type RouteConfig struct {
 	ParsedClientAddHeaders  map[string]parsedHeaderValue // compiled client-add-header values
 	ClientNeedsRespHeaders  bool              // true if any client-add-header refs ${header.X}
 	ClientAddHasVars        bool              // true if any client-add-header has a variable
+	NeedsTrustedXFF         bool              // true if any dest-add-header or client-add-header uses ${trusted_xff}
 	ClientDelHeaders        []string          // headers to remove from upstream response
 	ClientDelHasWildcard    bool              // true if any ClientDelHeaders entry contains '*'
 	destEntries        []string          // temporary: accumulates --dest CLI args before parsing
@@ -264,6 +265,7 @@ func parseFileVHost(fileRoutes map[string]fileRoute, domains []string) (VHost, e
 		}
 		rc.AddHasVars = hasNonConstHeader(rc.ParsedAddHeaders)
 		rc.NeedsOriginal = hasHeaderNameVar(rc.ParsedAddHeaders)
+		rc.NeedsTrustedXFF = hasTrustedXFFVar(rc.ParsedAddHeaders) || hasTrustedXFFVar(rc.ParsedClientAddHeaders)
 		rc.ParsedClientAddHeaders = compiledHeaders(fr.ClientAddHeaders)
 		rc.ClientAddHasVars = hasNonConstHeader(rc.ParsedClientAddHeaders)
 		rc.ClientNeedsRespHeaders = hasHeaderNameVar(rc.ParsedClientAddHeaders)

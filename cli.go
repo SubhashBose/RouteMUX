@@ -373,7 +373,9 @@ func applyCLI(cfg *Config, rawArgs []string) error {
 			for _, seg := range ph.segments {
 				if seg.kind == segHeaderName {
 					curRoute.NeedsOriginal = true
-					break
+				}
+				if seg.kind == segTrustedXFF {
+					curRoute.NeedsTrustedXFF = true
 				}
 			}
 			i += 2
@@ -411,7 +413,9 @@ func applyCLI(cfg *Config, rawArgs []string) error {
 			for _, seg := range ph.segments {
 				if seg.kind == segHeaderName {
 					curRoute.ClientNeedsRespHeaders = true
-					break
+				}
+				if seg.kind == segTrustedXFF {
+					curRoute.NeedsTrustedXFF = true
 				}
 			}
 			i += 2

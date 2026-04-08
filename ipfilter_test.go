@@ -890,3 +890,152 @@ func TestCIDRList_Contains(t *testing.T) {
 		t.Error("192.168.1.1 should not be in 10.0.0.0/8")
 	}
 }
+
+// ---- evalTrustedXFF tests ----
+
+func TestEvalTrustedXFF_NoConfig(t *testing.T) {
+	// No trusted config → connecting IP is the value
+	result := evalTrustedXFF([]string{"1.1.1.1, 10.0.0.1"}, &Config{}, "10.0.0.3")
+	if result != "10.0.0.3" {
+		t.Errorf("no trust config: got %q, want connecting IP 10.0.0.3", result)
+	}
+}
+
+func TestEvalTrustedXFF_NoXFF(t *testing.T) {
+	// No XFF header at all → connecting IP
+	cl := &CIDRList{}
+	n := mustNet("10.0.0.0/8")
+	cl.nets = []net.IPNet{n}
+	cfg := &Config{TrustedProxies: &TrustedProxies{list: cl}}
+	result := evalTrustedXFF(nil, cfg, "10.0.0.3")
+	if result != "10.0.0.3" {
+		t.Errorf("nil XFF: got %q, want 10.0.0.3", result)
+	}
+}
+
+func TestEvalTrustedXFF_TrustAll_ReturnsFirstValid(t *testing.T) {
+	// trust-client-headers: true → all trusted → return leftmost valid IP
+	cfg := &Config{TrustClientHeaders: true}
+	result := evalTrustedXFF([]string{"1.2.3.4, 10.0.0.1, 10.0.0.2"}, cfg, "10.0.0.3")
+	if result != "1.2.3.4" {
+		t.Errorf("trust all: got %q, want 1.2.3.4 (leftmost)", result)
+	}
+}
+
+func TestEvalTrustedXFF_TrustAll_SkipsMalformed(t *testing.T) {
+	// trust-client-headers: true, leftmost IP is malformed → skip to next valid
+	cfg := &Config{TrustClientHeaders: true}
+	result := evalTrustedXFF([]string{"not-an-ip, 1.2.3.4, 10.0.0.1"}, cfg, "10.0.0.3")
+	if result != "1.2.3.4" {
+		t.Errorf("trust all skip malformed: got %q, want 1.2.3.4", result)
+	}
+}
+
+func TestEvalTrustedXFF_TrustedProxies_StopsAtUntrusted(t *testing.T) {
+	// 10.0.0.0/8 is trusted; 1.2.3.4 is not — should return 1.2.3.4
+	cl := &CIDRList{}
+	n := mustNet("10.0.0.0/8")
+	cl.nets = []net.IPNet{n}
+	cfg := &Config{TrustedProxies: &TrustedProxies{list: cl}}
+	// chain: 1.2.3.4 (client) → 10.0.0.1 → 10.0.0.2 (trusted proxies) → 10.0.0.3 (connecting)
+	result := evalTrustedXFF([]string{"1.2.3.4, 10.0.0.1, 10.0.0.2, 10.0.0.3"}, cfg, "10.0.0.3")
+	if result != "1.2.3.4" {
+		t.Errorf("trusted proxies: got %q, want 1.2.3.4", result)
+	}
+}
+
+func TestEvalTrustedXFF_TrustedProxies_AllTrusted(t *testing.T) {
+	// All IPs in chain are trusted → return leftmost
+	cl := &CIDRList{}
+	n := mustNet("10.0.0.0/8")
+	cl.nets = []net.IPNet{n}
+	cfg := &Config{TrustedProxies: &TrustedProxies{list: cl}}
+	result := evalTrustedXFF([]string{"10.1.1.1, 10.0.0.1, 10.0.0.2"}, cfg, "10.0.0.3")
+	if result != "10.1.1.1" {
+		t.Errorf("all trusted: got %q, want 10.1.1.1 (leftmost)", result)
+	}
+}
+
+func TestEvalTrustedXFF_MalformedAtRightmost(t *testing.T) {
+	// Rightmost (connecting) is malformed → fallback to clientIP
+	cl := &CIDRList{}
+	n := mustNet("10.0.0.0/8")
+	cl.nets = []net.IPNet{n}
+	cfg := &Config{TrustedProxies: &TrustedProxies{list: cl}}
+	result := evalTrustedXFF([]string{"1.2.3.4, not-an-ip"}, cfg, "10.0.0.3")
+	// "not-an-ip" is last (rightmost), malformed → return clientIP
+	if result != "10.0.0.3" {
+		t.Errorf("malformed rightmost: got %q, want clientIP 10.0.0.3", result)
+	}
+}
+
+func TestEvalTrustedXFF_MalformedInMiddle(t *testing.T) {
+	// Malformed IP in middle of chain → stop, return last valid (one to the right)
+	cl := &CIDRList{}
+	n := mustNet("10.0.0.0/8")
+	cl.nets = []net.IPNet{n}
+	cfg := &Config{TrustedProxies: &TrustedProxies{list: cl}}
+	// chain right-to-left: 10.0.0.3(trusted) → not-an-ip(stop) → return ips[i+1]=10.0.0.3
+	result := evalTrustedXFF([]string{"1.2.3.4, not-an-ip, 10.0.0.3"}, cfg, "10.0.0.4")
+	if result != "10.0.0.3" {
+		t.Errorf("malformed middle: got %q, want 10.0.0.3 (last valid right of malformed)", result)
+	}
+}
+
+func TestEvalTrustedXFF_NilCfg(t *testing.T) {
+	// nil cfg → clientIP
+	result := evalTrustedXFF([]string{"1.2.3.4"}, nil, "10.0.0.1")
+	if result != "10.0.0.1" {
+		t.Errorf("nil cfg: got %q, want 10.0.0.1", result)
+	}
+}
+
+func TestNeedsTrustedXFF_SetInConfig(t *testing.T) {
+	yml := `
+global:
+  port: 8080
+routes:
+  /api/:
+    dest: http://localhost:3000/
+    dest-add-header:
+      X-Real-Client: ${trusted_xff}
+`
+	f, _ := os.CreateTemp("", "routemux-*.yml")
+	f.WriteString(yml)
+	f.Close()
+	defer os.Remove(f.Name())
+
+	cfg, err := loadConfigFile(f.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc := cfg.VHosts[0].Routes["/api/"]
+	if !rc.NeedsTrustedXFF {
+		t.Error("NeedsTrustedXFF should be true when ${trusted_xff} is used")
+	}
+}
+
+func TestNeedsTrustedXFF_NotSetWhenUnused(t *testing.T) {
+	yml := `
+global:
+  port: 8080
+routes:
+  /api/:
+    dest: http://localhost:3000/
+    dest-add-header:
+      X-Real-IP: ${remote_addr}
+`
+	f, _ := os.CreateTemp("", "routemux-*.yml")
+	f.WriteString(yml)
+	f.Close()
+	defer os.Remove(f.Name())
+
+	cfg, err := loadConfigFile(f.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc := cfg.VHosts[0].Routes["/api/"]
+	if rc.NeedsTrustedXFF {
+		t.Error("NeedsTrustedXFF should be false when ${trusted_xff} is not used")
+	}
+}

@@ -260,7 +260,10 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 				req.Header.Set("X-Forwarded-Proto", schemeOf(req))
 			}
 
-			XFFcopy=req.Header["X-Forwarded-For"]
+			// Snapshot XFF chain for ${trusted_xff} variable — only when needed.
+			if rc.NeedsTrustedXFF {
+				XFFcopy = req.Header["X-Forwarded-For"]
+			}
 
 			// If proxy auth is active, strip Authorization so the proxy credentials
 			// never reach the upstream. The user-defined add/delete loop below runs

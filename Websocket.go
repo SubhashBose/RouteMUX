@@ -123,7 +123,11 @@ func serveWebSocket(w http.ResponseWriter, r *http.Request, destURL *url.URL, ro
 		outHeaders.Set("X-Forwarded-Proto", schemeOf(r))
 	}
 
-	XFFcopy:=outHeaders["X-Forwarded-For"]
+	// Snapshot XFF chain only when ${trusted_xff} is used in dest-add-header.
+	var XFFcopy []string
+	if rc.NeedsTrustedXFF {
+		XFFcopy = outHeaders["X-Forwarded-For"]
+	}
 
 	// If proxy auth is active, strip Authorization so proxy credentials never
 	// reach upstream. The add/delete loop below runs after, so add-header or

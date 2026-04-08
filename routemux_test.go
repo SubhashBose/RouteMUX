@@ -1111,7 +1111,7 @@ func TestHasWildcard(t *testing.T) {
 
 func evalHeader(raw, clientIP, clientPort, scheme, requestURI string, orig http.Header) string {
 	ph := compileHeaderValue(raw)
-	return ph.eval("example.com", clientIP, clientPort, scheme, requestURI, orig)
+	return ph.eval("example.com", clientIP, clientPort, scheme, requestURI, nil, nil, orig)
 }
 
 func TestCompile_PlainValue(t *testing.T) {
