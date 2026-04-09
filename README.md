@@ -16,6 +16,7 @@ A lightweight, flexible, and easy configurable reverse proxy written in Go. Rout
 - **Response header manipulation** — add, overwrite, or delete response headers sent back to the client per route, with wildcard support and variable interpolation
 - **IP filter** — allow or block connections by IP address or CIDR range, loaded from inline values, local files, or remote URLs with optional periodic refresh
 - **Trusted proxy support** — `trust-client-headers` global flag or per-IP `trusted-proxies` list (similar to IP filter) for selective proxy trust. A special header manipulation variable `${trusted_xff}` is available, that sets the real client IP after evaluating trusted proxies.
+- **Environment variable support** - Environment variable substitution is globally supported in `config.yml` file using `${env.VARIABLE}`.
 - **Zero external dependencies** - standalone binary (~7 MB size) available in 15 OS and architecture combinations.
 
 ---
@@ -159,6 +160,23 @@ vhosts:
 
 `vhost:` and `domains:` block/key can be omitted from config, only having routes as the root block, 
 then all the defined routes belong to the default host `["*"]`, i.e, all hostnames.
+
+### Environment variable support
+
+Environment variable substitution is globally supported in configuration file. `${env.VARIABLE}` can be used to access `VARIABLE` from system environment, and `\$` is used to escape and use as string literal. The variable substitution only happens during the initial parsing of YAML file.
+
+```yaml
+global:
+  port: ${env.HTTP_PORT}
+
+routes:
+  /:
+    dest: ${env.UPSTREAM_SERVER}
+    dest-add-header:
+      ${env.HDR_KEY}: ${env.HDR_VALUE}
+```
+
+> Note an extreme edge case scenario: in `*-add-header` value, if intended value is string literal `\${env.blabla}`, the entry should be double escaped as `\\\${env.blabla}`, because variable parsing first happens during YAML file read, and then again when looking for header variable.
 
 ---
 

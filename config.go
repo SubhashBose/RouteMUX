@@ -17,24 +17,42 @@ import (
 // config file: values, keys, ports, URLs, credentials — everywhere.
 func expandEnvVars(data []byte) []byte {
 	const prefix = "${env."
+	var escape = []byte(`\` + prefix) // \${env.
+
 	result := make([]byte, 0, len(data))
 	s := data
 	for {
-		idx := bytes.Index(s, []byte(prefix))
-		if idx < 0 {
+		// Check for escaped prefix first
+		escapedIdx := bytes.Index(s, escape)
+		normalIdx := bytes.Index(s, []byte(prefix))
+
+		// No more patterns at all
+		if normalIdx < 0 && escapedIdx < 0 {
 			result = append(result, s...)
 			break
 		}
-		result = append(result, s[:idx]...)
-		s = s[idx+len(prefix):]
-		// Find closing }
+
+		// Escaped prefix comes first (or normal doesn't exist)
+		if escapedIdx >= 0 && (normalIdx < 0 || escapedIdx < normalIdx) {
+			// Append everything before the backslash, then the literal prefix (without backslash)
+			result = append(result, s[:escapedIdx]...)
+			result = append(result, []byte(prefix)...)
+			s = s[escapedIdx+len(escape):]
+			continue
+		}
+
+		// Normal prefix — expand it
+		result = append(result, s[:normalIdx]...)
+		s = s[normalIdx+len(prefix):]
+
 		end := bytes.IndexByte(s, '}')
 		if end < 0 {
-			// No closing brace — treat as literal, stop scanning
+			// No closing brace — treat as literal
 			result = append(result, []byte(prefix)...)
 			result = append(result, s...)
 			break
 		}
+
 		varName := string(s[:end])
 		s = s[end+1:]
 		val, ok := os.LookupEnv(varName)
