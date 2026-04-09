@@ -4,19 +4,18 @@ A lightweight, flexible, and easy configurable reverse proxy written in Go. Rout
 
 ## Features
 
-- **Path-based routing** — forward different URL paths to different upstream services
-- **Virtual host** - virtual host configuration to accept connection for multiple domain names, and forward to specific set of routes per domain
-- **HTTP & WebSocket** — transparently proxies both HTTP and WebSocket connections
-- **TLS termination** — serve HTTPS with your own certificate; connect to HTTPS upstreams with optional verification skip
-- **HTTP Basic Auth** — global auth for all routes, per-route override, or explicit disable
-- **Header manipulation** — add, overwrite, or delete headers per route for client response or upstream request, with wildcard support (`CF-*`, `X-*`) and variable interpolation (`${remote_addr}`, `${header.User-Agent}`, etc.)
-- **Config file + CLI** — full configuration via `config.yml` as well as command-line flags, or combining both; CLI takes precedence.
-- **Load balancing** — weighted random or weighted round-robin across multiple upstream destinations
-- **Static responses** — return a fixed HTTP status code and body directly from RouteMUX, no upstream needed
-- **Response header manipulation** — add, overwrite, or delete response headers sent back to the client per route, with wildcard support and variable interpolation
-- **IP filter** — allow or block connections by IP address or CIDR range, loaded from inline values, local files, or remote URLs with optional periodic refresh
-- **Trusted proxy support** — `trust-client-headers` global flag or per-IP `trusted-proxies` list (similar to IP filter) for selective proxy trust. A special header manipulation variable `${trusted_xff}` is available, that sets the real client IP after evaluating trusted proxies.
-- **Environment variable support** - Environment variable substitution is globally supported in `config.yml` file using `${env.VARIABLE}`.
+- **[Path-based routing](#routing)** — forward different URL paths to different upstream services
+- **[Virtual host](#virtual-hosts)** - virtual host configuration to accept connection for multiple domain names, and forward to specific set of routes per domain
+- **[Config file + CLI](#configuration-file)** — full configuration via `config.yml` as well as command-line flags, or combining both; CLI takes precedence.
+- **[HTTP & WebSocket](#websocket)** — transparently proxies both HTTP and WebSocket connections
+- **[TLS termination](#tls)** — serve HTTPS with your own certificate; connect to HTTPS upstreams with optional verification skip
+- **[HTTP Basic Auth](#authentication)** — global auth for all routes, per-route override, or explicit disable
+- **[Header manipulation](#upstream-request-header-manipulation)** — add, overwrite, or delete headers per route for client response or upstream request, with wildcard support (`CF-*`, `X-*`) and variable interpolation (`${remote_addr}`, `${header.User-Agent}`, etc.)
+- **[Load balancing](#load-balancing)** — weighted random or weighted round-robin across multiple upstream destinations
+- **[Static responses](#static-responses-status)** — return a fixed HTTP status code and body directly from RouteMUX, no upstream needed
+- **[IP filter](#ip-filter)** — allow or block connections by IP address or CIDR range, loaded from inline values, local files, or remote URLs with optional periodic refresh
+- **[Trusted proxy support](#trusted-proxy-support)** — `trust-client-headers` global flag or per-IP `trusted-proxies` list (similar to IP filter) for selective proxy trust. A special header manipulation variable `${trusted_xff}` is available, that sets the real client IP after evaluating trusted proxies.
+- **[Environment variable support](#environment-variable-support)** - Environment variable substitution is globally supported in `config.yml` file using `${env.VARIABLE}`.
 - **Zero external dependencies** - standalone binary (~7 MB size) available in 15 OS and architecture combinations.
 
 ---
