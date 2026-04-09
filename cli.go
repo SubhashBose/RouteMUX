@@ -637,6 +637,7 @@ The 'dest-add-header' or 'client-add-header' values can be a combination of text
   ${remote_port}: client port
   ${scheme}:      "http" or "https" client scheme
   ${request_uri}: full request URI including query string
+  ${trusted_xff}: Remote IP after evaluating trusted proxies on the 'X-Forwarded-For' chained with connecting IP
   ${header.Name}: value of 'Name' header from the original client headers (in case of 'dest-add-header')
                   or upstream response headers (in case of 'client-add-header')
 

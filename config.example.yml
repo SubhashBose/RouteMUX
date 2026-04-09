@@ -6,8 +6,16 @@ global:
   global-auth: ["admin", "s3cr3t"]   # HTTP Basic Auth for all routes
   #trust-client-headers: true    # Trust X-Forwarded-* headers for all connections
   trusted-proxies:               # Trust X-Forwarded-* headers only for these IPs/CIDRs
+    # --- Private IP ranges
+    - 192.168.0.0/16
     - 172.16.0.0/12
-    - https://www.cloudflare.com/ips-v4 cache=/tmp/cacheCFlist refresh=5h
+    - 10.0.0.0/8
+    - 127.0.0.1/8
+    - fd00::/8
+    - ::1
+    # --- Cloudflare IP lists
+    - https://www.cloudflare.com/ips-v4 cache=/tmp/cacheCFiplist refresh=36h
+    - https://www.cloudflare.com/ips-v6 cache=/tmp/cacheCFipv6list refresh=36h
   ip-filter:                     # Block and allow IP addresses/ CIDR ranges
     blocked:
       - 10.0.0.0/8

@@ -15,7 +15,7 @@ A lightweight, flexible, and easy configurable reverse proxy written in Go. Rout
 - **Static responses** — return a fixed HTTP status code and body directly from RouteMUX, no upstream needed
 - **Response header manipulation** — add, overwrite, or delete response headers sent back to the client per route, with wildcard support and variable interpolation
 - **IP filter** — allow or block connections by IP address or CIDR range, loaded from inline values, local files, or remote URLs with optional periodic refresh
-- **Trusted proxy support** — `trust-client-headers` global flag or per-IP `trusted-proxies` list (similar to IP filter) for selective proxy trust
+- **Trusted proxy support** — `trust-client-headers` global flag or per-IP `trusted-proxies` list (similar to IP filter) for selective proxy trust. A special header manipulation variable `${trusted_xff}` is available, that sets the real client IP after evaluating trusted proxies.
 - **Zero external dependencies** - standalone binary (~7 MB size) available in 15 OS and architecture combinations.
 
 ---
@@ -381,17 +381,23 @@ Header values can reference request properties using `${variable}` syntax, and m
 | `${remote_port}` | Client port |
 | `${scheme}` | Client request scheme — `http` or `https` |
 | `${request_uri}` | Full request URI including query string |
+| `${trusted_xff}` | The remote IP after evaluating `trusted-proxies` and `trust-client-headers` on the `X-Forwarded-For` chain along with connecting IP  |
 | `${header.Name}` | Value of any client request header by name |
 | `${header.Host}` | Original client `Host` header |
 
-Use `\${` to send a literal  sign (e.g. `\${remote_addr}` → `${remote_addr}`). Non-existent variable or unclosed `${` will be treated as plain string
+Use `\${` to send a literal  sign (e.g. `\${remote_addr}` → `${remote_addr}`). Non-existent variable or unclosed `${` will be treated as plain string.
+
+> `${trusted_xff}` value evaluates the trusted remote IP by looking up on the `X-Forwarded-For` header IP chain, appended with the connecting IP. Each of the IPs from the chain, starting from most recent to oldest (right to left), is checked against the `trusted-proxies` list, and the first untrusted IP sets the value. If all IPs are in `trusted-proxies`, or `trust-client-headers: true` then, the left most valid IP sets `${trusted_xff}`. If neither `trusted-proxies` nor `trust-client-headers` is set, then no IP is trusted, client IP (`${remote_addr}`) sets the variable. 
+> 
+> The purpose of `${trusted_xff}` is to do all the validation of real client IP, and provide this to the upstream server, which it can use without doing any more IP trust verification. It is important to note the `${trusted_xff}` variable is only available for `dest-add-header`, and not for `client-add-header`.
 
 ```yaml
 routes:
   /api/:
     dest: http://localhost:3000/
     dest-add-header:
-      X-Real-IP:       ${remote_addr}          # client IP
+      X-Client-IP:     ${remote_addr}          # client IP
+      X-Trusted-XFF:   ${trusted_xff}          # Real IP behind XFF header IP chain
       X-Real-Port:     ${remote_port}          # client port
       X-Scheme:        ${scheme}               # http or https
       X-Request-URI:   ${request_uri}          # full URI with query string

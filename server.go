@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"log"
@@ -13,6 +14,11 @@ import (
 	"sync"
 	"time"
 )
+
+
+// perRequestKeys are unexported context key types to avoid collisions.
+type ctxKeyRequestHost struct{}
+type ctxKeyXFFCopy struct{}
 
 type server struct {
 	cfg      *Config
@@ -175,8 +181,6 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 		effectiveAuth = rc.Auth // may be nil (no auth)
 	}
 
-	var requestHost string
-	var XFFcopy []string
 	// -- Reverse proxy --
 	proxy := &httputil.ReverseProxy{
 		Transport: transport,
@@ -216,7 +220,12 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 				originalHeaders = req.Header.Clone()
 				originalHeaders.Set("Host", req.Host)
 			}
-			requestHost = req.Host
+			// Store per-request values in context so ModifyResponse can read them
+			// safely under concurrent requests without a data race.
+			requestHost := req.Host
+			*req = *req.WithContext(
+				context.WithValue(
+					req.Context(), ctxKeyRequestHost{}, requestHost))
 
 			// Parse client address once — reused for XFF and {remote_addr}/{remote_port} variables.
 			clientIP, clientPort, _ := net.SplitHostPort(req.RemoteAddr)
@@ -261,8 +270,11 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 			}
 
 			// Snapshot XFF chain for ${trusted_xff} variable — only when needed.
+			var xffCopy []string
 			if rc.NeedsTrustedXFF {
-				XFFcopy = req.Header["X-Forwarded-For"]
+				xffCopy = req.Header["X-Forwarded-For"]
+				*req = *req.WithContext(
+					context.WithValue(req.Context(), ctxKeyXFFCopy{}, xffCopy))
 			}
 
 			// If proxy auth is active, strip Authorization so the proxy credentials
@@ -296,7 +308,7 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 					requestURI = req.RequestURI
 				}
 				for name, ph := range rc.ParsedAddHeaders {
-					resolved := ph.eval(requestHost, clientIP, clientPort, scheme, requestURI, XFFcopy, s.cfg, originalHeaders)
+					resolved := ph.eval(requestHost, clientIP, clientPort, scheme, requestURI, xffCopy, s.cfg, originalHeaders)
 					if strings.EqualFold(name, "host") {
 						req.Host = resolved
 						continue
@@ -306,13 +318,20 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 			}
 		},
 		ModifyResponse: func(resp *http.Response) error {
+			// Read per-request values stored by Director in the request context.
+			reqHost, _ := resp.Request.Context().Value(ctxKeyRequestHost{}).(string)
+			//var xffCopy []string
+			//if rc.NeedsTrustedXFF {
+			//	xffCopy, _ = resp.Request.Context().Value(ctxKeyXFFCopy{}).([]string)
+			//}
+			//_ = xffCopy // available for future client-add-header ${trusted_xff} support
 			// ${header.X} in client-add-header resolves from the upstream response headers.
 			// Snapshot before we modify so add-header can reference headers we're about to delete.
 			var originalRespHeaders http.Header
 			if rc.ClientNeedsRespHeaders {
 				originalRespHeaders = resp.Header.Clone()
 			}
-			resp.Request.Host = requestHost
+			resp.Request.Host = reqHost
 
 			manipulateClientHeaders(resp.Header, originalRespHeaders, resp.Request, rc)
 			return nil
