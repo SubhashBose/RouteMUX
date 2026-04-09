@@ -222,15 +222,15 @@ func resolveVarName(name string) segment {
 	return segment{kind: segLiteral, value: "${" + name + "}"}
 }
 
-// eval resolves a parsedHeaderValue against the current request context.
-// For constant values (isConst == true) this is a single field read — no
-// allocation, no iteration.
 // evalTrustedXFF resolves the ${trusted_xff} variable.
 // It walks the XFF chain right-to-left, skipping trusted IPs, and returns
 // the first untrusted IP. If all IPs are trusted, returns the leftmost.
 // If no trusted config, returns clientIP. If XFF is nil, returns clientIP.
 func evalTrustedXFF(xff []string, cfg *Config, clientIP string) string {
-	if cfg == nil || (!cfg.TrustClientHeaders && cfg.TrustedProxies == nil) {
+	if cfg == nil {
+		return "${trusted_xff}"
+	}
+	if !cfg.TrustClientHeaders && cfg.TrustedProxies == nil {
 		return clientIP
 	}
 	if len(xff) == 0 {
@@ -267,6 +267,9 @@ func evalTrustedXFF(xff []string, cfg *Config, clientIP string) string {
 	return strings.TrimSpace(ips[0])
 }
 
+// eval resolves a parsedHeaderValue against the current request context.
+// For constant values (isConst == true) this is a single field read — no
+// allocation, no iteration.
 func (ph parsedHeaderValue) eval(host, clientIP, clientPort, scheme, requestURI string, XFFcopy []string, cfg *Config, original http.Header) string {
 	if ph.isConst {
 		return ph.segments[0].value
