@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -32,6 +33,42 @@ func mustNet(cidr string) net.IPNet {
 	}
 	return *n
 }
+
+func evalConst(ph parsedHeaderValue) string {
+	if !ph.isConst {
+		panic("evalConst called on non-const parsedHeaderValue")
+	}
+	return ph.segments[0].value
+}
+
+
+// makeConfig creates a Config with a single catch-all vhost — shorthand for tests.
+// Use makeConfigVHosts for multi-vhost tests.
+
+func makeConfig(port int, routes map[string]*RouteConfig) *Config {
+	return &Config{
+		Port:   port,
+		VHosts: []VHost{{Domains: []string{"*"}, Routes: routes}},
+	}
+}
+
+// mustUpstream parses a URL at test time and returns a ready Upstream.
+
+func mustUpstream(rawURL string, weight int) Upstream {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		panic("invalid test URL: " + rawURL)
+	}
+	return Upstream{URL: rawURL, ParsedURL: parsed, Weight: weight}
+}
+
+// ---- Config file loading (yaml.v3) ----
+
+func evalHeader(raw, clientIP, clientPort, scheme, requestURI string, orig http.Header) string {
+	ph := compileHeaderValue(raw)
+	return ph.eval("example.com", clientIP, clientPort, scheme, requestURI, nil, nil, orig)
+}
+
 
 func filterWithNets(allowed, blocked []string) *IPFilter {
 	f := &IPFilter{}

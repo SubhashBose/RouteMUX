@@ -64,16 +64,12 @@ func expandEnvVars(data []byte) []byte {
 		}
 
 		val, ok := os.LookupEnv(varName)
-		if !ok || val == "" {
+		if !ok {
 			def_msg := "using empty string"
 			if defaultVal != "" {
 				def_msg = fmt.Sprintf("using default %s", defaultVal)
 			}
-			if !ok {
-				log.Printf("config: environment variable %q is not set (%s)", varName, def_msg)
-			} else {
-				log.Printf("config: environment variable %q is blank (%s)", varName, def_msg)
-			}
+			log.Printf("config: environment variable %q is not set (%s)", varName, def_msg)
 			val = defaultVal
 		}
 		result = append(result, []byte(val)...)
