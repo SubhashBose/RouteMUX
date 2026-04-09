@@ -163,11 +163,12 @@ then all the defined routes belong to the default host `["*"]`, i.e, all hostnam
 
 ### Environment variable support
 
-Environment variable substitution is globally supported in configuration file. `${env.VARIABLE}` can be used to access `VARIABLE` from system environment, and `\$` is used to escape and use as string literal. The variable substitution only happens during the initial parsing of YAML file.
+Environment variable substitution is globally supported in configuration file. `${env.VARIABLE}` can be used to access `VARIABLE` from system environment. An optional default value can be passed as `${env.VARIABLE:default}`. `\$` is used to escape as string literal (like `\${env.VAR}` → `${env.VAR}`). The variable substitution only happens during the initial parsing of YAML file.
 
 ```yaml
 global:
-  port: ${env.HTTP_PORT}
+  port: ${env.HTTP_PORT:8080}
+  global-auth: ["${env.AUTH_USER}", "${env.AUTH_PASS}"]
 
 routes:
   /:

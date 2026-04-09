@@ -631,6 +631,8 @@ The 'domains' and set of 'route' under it is repeatable for different hosts.
 The 'vhost' and 'domains' can be omitted if there is no host/domain configuration needed. 
 All routes are applied to all incoming requests, i.e., ['*'] domains.
 
+Config file can have environment variables substitution globally as ${env.VARIABLE:default}
+
 The 'dest-add-header' or 'client-add-header' values can be a combination of text and following supported variables:
   ${host}: client host header
   ${remote_addr}: client IP (no port)

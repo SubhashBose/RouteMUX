@@ -18,7 +18,6 @@ import (
 func expandEnvVars(data []byte) []byte {
 	const prefix = "${env."
 	var escape = []byte(`\` + prefix) // \${env.
-
 	result := make([]byte, 0, len(data))
 	s := data
 	for {
@@ -53,11 +52,29 @@ func expandEnvVars(data []byte) []byte {
 			break
 		}
 
-		varName := string(s[:end])
+		// Parse varName and optional default from "VAR_NAME:default" or "VAR_NAME"
+		inner := string(s[:end])
 		s = s[end+1:]
+
+		varName := inner
+		defaultVal := ""
+		if colonIdx := strings.IndexByte(inner, ':'); colonIdx >= 0 {
+			varName = inner[:colonIdx]
+			defaultVal = inner[colonIdx+1:]
+		}
+
 		val, ok := os.LookupEnv(varName)
-		if !ok {
-			log.Printf("config: environment variable %q is not set (using empty string)", varName)
+		if !ok || val == "" {
+			def_msg := "using empty string"
+			if defaultVal != "" {
+				def_msg = fmt.Sprintf("using default %s", defaultVal)
+			}
+			if !ok {
+				log.Printf("config: environment variable %q is not set (%s)", varName, def_msg)
+			} else {
+				log.Printf("config: environment variable %q is blank (%s)", varName, def_msg)
+			}
+			val = defaultVal
 		}
 		result = append(result, []byte(val)...)
 	}

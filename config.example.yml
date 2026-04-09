@@ -1,6 +1,6 @@
 global:
-  listen: lo         # IP or interface (e.g. 192.168.1.10, eth0, lo). Empty = all interfaces.
-  #port: 8080
+  listen: lo         # IP or interface (e.g. 192.168.1.10, eth0, lo). Empty = all interfaces
+  port: ${env.HTTP_PORT:9090}  # Port value obtained from env variable, with optional default
   #tls-cert: /path/to/cert.pem
   #tls-key:  /path/to/key.pem
   global-auth: ["admin", "s3cr3t"]   # HTTP Basic Auth for all routes
@@ -38,7 +38,8 @@ vhosts:
           #Host: somesite.com      # Overwrite client HOST header
           x-Proxy-Server: RouteMUX
           x-forwarded-for: 1.1.1.1  # By default X-Forwarded-For is set to client sent header appended with proxy's connecting IP
-          X-Real-IP:     ${remote_addr}        # client IP
+          X-Client-IP:     ${remote_addr}        # client/connecting IP
+          X-Original-IP:   ${trusted_xff}        # Real IP after evaluating trusted-proxies on X-Forwarded-For chain
           X-Original-UA: ${header.User-Agent}  # copy from original client headers
           x-rebuilt-url: ${scheme}://${header.host}${request_uri}
         
