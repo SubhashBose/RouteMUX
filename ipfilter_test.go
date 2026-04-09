@@ -983,10 +983,10 @@ func TestEvalTrustedXFF_MalformedInMiddle(t *testing.T) {
 }
 
 func TestEvalTrustedXFF_NilCfg(t *testing.T) {
-	// nil cfg → clientIP
+	// nil cfg → pass through as literal (consistent with unknown variable behaviour)
 	result := evalTrustedXFF([]string{"1.2.3.4"}, nil, "10.0.0.1")
-	if result != "10.0.0.1" {
-		t.Errorf("nil cfg: got %q, want 10.0.0.1", result)
+	if result != "${trusted_xff}" {
+		t.Errorf("nil cfg: got %q, want ${trusted_xff} (literal pass-through)", result)
 	}
 }
 

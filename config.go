@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"log"
 	"net/url"
@@ -8,6 +9,42 @@ import (
 	"strings"
 	"gopkg.in/yaml.v3"
 )
+
+// expandEnvVars replaces all ${env.NAME} occurrences in the YAML source with
+// the corresponding OS environment variable value. If the variable is not set,
+// it is replaced with an empty string and a warning is logged.
+// This substitution happens before YAML parsing, so it works anywhere in the
+// config file: values, keys, ports, URLs, credentials — everywhere.
+func expandEnvVars(data []byte) []byte {
+	const prefix = "${env."
+	result := make([]byte, 0, len(data))
+	s := data
+	for {
+		idx := bytes.Index(s, []byte(prefix))
+		if idx < 0 {
+			result = append(result, s...)
+			break
+		}
+		result = append(result, s[:idx]...)
+		s = s[idx+len(prefix):]
+		// Find closing }
+		end := bytes.IndexByte(s, '}')
+		if end < 0 {
+			// No closing brace — treat as literal, stop scanning
+			result = append(result, []byte(prefix)...)
+			result = append(result, s...)
+			break
+		}
+		varName := string(s[:end])
+		s = s[end+1:]
+		val, ok := os.LookupEnv(varName)
+		if !ok {
+			log.Printf("config: environment variable %q is not set (using empty string)", varName)
+		}
+		result = append(result, []byte(val)...)
+	}
+	return result
+}
 
 // Config is the top-level runtime configuration structure.
 type Config struct {
@@ -181,6 +218,8 @@ func loadConfigFile(path string) (*Config, error) {
 		return nil, err
 	}
 	log.Printf("Loading config from %q", path)
+
+	data = expandEnvVars(data)
 
 	var fc fileConfig
 	if err := yaml.Unmarshal(data, &fc); err != nil {
