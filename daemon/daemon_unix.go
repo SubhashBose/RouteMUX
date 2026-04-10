@@ -186,9 +186,12 @@ func handleStop(pidFile string, cfg *Config) bool {
 	}
 
 	proc, err := os.FindProcess(pid)
+	if err != nil {
+		cfg.Logger.Fatalf("%s daemon: cannot find process %d: %v", cfg.AppName, pid, err)
+	}
 
-	// Send SIGTERM first (graceful), fall back to SIGKILL if needed.
-	fmt.Printf("Sending SIGTERM to %s PID %d...\n", cfg.AppName, pid)
+	// Send SIGTERM for graceful shutdown. The daemon removes its PID file on receipt.
+	fmt.Printf("Sending SIGTERM to %s (PID %d)...\n", cfg.AppName, pid)
 	if err := proc.Signal(syscall.SIGTERM); err != nil {
 		cfg.Logger.Fatalf("%s daemon: failed to signal process: %v", cfg.AppName, err)
 	}
