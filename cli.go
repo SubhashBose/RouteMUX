@@ -581,6 +581,7 @@ if daemon.DAEMONIZE_SUPPORTED {
 Daemon options:
   start                    Start RouteMUX as a background daemon process.
   stop                     Stop RouteMUX daemon
+  restart                  Restart RouteMUX daemon
   status                   Show RouteMUX daemon status
 `)
 }

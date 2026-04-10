@@ -233,12 +233,13 @@ Following are the route options must follow `--route`. The `--route` + route opt
 
 ### Daemon commands
 
-RouteMUX can be started as daemon (background process not attached to terminal) by appending `start` command to the cli arguments. The daemon process status can be checked or stopped with `status` or `stop` commands. RouteMUX daemon support is preliminary and is currently only supported for UNIX (specifically POSIX) like system.
+RouteMUX can be started as daemon (background process not attached to terminal) by appending `start` command to the cli arguments. The daemon process can be controlled with `stop`, `restart`, or `status` commands. RouteMUX daemon support is preliminary and is currently only supported for UNIX (specifically POSIX) like system.
 
 | Command | Description |
 |--------|-------------|
 | start  | Start RouteMUX as a daemon |
 | stop   | Stop the daemon |
+| restart | Restart the demon process |
 | status | Show the daemon status |
 
 ### General flags

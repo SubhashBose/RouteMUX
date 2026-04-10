@@ -6,6 +6,9 @@ import (
 	"log"
 	"fmt"
 	"os"
+	"os/exec"
+	"strings"
+	//"golang.org/x/sys/windows"
 )
 
 type Config struct {
@@ -52,4 +55,19 @@ func parseArgs(args []string) (command string, rest []string) {
 func Unsupported() {
 	// Check if already running.
 	fmt.Printf("Daemonizing is not supported on Windows.\n")
+}
+
+func getProcessArgs(pid int) ([]string, error) {
+    // Windows requires opening the process and reading its PEB (Process
+    // Environment Block) via NtQueryInformationProcess — quite involved.
+    // The x/sys/windows package doesn't expose a simple wrapper for this,
+    // so the easiest route is shelling out to wmic:
+    out, err := exec.Command("wmic", "process", "where",
+        fmt.Sprintf("ProcessId=%d", pid), "get", "CommandLine", "/format:value").Output()
+    if err != nil {
+        return nil, err
+    }
+    // parse "CommandLine=./myapp --foo\r\n\r\n"
+    line := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(out)), "CommandLine="))
+    return strings.Fields(line), nil
 }

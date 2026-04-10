@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 const DAEMONIZE_SUPPORTED = true
@@ -86,9 +87,11 @@ func Handle(cfg Config) {
 	case "start":
 		handleStart(pidFile, passArgs, &cfg)
 	case "stop":
-		handleStop(pidFile, &cfg)
+		_ = handleStop(pidFile, &cfg)
 	case "status":
 		handleStatus(pidFile, &cfg)
+	case "restart":
+		handleRestart(pidFile, &cfg)
 	default:
 		// No control command — run normally, attached to terminal.
 		if cfg.OnStart != nil {
@@ -104,7 +107,7 @@ func Handle(cfg Config) {
 func parseArgs(args []string) (command string, rest []string) {
 	for i := len(args) - 1; i >= 0; i-- {
 		switch args[i] {
-		case "start", "stop", "status":
+		case "start", "stop", "status", "restart":
 			rest = make([]string, 0, len(args)-1)
 			rest = append(rest, args[:i]...)
 			rest = append(rest, args[i+1:]...)
@@ -170,16 +173,16 @@ func handleStart(pidFile string, childArgs []string, cfg *Config) {
 	//fmt.Printf("PID file: %s\n", pidFile)
 }
 
-func handleStop(pidFile string, cfg *Config) {
+func handleStop(pidFile string, cfg *Config) bool {
 	pid, err := readPID(pidFile)
 	if err != nil {
 		fmt.Printf("%s instance is not running.\n", cfg.AppName)
-		return
+		return false
 	}
 	if !processExists(pid) {
 		fmt.Printf("%s instance is not running.\nProcess did not exit gracefully. Cleaning up.\n", cfg.AppName)
 		os.Remove(pidFile)
-		return
+		return false
 	}
 
 	proc, err := os.FindProcess(pid)
@@ -189,7 +192,11 @@ func handleStop(pidFile string, cfg *Config) {
 	if err := proc.Signal(syscall.SIGTERM); err != nil {
 		cfg.Logger.Fatalf("%s daemon: failed to signal process: %v", cfg.AppName, err)
 	}
-	fmt.Println("Done.")
+	for processExists(pid) {
+		time.Sleep(100 * time.Millisecond)
+	}
+	fmt.Println("Stopped.")
+	return true
 }
 
 func handleStatus(pidFile string, cfg *Config) {
@@ -204,6 +211,19 @@ func handleStatus(pidFile string, cfg *Config) {
 	} else {
 		fmt.Printf("Status: %s stopped\nBut process did not exit gracefully. Cleaning up.\n", cfg.AppName)
 		os.Remove(pidFile)
+	}
+}
+
+func handleRestart(pidFile string, cfg *Config) {
+	var passArgs []string
+	if pid, err := readPID(pidFile);  err == nil {
+		if args, err2 := getProcessArgs(pid); err2 == nil {
+			passArgs = args[1:]
+		}
+	}
+	//fmt.Printf("Command: %s\n", strings.Join(passArgs, " "))
+	if handleStop(pidFile, cfg){
+		handleStart(pidFile, passArgs, cfg)
 	}
 }
 
@@ -242,4 +262,13 @@ func processExists(pid int) bool {
 	}
 	// Signal 0 checks existence without actually sending a signal.
 	return proc.Signal(syscall.Signal(0)) == nil
+}
+
+func getProcessArgs(pid int) ([]string, error) {
+    data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+    if err != nil {
+        return nil, err
+    }
+    trimmed := strings.TrimRight(string(data), "\x00")
+    return strings.Split(trimmed, "\x00"), nil
 }
