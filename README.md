@@ -16,7 +16,7 @@ A lightweight, flexible, and easy configurable reverse proxy written in Go. Rout
 - **[IP filter](#ip-filter)** — allow or block connections by IP address or CIDR range, loaded from inline values, local files, or remote URLs with optional periodic refresh
 - **[Trusted proxy support](#trusted-proxy-support)** — `trust-client-headers` global flag or per-IP `trusted-proxies` list (similar to IP filter) for selective proxy trust. A special header manipulation variable `${trusted_xff}` is available, that sets the real client IP after evaluating trusted proxies.
 - **[Environment variable support](#environment-variable-support)** - environment variable substitution is globally supported in `config.yml` file using `${env.VARIABLE}`.
-- **Inbuilt support to run as daemon** - can run as daemon process, detached from terminal
+- **[Inbuilt support to run as daemon](#daemonizing-routemux)** - can run as daemon process, detached from terminal
 - **Zero external dependencies** - standalone binary (~7 MB size) available in 15 OS and architecture combinations.
 
 ---
@@ -233,7 +233,7 @@ Following are the route options must follow `--route`. The `--route` + route opt
 
 ### Daemon commands
 
-RouteMUX can be started as daemon (background process not attached to terminal) by appending `start` command to the cli arguments. The daemon process can be controlled with `stop`, `restart`, or `status` commands. RouteMUX daemon support is preliminary and is currently only supported for UNIX (specifically POSIX) like system.
+RouteMUX can be started as daemon (background process not attached to terminal) by appending `start` command to the cli arguments.
 
 | Command | Description |
 |--------|-------------|
@@ -248,6 +248,12 @@ RouteMUX can be started as daemon (background process not attached to terminal) 
 |------|-------------|
 | `--help, -h` | Display help information |
 | `--upgrade` | Self update the RouteMUX binary to the latest release version |
+
+### Daemonizing RouteMUX
+
+RouteMUX can be started as daemon by appending `start` command with other CLI arguments. Job control commands `stop`, `status`, or `restart` can be used to control the daemon process. RouMUX daemon job control works by identifying the process that was started from same working directory with same executable path, and under same user. This way, RouteMUX allows to have multiple daemon process with job control from multiple working directories, and multiple users. 
+
+Currently RouteMUX daemonizing feature is in experimental stage, only support UNIX like (specifically POSIX) systems, and does not support Windows OS.
 
 ### Examples
 
@@ -604,7 +610,7 @@ Each entry in `allowed` or `blocked` can be:
 
 Files and URLs contain one IP or CIDR per line. Lines starting with `#` and blank lines are ignored.
 
-The `refresh=` interval uses Go duration syntax: `30m`, `6h`, `24h`, etc. For file sources, RouteMUX polls the file's modification time — it only re-reads when the file has actually changed. For URL sources, RouteMUX re-fetches on the interval regardless.
+The `refresh=` interval uses Go duration syntax: `30m`, `6h`, `24h`, etc. For file sources, RouteMUX polls the file's modification time — it only re-reads when the file has actually changed. For URL sources, RouteMUX re-fetches on the interval regardless. Timeout for URL fetch is 10s.
 
 The `cache=` option (URL sources only) persists the fetched list to a local file. On startup, if the URL fetch fails (e.g. no network), RouteMUX falls back to the cache file. On every successful fetch, the cache file is updated atomically.
 

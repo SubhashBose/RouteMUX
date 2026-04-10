@@ -28,9 +28,11 @@ type Config struct {
 	// Put your main program logic here.
 	OnStart func()
 
-	AppName string
+	AppName string  // Name of the application. Defaults to the basename of the current executable.
 
-	PidfilePrefix string
+	PidfilePrefix string // Prefix for the PID file. Defaults to the basename of the current executable.
+
+	WatAfterStart time.Duration // Time to wait after start before confirming the daemon is running.
 
 	// Logger is used for daemon-internal messages. Defaults to log.Default().
 	Logger *log.Logger
@@ -64,6 +66,10 @@ func Handle(cfg Config) {
 	if cfg.PidfilePrefix == "" {
 		exe, _:= os.Executable()
 		cfg.PidfilePrefix = filepath.Base(exe)
+	}
+
+	if cfg.WatAfterStart == 0 {
+		cfg.WatAfterStart = 500 * time.Millisecond
 	}
 
 	// If we ARE the daemon child, set up graceful shutdown and run OnStart.
@@ -162,13 +168,29 @@ func handleStart(pidFile string, childArgs []string, cfg *Config) {
 	if err := cmd.Start(); err != nil {
 		cfg.Logger.Fatalf("%s daemon: failed to start child process: %v", cfg.AppName, err)
 	}
-
+	
 	pid := cmd.Process.Pid
+	
+	exited := make(chan error, 1)
+	go func() {
+		exited <- cmd.Wait()
+	}()
+	
+	select {
+	case err := <-exited:
+		if err != nil {
+			cfg.Logger.Fatalf("Failed to start %s as daemon: process exited soon: %v", cfg.AppName, err)
+		} else {
+			cfg.Logger.Fatalf("Failed to start %s as daemon: process exited immediately", cfg.AppName)
+		}
+	case <-time.After(cfg.WatAfterStart):
+		// still alive — write PID and detach
+	}
+	
 	if err := writePID(pidFile, pid); err != nil {
 		cfg.Logger.Fatalf("%s daemon: failed to write PID file: %v", cfg.AppName, err)
 	}
 	cmd.Process.Release()
-
 	fmt.Printf("%s daemon started (PID %d)\n", cfg.AppName, pid)
 	//fmt.Printf("PID file: %s\n", pidFile)
 }
