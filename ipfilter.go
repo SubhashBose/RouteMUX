@@ -287,7 +287,10 @@ func loadCIDRsFromFile(path string) ([]net.IPNet, error) {
 }
 
 func loadCIDRsFromURL(rawURL string) ([]net.IPNet, error) {
-	resp, err := http.Get(rawURL) //nolint:noctx
+	client := http.Client{
+		Timeout: 10 * time.Second,
+	}
+	resp, err := client.Get(rawURL) //nolint:noctx
 	if err != nil {
 		return nil, err
 	}
