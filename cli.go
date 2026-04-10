@@ -6,7 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	
+	"routemux/daemon"
+
 	"github.com/SubhashBose/GoPkg-selfupdater"
 )
 
@@ -574,7 +575,16 @@ Route options (must follow --route PATH):
                            (repeatable) Can be combination of variables and text
   --client-del-header K    Delete a header from the upstream response (repeatable)
                            Can take wildcards (e.g. --client-del-header *cookie*)
-
+`)
+if daemon.DAEMONIZE_SUPPORTED {
+	fmt.Print(`
+Daemon options:
+  start                    Start RouteMUX as a background daemon process.
+  stop                     Stop RouteMUX daemon
+  status                   Show RouteMUX daemon status
+`)
+}
+	fmt.Print(`
 General flags:
   --help, -h               Show this help
   --upgrade                Self-upgrade RouteMUX to the latest version
