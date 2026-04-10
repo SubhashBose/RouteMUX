@@ -15,7 +15,8 @@ A lightweight, flexible, and easy configurable reverse proxy written in Go. Rout
 - **[Static responses](#static-responses-status)** — return a fixed HTTP status code and body directly from RouteMUX, no upstream needed
 - **[IP filter](#ip-filter)** — allow or block connections by IP address or CIDR range, loaded from inline values, local files, or remote URLs with optional periodic refresh
 - **[Trusted proxy support](#trusted-proxy-support)** — `trust-client-headers` global flag or per-IP `trusted-proxies` list (similar to IP filter) for selective proxy trust. A special header manipulation variable `${trusted_xff}` is available, that sets the real client IP after evaluating trusted proxies.
-- **[Environment variable support](#environment-variable-support)** - Environment variable substitution is globally supported in `config.yml` file using `${env.VARIABLE}`.
+- **[Environment variable support](#environment-variable-support)** - environment variable substitution is globally supported in `config.yml` file using `${env.VARIABLE}`.
+- **Inbuilt support to run as daemon** - can run daemon process, detached from terminal
 - **Zero external dependencies** - standalone binary (~7 MB size) available in 15 OS and architecture combinations.
 
 ---
@@ -65,6 +66,9 @@ The binary can self update to the latest release version with the `--upgrade` fl
 
 # With a config file
 ./routemux --config config.yml
+
+# start as a daemon
+./routemux --config config.yml start
 ```
 
 Or using a config file `./routemux --config config.yml`
@@ -226,6 +230,16 @@ Following are the route options must follow `--route`. The `--route` + route opt
 | `--dest-del-header NAME` | Delete a header (repeatable, supports wildcards) |
 | `--client-add-header "Name: Value"` | Add or overwrite a response header sent to client (repeatable). Supports same variables as `--dest-add-header`; `${header.Name}` resolves from the upstream response headers |
 | `--client-del-header NAME` | Delete a header from the upstream response (repeatable, supports wildcards) |
+
+### Daemon commands
+
+RouteMUX can be started as daemon (background process not attached to terminal) by appending `start` command to the cli arguments. The daemon process status can be checked or stopped with `status` or `stop` commands. RouteMUX daemon support is preliminary and is currently only supported for UNIX (specifically POSIX) like system.
+
+| Command | Description |
+|--------|-------------|
+| start  | Start RouteMUX as a daemon |
+| stop   | Stop the daemon |
+| status | Show the daemon status |
 
 ### General flags
 

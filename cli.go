@@ -575,6 +575,11 @@ Route options (must follow --route PATH):
   --client-del-header K    Delete a header from the upstream response (repeatable)
                            Can take wildcards (e.g. --client-del-header *cookie*)
 
+Daemon options:
+  start                    Start RouteMUX as a background daemon process.
+  stop                     Stop RouteMUX daemon
+  status                   Show RouteMUX daemon status
+
 General flags:
   --help, -h               Show this help
   --upgrade                Self-upgrade RouteMUX to the latest version
