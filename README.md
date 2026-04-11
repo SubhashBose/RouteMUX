@@ -238,6 +238,7 @@ RouteMUX can be started as daemon (background process not attached to terminal) 
 | Command | Description |
 |--------|-------------|
 | start  | Start RouteMUX as a daemon |
+| watch-start | Start RouteMUX as daemon along with watchdog that restart the process on failure. Also creates a logfile to monitor process output and errors |
 | stop   | Stop the daemon |
 | restart | Restart the demon process |
 | status | Show the daemon status |

@@ -580,6 +580,8 @@ if daemon.DAEMONIZE_SUPPORTED {
 	fmt.Print(`
 Daemon options:
   start                    Start RouteMUX as a background daemon process.
+  watch-start              Start RouteMUX as a background daemon process with watchdog,
+                           and also creates a logfile to monitor for output and errors.
   stop                     Stop RouteMUX daemon
   restart                  Restart RouteMUX daemon
   status                   Show RouteMUX daemon status
