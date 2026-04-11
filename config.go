@@ -335,10 +335,10 @@ func parseFileVHost(fileRoutes map[string]fileRoute, domains []string) (VHost, e
 		}
 		rc.AddHasVars = hasNonConstHeader(rc.ParsedAddHeaders)
 		rc.NeedsOriginal = hasHeaderNameVar(rc.ParsedAddHeaders)
-		rc.NeedsTrustedXFF = hasTrustedXFFVar(rc.ParsedAddHeaders) || hasTrustedXFFVar(rc.ParsedClientAddHeaders)
 		rc.ParsedClientAddHeaders = compiledHeaders(fr.ClientAddHeaders)
 		rc.ClientAddHasVars = hasNonConstHeader(rc.ParsedClientAddHeaders)
 		rc.ClientNeedsRespHeaders = hasHeaderNameVar(rc.ParsedClientAddHeaders)
+		rc.NeedsTrustedXFF = hasTrustedXFFVar(rc.ParsedAddHeaders) || hasTrustedXFFVar(rc.ParsedClientAddHeaders)
 		rc.ClientDelHeaders = fr.ClientDelHeaders
 		rc.ClientDelHasWildcard = hasWildcard(fr.ClientDelHeaders)
 		if err := applyDestEntries(rc, fr.Dest.entries, path); err != nil {

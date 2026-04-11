@@ -2544,105 +2544,218 @@ func TestManipulateClientHeaders_ViaOnStatus(t *testing.T) {
 
 // ---- evalTrustedXFF tests ----
 
-func TestEvalTrustedXFF_NoConfig(t *testing.T) {
-	// No trusted config → connecting IP is the value
-	result := evalTrustedXFF([]string{"1.1.1.1, 10.0.0.1"}, &Config{}, "10.0.0.3")
-	if result != "10.0.0.3" {
-		t.Errorf("no trust config: got %q, want connecting IP 10.0.0.3", result)
+
+
+
+
+
+
+
+
+
+
+// ---- expandEnvVars tests ----
+
+func TestExpandEnvVars_Basic(t *testing.T) {
+	os.Setenv("ROUTEMUX_TEST_HOST", "backend.example.com")
+	defer os.Unsetenv("ROUTEMUX_TEST_HOST")
+	result := expandEnvVars([]byte("dest: http://${env.ROUTEMUX_TEST_HOST}/"))
+	if string(result) != "dest: http://backend.example.com/" {
+		t.Errorf("got %q", result)
 	}
 }
 
-func TestEvalTrustedXFF_NoXFF(t *testing.T) {
-	// No XFF header at all → connecting IP
-	cl := &CIDRList{}
-	n := mustNet("10.0.0.0/8")
-	cl.nets = []net.IPNet{n}
-	cfg := &Config{TrustedProxies: &TrustedProxies{list: cl}}
-	result := evalTrustedXFF(nil, cfg, "10.0.0.3")
-	if result != "10.0.0.3" {
-		t.Errorf("nil XFF: got %q, want 10.0.0.3", result)
+func TestExpandEnvVars_Multiple(t *testing.T) {
+	os.Setenv("ROUTEMUX_TEST_H", "api.example.com")
+	os.Setenv("ROUTEMUX_TEST_P", "9000")
+	defer os.Unsetenv("ROUTEMUX_TEST_H")
+	defer os.Unsetenv("ROUTEMUX_TEST_P")
+	result := expandEnvVars([]byte("dest: http://${env.ROUTEMUX_TEST_H}:${env.ROUTEMUX_TEST_P}/"))
+	if string(result) != "dest: http://api.example.com:9000/" {
+		t.Errorf("got %q", result)
 	}
 }
 
-func TestEvalTrustedXFF_TrustAll_ReturnsFirstValid(t *testing.T) {
-	// trust-client-headers: true → all trusted → return leftmost valid IP
-	cfg := &Config{TrustClientHeaders: true}
-	result := evalTrustedXFF([]string{"1.2.3.4, 10.0.0.1, 10.0.0.2"}, cfg, "10.0.0.3")
-	if result != "1.2.3.4" {
-		t.Errorf("trust all: got %q, want 1.2.3.4 (leftmost)", result)
+func TestExpandEnvVars_DefaultUsedWhenMissing(t *testing.T) {
+	os.Unsetenv("ROUTEMUX_DEFINITELY_UNSET")
+	result := expandEnvVars([]byte("port: ${env.ROUTEMUX_DEFINITELY_UNSET:8080}"))
+	if string(result) != "port: 8080" {
+		t.Errorf("got %q, want port: 8080", result)
 	}
 }
 
-func TestEvalTrustedXFF_TrustAll_SkipsMalformed(t *testing.T) {
-	// trust-client-headers: true, leftmost IP is malformed → skip to next valid
-	cfg := &Config{TrustClientHeaders: true}
-	result := evalTrustedXFF([]string{"not-an-ip, 1.2.3.4, 10.0.0.1"}, cfg, "10.0.0.3")
-	if result != "1.2.3.4" {
-		t.Errorf("trust all skip malformed: got %q, want 1.2.3.4", result)
+func TestExpandEnvVars_DefaultNotUsedWhenSet(t *testing.T) {
+	os.Setenv("ROUTEMUX_TEST_PORT", "9090")
+	defer os.Unsetenv("ROUTEMUX_TEST_PORT")
+	result := expandEnvVars([]byte("port: ${env.ROUTEMUX_TEST_PORT:8080}"))
+	if string(result) != "port: 9090" {
+		t.Errorf("got %q, want port: 9090 (set value, not default)", result)
 	}
 }
 
-func TestEvalTrustedXFF_TrustedProxies_StopsAtUntrusted(t *testing.T) {
-	// 10.0.0.0/8 is trusted; 1.2.3.4 is not — should return 1.2.3.4
-	cl := &CIDRList{}
-	n := mustNet("10.0.0.0/8")
-	cl.nets = []net.IPNet{n}
-	cfg := &Config{TrustedProxies: &TrustedProxies{list: cl}}
-	// chain: 1.2.3.4 (client) → 10.0.0.1 → 10.0.0.2 (trusted proxies) → 10.0.0.3 (connecting)
-	result := evalTrustedXFF([]string{"1.2.3.4, 10.0.0.1, 10.0.0.2, 10.0.0.3"}, cfg, "10.0.0.3")
-	if result != "1.2.3.4" {
-		t.Errorf("trusted proxies: got %q, want 1.2.3.4", result)
+func TestExpandEnvVars_BlankNotTreatedAsUnset(t *testing.T) {
+	// Variable explicitly set to "" should not trigger the default
+	os.Setenv("ROUTEMUX_TEST_BLANK", "")
+	defer os.Unsetenv("ROUTEMUX_TEST_BLANK")
+	result := expandEnvVars([]byte("x: ${env.ROUTEMUX_TEST_BLANK:fallback}"))
+	if string(result) != "x: " {
+		t.Errorf("got %q, want blank (explicitly set empty should not use default)", result)
 	}
 }
 
-func TestEvalTrustedXFF_TrustedProxies_AllTrusted(t *testing.T) {
-	// All IPs in chain are trusted → return leftmost
-	cl := &CIDRList{}
-	n := mustNet("10.0.0.0/8")
-	cl.nets = []net.IPNet{n}
-	cfg := &Config{TrustedProxies: &TrustedProxies{list: cl}}
-	result := evalTrustedXFF([]string{"10.1.1.1, 10.0.0.1, 10.0.0.2"}, cfg, "10.0.0.3")
-	if result != "10.1.1.1" {
-		t.Errorf("all trusted: got %q, want 10.1.1.1 (leftmost)", result)
+func TestExpandEnvVars_Escape(t *testing.T) {
+	// \${env. should produce literal ${env.
+	result := expandEnvVars([]byte(`dest: \${env.NOT_EXPANDED}`))
+	if string(result) != "dest: ${env.NOT_EXPANDED}" {
+		t.Errorf("got %q, want literal ${env.NOT_EXPANDED}", result)
 	}
 }
 
-func TestEvalTrustedXFF_MalformedAtRightmost(t *testing.T) {
-	// Rightmost (connecting) is malformed → fallback to clientIP
-	cl := &CIDRList{}
-	n := mustNet("10.0.0.0/8")
-	cl.nets = []net.IPNet{n}
-	cfg := &Config{TrustedProxies: &TrustedProxies{list: cl}}
-	result := evalTrustedXFF([]string{"1.2.3.4, not-an-ip"}, cfg, "10.0.0.3")
-	// "not-an-ip" is last (rightmost), malformed → return clientIP
-	if result != "10.0.0.3" {
-		t.Errorf("malformed rightmost: got %q, want clientIP 10.0.0.3", result)
+func TestExpandEnvVars_NoVars(t *testing.T) {
+	input := []byte("dest: http://localhost:3000/")
+	result := expandEnvVars(input)
+	if string(result) != string(input) {
+		t.Errorf("no vars: input should be unchanged")
 	}
 }
 
-func TestEvalTrustedXFF_MalformedInMiddle(t *testing.T) {
-	// Malformed IP in middle of chain → stop, return last valid (one to the right)
-	cl := &CIDRList{}
-	n := mustNet("10.0.0.0/8")
-	cl.nets = []net.IPNet{n}
-	cfg := &Config{TrustedProxies: &TrustedProxies{list: cl}}
-	// chain right-to-left: 10.0.0.3(trusted) → not-an-ip(stop) → return ips[i+1]=10.0.0.3
-	result := evalTrustedXFF([]string{"1.2.3.4, not-an-ip, 10.0.0.3"}, cfg, "10.0.0.4")
-	if result != "10.0.0.3" {
-		t.Errorf("malformed middle: got %q, want 10.0.0.3 (last valid right of malformed)", result)
+func TestExpandEnvVars_UnmatchedBrace(t *testing.T) {
+	input := []byte("dest: ${env.NOCLOSE")
+	result := expandEnvVars(input)
+	if string(result) != string(input) {
+		t.Errorf("unmatched brace: got %q, want input unchanged", result)
 	}
 }
 
-func TestEvalTrustedXFF_NilCfg(t *testing.T) {
-	// nil cfg → pass through as literal (consistent with unknown variable behaviour)
-	result := evalTrustedXFF([]string{"1.2.3.4"}, nil, "10.0.0.1")
-	if result != "${trusted_xff}" {
-		t.Errorf("nil cfg: got %q, want ${trusted_xff} (literal pass-through)", result)
+func TestExpandEnvVars_EscapeBeforeReal(t *testing.T) {
+	// \${env. followed by real ${env.VAR} — escape first, then expand
+	os.Setenv("ROUTEMUX_TEST_EBR", "real")
+	defer os.Unsetenv("ROUTEMUX_TEST_EBR")
+	result := expandEnvVars([]byte(`\${env.ESCAPED} and ${env.ROUTEMUX_TEST_EBR}`))
+	if string(result) != "${env.ESCAPED} and real" {
+		t.Errorf("got %q", result)
+	}
+}
+
+func TestLoadConfigFile_EnvVarSubstitution(t *testing.T) {
+	os.Setenv("ROUTEMUX_TEST_UPSTREAM", "backend.internal")
+	os.Setenv("ROUTEMUX_TEST_UPSTREAM_PORT", "8181")
+	defer os.Unsetenv("ROUTEMUX_TEST_UPSTREAM")
+	defer os.Unsetenv("ROUTEMUX_TEST_UPSTREAM_PORT")
+
+	f, err := os.CreateTemp("", "routemux-*.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString(`
+global:
+  port: ${env.ROUTEMUX_TEST_UPSTREAM_PORT}
+routes:
+  /api/:
+    dest: http://${env.ROUTEMUX_TEST_UPSTREAM}:${env.ROUTEMUX_TEST_UPSTREAM_PORT}/v1/
+`)
+	f.Close()
+	defer os.Remove(f.Name())
+
+	cfg, err := loadConfigFile(f.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Port != 8181 {
+		t.Errorf("port = %d, want 8181", cfg.Port)
+	}
+	rc := cfg.VHosts[0].Routes["/api/"]
+	if rc == nil {
+		t.Fatal("route /api/ not found")
+	}
+	if rc.Upstreams[0].URL != "http://backend.internal:8181/v1/" {
+		t.Errorf("upstream URL = %q", rc.Upstreams[0].URL)
+	}
+}
+
+func TestLoadConfigFile_EnvVarDefault(t *testing.T) {
+	os.Unsetenv("ROUTEMUX_TEST_MISSING_PORT")
+	f, err := os.CreateTemp("", "routemux-*.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString(`
+global:
+  port: ${env.ROUTEMUX_TEST_MISSING_PORT:7777}
+routes:
+  /:
+    dest: http://localhost:3000/
+`)
+	f.Close()
+	defer os.Remove(f.Name())
+
+	cfg, err := loadConfigFile(f.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Port != 7777 {
+		t.Errorf("port = %d, want 7777 (default value)", cfg.Port)
+	}
+}
+
+// ---- ${host} variable compile test ----
+
+func TestCompile_Host(t *testing.T) {
+	got := evalHeader("${host}", "1.2.3.4", "54321", "https", "/path", nil)
+	// evalHeader passes "example.com" as host
+	if got != "example.com" {
+		t.Errorf("${host}: got %q, want example.com", got)
+	}
+}
+
+func TestRouteHandler_VarHost(t *testing.T) {
+	var gotHost string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHost = r.Header.Get("X-Original-Host")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/api/": {
+			Upstreams: []Upstream{mustUpstream(backend.URL+"/", 1)},
+			ParsedAddHeaders: map[string]parsedHeaderValue{
+				"X-Original-Host": compileHeaderValue("${host}"),
+			},
+			AddHasVars: true,
+		},
+	})
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
+	req.Host = "myapp.example.com"
+	http.DefaultClient.Do(req)
+
+	if gotHost != "myapp.example.com" {
+		t.Errorf("${host}: got %q, want myapp.example.com", gotHost)
+	}
+}
+
+// ---- ${trusted_xff} compile & NeedsTrustedXFF tests ----
+
+func TestCompile_TrustedXFF(t *testing.T) {
+	ph := compileHeaderValue("${trusted_xff}")
+	if ph.isConst {
+		t.Error("${trusted_xff} should not be const")
+	}
+	if len(ph.segments) != 1 || ph.segments[0].kind != segTrustedXFF {
+		t.Errorf("expected single segTrustedXFF segment, got %+v", ph.segments)
 	}
 }
 
 func TestNeedsTrustedXFF_SetInConfig(t *testing.T) {
-	yml := `
+	f, err := os.CreateTemp("", "routemux-*.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString(`
 global:
   port: 8080
 routes:
@@ -2650,9 +2763,7 @@ routes:
     dest: http://localhost:3000/
     dest-add-header:
       X-Real-Client: ${trusted_xff}
-`
-	f, _ := os.CreateTemp("", "routemux-*.yml")
-	f.WriteString(yml)
+`)
 	f.Close()
 	defer os.Remove(f.Name())
 
@@ -2661,13 +2772,50 @@ routes:
 		t.Fatal(err)
 	}
 	rc := cfg.VHosts[0].Routes["/api/"]
+	if rc == nil {
+		t.Fatal("route /api/ not found")
+	}
 	if !rc.NeedsTrustedXFF {
-		t.Error("NeedsTrustedXFF should be true when ${trusted_xff} is used")
+		t.Error("NeedsTrustedXFF should be true when ${trusted_xff} is in dest-add-header")
+	}
+}
+
+func TestNeedsTrustedXFF_SetInClientHeader(t *testing.T) {
+	f, err := os.CreateTemp("", "routemux-*.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString(`
+global:
+  port: 8080
+routes:
+  /api/:
+    dest: http://localhost:3000/
+    client-add-header:
+      X-Real-Client: ${trusted_xff}
+`)
+	f.Close()
+	defer os.Remove(f.Name())
+
+	cfg, err := loadConfigFile(f.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc := cfg.VHosts[0].Routes["/api/"]
+	if rc == nil {
+		t.Fatal("route /api/ not found")
+	}
+	if !rc.NeedsTrustedXFF {
+		t.Error("NeedsTrustedXFF should be true when ${trusted_xff} is in client-add-header")
 	}
 }
 
 func TestNeedsTrustedXFF_NotSetWhenUnused(t *testing.T) {
-	yml := `
+	f, err := os.CreateTemp("", "routemux-*.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString(`
 global:
   port: 8080
 routes:
@@ -2675,9 +2823,7 @@ routes:
     dest: http://localhost:3000/
     dest-add-header:
       X-Real-IP: ${remote_addr}
-`
-	f, _ := os.CreateTemp("", "routemux-*.yml")
-	f.WriteString(yml)
+`)
 	f.Close()
 	defer os.Remove(f.Name())
 
@@ -2688,5 +2834,534 @@ routes:
 	rc := cfg.VHosts[0].Routes["/api/"]
 	if rc.NeedsTrustedXFF {
 		t.Error("NeedsTrustedXFF should be false when ${trusted_xff} is not used")
+	}
+}
+
+// ---- client-add-header on STATUS routes ----
+
+func TestClientHeader_StatusRoute_Add(t *testing.T) {
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/health/": {
+			StatusCode: 200,
+			StatusText: "healthy",
+			ParsedClientAddHeaders: map[string]parsedHeaderValue{
+				"X-Served-By":   compileHeaderValue("RouteMUX"),
+				"Cache-Control": compileHeaderValue("no-store"),
+			},
+		},
+	})
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/health/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Header.Get("X-Served-By") != "RouteMUX" {
+		t.Errorf("X-Served-By = %q, want RouteMUX", resp.Header.Get("X-Served-By"))
+	}
+	if resp.Header.Get("Cache-Control") != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", resp.Header.Get("Cache-Control"))
+	}
+}
+
+func TestClientHeader_StatusRoute_VarHost(t *testing.T) {
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/health/": {
+			StatusCode: 200,
+			StatusText: "ok",
+			ParsedClientAddHeaders: map[string]parsedHeaderValue{
+				"X-Request-Host": compileHeaderValue("${host}"),
+			},
+			ClientAddHasVars: true,
+		},
+	})
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/health/", nil)
+	req.Host = "example.com"
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Header.Get("X-Request-Host") != "example.com" {
+		t.Errorf("X-Request-Host = %q, want example.com", resp.Header.Get("X-Request-Host"))
+	}
+}
+
+func TestClientHeader_StatusRoute_NilRespHeaderVar(t *testing.T) {
+	// ${header.X} on STATUS route has no upstream response → empty string, no panic
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/health/": {
+			StatusCode: 200,
+			StatusText: "ok",
+			ParsedClientAddHeaders: map[string]parsedHeaderValue{
+				"X-Echo": compileHeaderValue("${header.X-Upstream-Id}"),
+			},
+			ClientAddHasVars:       true,
+			ClientNeedsRespHeaders: true,
+		},
+	})
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/health/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Header.Get("X-Echo") != "" {
+		t.Errorf("X-Echo should be empty on STATUS route, got %q", resp.Header.Get("X-Echo"))
+	}
+}
+
+// ---- trusted-proxies HTTP integration tests ----
+
+func TestTrustedProxies_HTTPHandler_TrustAppends(t *testing.T) {
+	// When connecting IP is in trusted-proxies, XFF should be appended not overwritten
+	var gotXFF string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotXFF = r.Header.Get("X-Forwarded-For")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL+"/", 1)}},
+	})
+	// Trust loopback — the test httptest server connects via 127.0.0.1
+	cl := &CIDRList{}
+	n := mustNet("127.0.0.0/8")
+	cl.sources = append(cl.sources, filterSource{kind: sourceCIDR, cidr: n})
+	cl.nets = append(cl.nets, n)
+	cfg.TrustedProxies = &TrustedProxies{list: cl}
+
+	srv, err := newServer(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
+	req.Header.Set("X-Forwarded-For", "1.2.3.4")
+	http.DefaultClient.Do(req)
+
+	if gotXFF == "127.0.0.1" {
+		t.Error("trusted proxy: XFF should append, not overwrite")
+	}
+	if !strings.Contains(gotXFF, "1.2.3.4") {
+		t.Errorf("trusted proxy: XFF should contain original chain, got %q", gotXFF)
+	}
+}
+
+func TestTrustedProxies_HTTPHandler_UntrustedDiscards(t *testing.T) {
+	// When connecting IP is NOT in trusted-proxies, spoofed XFF is discarded
+	var gotXFF string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotXFF = r.Header.Get("X-Forwarded-For")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL+"/", 1)}},
+	})
+	// Trust only 10.0.0.0/8 — test client connects from 127.0.0.1 (untrusted)
+	cl := &CIDRList{}
+	n := mustNet("10.0.0.0/8")
+	cl.sources = append(cl.sources, filterSource{kind: sourceCIDR, cidr: n})
+	cl.nets = append(cl.nets, n)
+	cfg.TrustedProxies = &TrustedProxies{list: cl}
+
+	srv, err := newServer(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
+	req.Header.Set("X-Forwarded-For", "evil-spoofed-ip")
+	http.DefaultClient.Do(req)
+
+	if strings.Contains(gotXFF, "evil") {
+		t.Errorf("untrusted: spoofed XFF should be discarded, got %q", gotXFF)
+	}
+}
+
+// ---- ${trusted_xff} end-to-end HTTP test ----
+
+func TestRouteHandler_VarTrustedXFF_NoTrust(t *testing.T) {
+	// No trusted-proxies → ${trusted_xff} = connecting IP
+	var gotHeader string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeader = r.Header.Get("X-Client")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	ph := compileHeaderValue("${trusted_xff}")
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/api/": {
+			Upstreams:       []Upstream{mustUpstream(backend.URL+"/", 1)},
+			ParsedAddHeaders: map[string]parsedHeaderValue{"X-Client": ph},
+			AddHasVars:      true,
+			NeedsTrustedXFF: true,
+		},
+	})
+
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	http.Get(ts.URL + "/api/")
+
+	if gotHeader == "" {
+		t.Error("X-Client should be set from ${trusted_xff}")
+	}
+	// Without trust config, should be the connecting IP
+	if strings.Contains(gotHeader, ",") {
+		t.Errorf("no trust config: expected single IP, got %q", gotHeader)
+	}
+}
+
+func TestRouteHandler_VarTrustedXFF_TrustAll(t *testing.T) {
+	// trust-client-headers: true → ${trusted_xff} = leftmost in chain
+	var gotHeader string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeader = r.Header.Get("X-Client")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	ph := compileHeaderValue("${trusted_xff}")
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/api/": {
+			Upstreams:       []Upstream{mustUpstream(backend.URL+"/", 1)},
+			ParsedAddHeaders: map[string]parsedHeaderValue{"X-Client": ph},
+			AddHasVars:      true,
+			NeedsTrustedXFF: true,
+		},
+	})
+	cfg.TrustClientHeaders = true
+
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
+	req.Header.Set("X-Forwarded-For", "5.6.7.8, 10.0.0.1")
+	http.DefaultClient.Do(req)
+
+	// trust-client-headers: leftmost valid IP in chain
+	if gotHeader != "5.6.7.8" {
+		t.Errorf("trust all: ${trusted_xff} = %q, want 5.6.7.8 (leftmost)", gotHeader)
+	}
+}
+
+// ---- Route timeout test ----
+
+func TestRouteHandler_Timeout(t *testing.T) {
+	// A slow backend with a short route timeout should return 504
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Sleep longer than the configured timeout
+		select {
+		case <-r.Context().Done():
+		case <-func() chan struct{} {
+			ch := make(chan struct{})
+			go func() { strings.Repeat("x", 1000); close(ch) }()
+			return ch
+		}():
+		}
+		// Simulate slow response - just block
+		done := make(chan struct{})
+		select {
+		case <-r.Context().Done():
+		case <-done:
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/slow/": {
+			Upstreams: []Upstream{mustUpstream(backend.URL+"/", 1)},
+			Timeout:   "50ms",
+		},
+	})
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/slow/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// http.TimeoutHandler returns 503 Service Unavailable
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("timeout: status = %d, want 503", resp.StatusCode)
+	}
+}
+
+// ---- WebSocket header/path tests ----
+
+// wsUpgradeServer returns a test server that accepts WebSocket upgrades
+// and calls handler(headers) with the upgrade request headers it received.
+func wsUpgradeServer(handler func(path string, headers http.Header)) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handler(r.URL.RequestURI(), r.Header)
+		// Respond with 101 Switching Protocols so the client gets a valid response
+		hj := w.(http.Hijacker)
+		conn, _, _ := hj.Hijack()
+		conn.Write([]byte("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"))
+		conn.Close()
+	}))
+}
+
+// wsUpgradeRequest sends a WebSocket upgrade request and returns the response.
+func wsUpgradeRequest(t *testing.T, url string, extraHeaders map[string]string) *http.Response {
+	t.Helper()
+	req, _ := http.NewRequest("GET", url, nil)
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+	req.Header.Set("Sec-WebSocket-Version", "13")
+	for k, v := range extraHeaders {
+		req.Header.Set(k, v)
+	}
+	// Use a transport that doesn't follow redirects and doesn't complain about 101
+	client := &http.Client{
+		Transport: &http.Transport{},
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	resp, err := client.Do(req)
+	if err != nil && resp == nil {
+		t.Fatalf("ws request failed: %v", err)
+	}
+	return resp
+}
+
+func TestWebSocket_DestAddHeader(t *testing.T) {
+	var gotHeaders http.Header
+	upstream := wsUpgradeServer(func(_ string, h http.Header) { gotHeaders = h })
+	defer upstream.Close()
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/ws/": {
+			Upstreams: []Upstream{mustUpstream(upstream.URL+"/", 1)},
+			ParsedAddHeaders: map[string]parsedHeaderValue{
+				"X-Custom": compileHeaderValue("hello"),
+			},
+		},
+	})
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	wsUpgradeRequest(t, ts.URL+"/ws/", nil)
+	if gotHeaders.Get("X-Custom") != "hello" {
+		t.Errorf("X-Custom = %q, want hello", gotHeaders.Get("X-Custom"))
+	}
+}
+
+func TestWebSocket_DestDelHeader(t *testing.T) {
+	var gotHeaders http.Header
+	upstream := wsUpgradeServer(func(_ string, h http.Header) { gotHeaders = h })
+	defer upstream.Close()
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/ws/": {
+			Upstreams:    []Upstream{mustUpstream(upstream.URL+"/", 1)},
+			DeleteHeaders: []string{"Sec-WebSocket-Key"},
+		},
+	})
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	wsUpgradeRequest(t, ts.URL+"/ws/", nil)
+	if gotHeaders.Get("Sec-WebSocket-Key") != "" {
+		t.Error("Sec-WebSocket-Key should be deleted")
+	}
+}
+
+func TestWebSocket_XForwardedHeaders_Untrusted(t *testing.T) {
+	var gotHeaders http.Header
+	upstream := wsUpgradeServer(func(_ string, h http.Header) { gotHeaders = h })
+	defer upstream.Close()
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/ws/": {Upstreams: []Upstream{mustUpstream(upstream.URL+"/", 1)}},
+	})
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	wsUpgradeRequest(t, ts.URL+"/ws/", map[string]string{
+		"X-Forwarded-For":   "spoofed-ip",
+		"X-Forwarded-Proto": "spoofed-proto",
+	})
+	// Untrusted: XFF set to connecting IP, spoofed headers discarded
+	if gotHeaders.Get("X-Forwarded-For") == "spoofed-ip" {
+		t.Error("untrusted WS: spoofed X-Forwarded-For should be overwritten")
+	}
+	if gotHeaders.Get("X-Forwarded-Proto") == "spoofed-proto" {
+		t.Error("untrusted WS: spoofed X-Forwarded-Proto should be overwritten")
+	}
+}
+
+func TestWebSocket_XForwardedHeaders_TrustClientHeaders(t *testing.T) {
+	var gotHeaders http.Header
+	upstream := wsUpgradeServer(func(_ string, h http.Header) { gotHeaders = h })
+	defer upstream.Close()
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/ws/": {Upstreams: []Upstream{mustUpstream(upstream.URL+"/", 1)}},
+	})
+	cfg.TrustClientHeaders = true
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	wsUpgradeRequest(t, ts.URL+"/ws/", map[string]string{
+		"X-Forwarded-For":  "1.2.3.4",
+		"X-Forwarded-Host": "original.example.com",
+	})
+	// Trusted: XFF should be appended, XFH left untouched
+	if !strings.Contains(gotHeaders.Get("X-Forwarded-For"), "1.2.3.4") {
+		t.Errorf("trusted WS: XFF should contain original chain, got %q", gotHeaders.Get("X-Forwarded-For"))
+	}
+	if gotHeaders.Get("X-Forwarded-Host") != "original.example.com" {
+		t.Errorf("trusted WS: X-Forwarded-Host should be untouched, got %q", gotHeaders.Get("X-Forwarded-Host"))
+	}
+}
+
+func TestWebSocket_VarRemoteAddr(t *testing.T) {
+	var gotHeaders http.Header
+	upstream := wsUpgradeServer(func(_ string, h http.Header) { gotHeaders = h })
+	defer upstream.Close()
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/ws/": {
+			Upstreams: []Upstream{mustUpstream(upstream.URL+"/", 1)},
+			ParsedAddHeaders: map[string]parsedHeaderValue{
+				"X-Client-IP": compileHeaderValue("${remote_addr}"),
+			},
+			AddHasVars: true,
+		},
+	})
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	wsUpgradeRequest(t, ts.URL+"/ws/", nil)
+	got := gotHeaders.Get("X-Client-IP")
+	if got == "" {
+		t.Error("X-Client-IP should be set from ${remote_addr}")
+	}
+	if strings.Contains(got, ":") {
+		t.Errorf("X-Client-IP should be IP only (no port), got %q", got)
+	}
+}
+
+func TestWebSocket_QueryStringMerge(t *testing.T) {
+	var gotPath string
+	upstream := wsUpgradeServer(func(path string, _ http.Header) { gotPath = path })
+	defer upstream.Close()
+
+	// dest has a base query string; client also sends one — both should appear
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/ws/": {Upstreams: []Upstream{mustUpstream(upstream.URL+"/?token=abc", 1)}},
+	})
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	wsUpgradeRequest(t, ts.URL+"/ws/?room=42", nil)
+	if !strings.Contains(gotPath, "token=abc") {
+		t.Errorf("dest query string missing from upstream path: %q", gotPath)
+	}
+	if !strings.Contains(gotPath, "room=42") {
+		t.Errorf("client query string missing from upstream path: %q", gotPath)
+	}
+}
+
+func TestWebSocket_QueryStringDestOnly(t *testing.T) {
+	var gotPath string
+	upstream := wsUpgradeServer(func(path string, _ http.Header) { gotPath = path })
+	defer upstream.Close()
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/ws/": {Upstreams: []Upstream{mustUpstream(upstream.URL+"/?token=abc", 1)}},
+	})
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	wsUpgradeRequest(t, ts.URL+"/ws/", nil) // no client query string
+	if !strings.Contains(gotPath, "token=abc") {
+		t.Errorf("dest query string missing: %q", gotPath)
+	}
+}
+
+func TestWebSocket_PathStripping(t *testing.T) {
+	var gotPath string
+	upstream := wsUpgradeServer(func(path string, _ http.Header) { gotPath = path })
+	defer upstream.Close()
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/ws/": {Upstreams: []Upstream{mustUpstream(upstream.URL+"/upstream/", 1)}},
+	})
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	wsUpgradeRequest(t, ts.URL+"/ws/room/chat", nil)
+	if !strings.HasPrefix(gotPath, "/upstream/room/chat") {
+		t.Errorf("path stripping: got %q, want /upstream/room/chat...", gotPath)
+	}
+}
+
+func TestWebSocket_Auth(t *testing.T) {
+	upstream := wsUpgradeServer(func(_ string, _ http.Header) {})
+	defer upstream.Close()
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/ws/": {
+			Upstreams:    []Upstream{mustUpstream(upstream.URL+"/", 1)},
+			Auth:         &Auth{User: "user", Password: "pass"},
+			AuthExplicit: true,
+		},
+	})
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	// No credentials — should get 401
+	resp := wsUpgradeRequest(t, ts.URL+"/ws/", nil)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("no auth: status = %d, want 401", resp.StatusCode)
+	}
+
+	// With correct credentials — should get 101
+	req, _ := http.NewRequest("GET", ts.URL+"/ws/", nil)
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+	req.Header.Set("Sec-WebSocket-Version", "13")
+	req.SetBasicAuth("user", "pass")
+	client := &http.Client{Transport: &http.Transport{}}
+	resp2, err := client.Do(req)
+	if err != nil && resp2 == nil {
+		t.Fatal(err)
+	}
+	if resp2.StatusCode != http.StatusSwitchingProtocols {
+		t.Errorf("with auth: status = %d, want 101", resp2.StatusCode)
 	}
 }

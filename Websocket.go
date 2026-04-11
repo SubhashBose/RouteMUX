@@ -65,7 +65,12 @@ func serveWebSocket(w http.ResponseWriter, r *http.Request, destURL *url.URL, ro
 	}
 	stripped := strings.TrimPrefix(r.URL.Path, routePath)
 	upstreamPath += stripped
-	if r.URL.RawQuery != "" {
+	// Merge dest base query string with client query string, same as HTTP proxy.
+	if destURL.RawQuery != "" && r.URL.RawQuery != "" {
+		upstreamPath += "?" + destURL.RawQuery + "&" + r.URL.RawQuery
+	} else if destURL.RawQuery != "" {
+		upstreamPath += "?" + destURL.RawQuery
+	} else if r.URL.RawQuery != "" {
 		upstreamPath += "?" + r.URL.RawQuery
 	}
 
@@ -141,10 +146,10 @@ func serveWebSocket(w http.ResponseWriter, r *http.Request, destURL *url.URL, ro
 		// scheme and requestURI only computed when a variable header is present.
 		var scheme, requestURI, requestHost string
 		if rc.AddHasVars {
-			scheme = "ws"
-			if destURL.Scheme == "wss" || destURL.Scheme == "https" {
-				scheme = "wss"
-			}
+			// Use the client connection scheme (http/https), consistent with the
+			// HTTP proxy path. The WebSocket upgrade happens over HTTP before the
+			// protocol switch, so schemeOf(r) correctly reflects TLS state.
+			scheme = schemeOf(r)
 			requestURI = r.RequestURI
 			requestHost = r.Host
 		}
