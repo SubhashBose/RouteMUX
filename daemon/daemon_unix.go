@@ -40,6 +40,9 @@ type Config struct {
 	// Defaults to the basename of the current executable.
 	PidfilePrefix string
 
+	//HashKey to be used for the PID file. Default is current working directory
+	HashKey string
+
 	// WaitAfterStart is how long to wait after forking before confirming the
 	// daemon is still alive. Defaults to 500ms.
 	WaitAfterStart time.Duration
@@ -48,13 +51,19 @@ type Config struct {
 	// crashed worker. Defaults to 2s.
 	WatchdogRestartDelay time.Duration
 
-	// Logger is used for daemon-internal messages. Defaults to log.Default().
-	Logger *log.Logger
+	// Logger file to used for daemon-internal messages. Logging defaults to log.Default().
+	LoggerFile string
 
-	// WatchdogLogFile is the path to the watchdog log file.
-    // Defaults to same as Logger if it is set, otherwise same as PID-file basename with "-watchdog.log".
-	WatchdogLogger *log.Logger
+	// WatchdogLogger file to used for watchdog messages. Logging defaults to log.Default().
+	// Defaults to same as Logger if it is set, otherwise log file is PID-file basename with "-watchdog.log".
+	WatchdogLoggerFile string
+	
+	// (internal variables) Logger is used for daemon-internal messages. Defaults to log.Default().
+	logger *log.Logger
+
+	pidFile string
 }
+
 
 // Handle inspects os.Args for control commands and acts accordingly.
 //
@@ -67,8 +76,14 @@ type Config struct {
 //	./myapp [flags] status       — print whether the daemon is running
 //	./myapp [flags]              — run attached to the terminal (no daemonizing)
 func Handle(cfg Config) {
-	if cfg.Logger == nil {
-		cfg.Logger = log.Default()
+	if cfg.LoggerFile == "" {
+		cfg.logger = log.Default()
+	} else {
+		f, err := os.OpenFile(cfg.LoggerFile, os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0644)
+		if err == nil {
+			cfg.logger = log.New(f, "", log.LstdFlags)
+			//cfg.logger.Printf("%s: started logging to %s", cfg.AppName, cfg.LoggerFile)
+		}
 	}
 	if cfg.AppName == "" {
 		exe, _ := os.Executable()
@@ -84,8 +99,8 @@ func Handle(cfg Config) {
 	if cfg.WatchdogRestartDelay == 0 {
 		cfg.WatchdogRestartDelay = 2 * time.Second
 	}
-	//if cfg.WatchdogLogger == nil {
-	//	cfg.WatchdogLogger = cfg.Logger
+	//if cfg.watchdogLogger == nil {
+	//	cfg.watchdogLogger = cfg.logger
 	//}
 
 	// Role: plain worker (child of watchdog) — just run OnStart, no PID file handling.
@@ -98,15 +113,16 @@ func Handle(cfg Config) {
 
 	// Role: watchdog daemon — monitor and restart the worker.
 	if os.Getenv(watchdogEnvVar) == "1" {
-		pidFile := os.Getenv(pidFileEnvVar)
+		cfg.pidFile = os.Getenv(pidFileEnvVar)
 		cfg.AppName = cfg.AppName + " watchdog"
-		runWatchdog(pidFile, &cfg)
+		runWatchdog(&cfg)
 		return
 	}
 
 	// Role: plain daemon — set up graceful shutdown and run OnStart.
 	if pidFile := os.Getenv(pidFileEnvVar); pidFile != "" {
-		setupGracefulShutdown(pidFile, &cfg, nil)
+		cfg.pidFile = pidFile
+		setupGracefulShutdown(&cfg, nil)
 		if cfg.OnStart != nil {
 			cfg.OnStart()
 		}
@@ -116,22 +132,23 @@ func Handle(cfg Config) {
 	// Role: parent — parse command and act.
 	command, passArgs := parseArgs(os.Args[1:])
 
-	pidFile, err := pidFilePath(cfg.PidfilePrefix)
+	pidFile, err := pidFilePath(cfg)
+	cfg.pidFile = pidFile
 	if err != nil {
-		cfg.Logger.Fatalf("%s daemon: cannot determine PID file path: %v", cfg.AppName, err)
+		cfg.logger.Fatalf("%s daemon: cannot determine PID file path: %v", cfg.AppName, err)
 	}
 
 	switch command {
 	case "start":
-		handleStart(pidFile, passArgs, &cfg)
+		handleStart(passArgs, &cfg)
 	case "watch-start":
-		handleWatchStart(pidFile, passArgs, &cfg)
+		handleWatchStart(passArgs, &cfg)
 	case "stop":
-		_ = handleStop(pidFile, &cfg)
+		_ = handleStop(&cfg)
 	case "restart":
-		handleRestart(pidFile, &cfg)
+		handleRestart(&cfg)
 	case "status":
-		handleStatus(pidFile, &cfg)
+		handleStatus(&cfg)
 	default:
 		// No control command — run normally attached to terminal.
 		if cfg.OnStart != nil {
@@ -155,21 +172,23 @@ func parseArgs(args []string) (command string, rest []string) {
 	return "", args
 }
 
-func pidFilePath(prefix string) (string, error) {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return "", err
+func pidFilePath(cfg Config) (string, error) {
+	if cfg.HashKey == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", err
+		}
+		cfg.HashKey, _ = filepath.Abs(cwd)
 	}
-	cwd, _ = filepath.Abs(cwd)
 	exe, err := os.Executable()
 	if err != nil {
 		exe = ""
 	}
 	exe, _ = filepath.Abs(exe)
 	uid := os.Getuid()
-	raw := fmt.Sprintf("%d%s%s", uid, cwd, exe)
+	raw := fmt.Sprintf("%d%s%s", uid, cfg.HashKey, exe)
 	hash := fmt.Sprintf("%x", md5.Sum([]byte(raw)))
-	return filepath.Join(os.TempDir(), prefix+"-"+hash+".pid"), nil
+	return filepath.Join(os.TempDir(), cfg.PidfilePrefix+"-"+hash+".pid"), nil
 }
 
 // forkDaemon launches exe with the given args and env as a detached daemon.
@@ -184,7 +203,7 @@ func forkDaemon(exe string, args []string, env []string, cfg *Config) int {
 	cmd.Stderr = nil
 
 	if err := cmd.Start(); err != nil {
-		cfg.Logger.Fatalf("%s: failed to fork process: %v", cfg.AppName, err)
+		cfg.logger.Fatalf("%s: failed to fork process: %v", cfg.AppName, err)
 	}
 
 	pid := cmd.Process.Pid
@@ -195,9 +214,9 @@ func forkDaemon(exe string, args []string, env []string, cfg *Config) int {
 	select {
 	case err := <-exited:
 		if err != nil {
-			cfg.Logger.Fatalf("%s: process exited immediately: %v", cfg.AppName, err)
+			cfg.logger.Fatalf("%s: process exited immediately: %v", cfg.AppName, err)
 		} else {
-			cfg.Logger.Fatalf("%s: process exited immediately with no error", cfg.AppName)
+			cfg.logger.Fatalf("%s: process exited immediately with no error", cfg.AppName)
 		}
 	case <-time.After(cfg.WaitAfterStart):
 		// still alive
@@ -207,68 +226,88 @@ func forkDaemon(exe string, args []string, env []string, cfg *Config) int {
 	return pid
 }
 
-func handleStart(pidFile string, childArgs []string, cfg *Config) {
-	if pid, err := readPID(pidFile); err == nil {
+func handleStart(childArgs []string, cfg *Config) {
+	if pid, _, err := readPID(cfg.pidFile); err == nil {
 		if processExists(pid) {
 			fmt.Printf("%s already running (PID %d). Use 'stop' first.\n", cfg.AppName, pid)
 			os.Exit(0)
 		}
-		os.Remove(pidFile)
+		os.Remove(cfg.pidFile)
+	}
+
+	if wg_logf := getWatchdogLogfileName(cfg); cfg.LoggerFile != wg_logf && fileExists(wg_logf) {
+		os.Remove(wg_logf)
 	}
 
 	exe, _ := filepath.Abs(mustExecutable())
 
-	env := append(os.Environ(), pidFileEnvVar+"="+pidFile)
+	env := append(os.Environ(), pidFileEnvVar+"="+cfg.pidFile)
 	pid := forkDaemon(exe, childArgs, env, cfg)
 
-	if err := writePID(pidFile, pid); err != nil {
-		cfg.Logger.Fatalf("%s: failed to write PID file: %v", cfg.AppName, err)
+	if err := writePID(cfg.pidFile, pid, "start"); err != nil {
+		cfg.logger.Fatalf("%s: failed to write PID file: %v", cfg.AppName, err)
 	}
 	fmt.Printf("%s daemon started (PID %d)\n", cfg.AppName, pid)
 }
 
-func handleWatchStart(pidFile string, childArgs []string, cfg *Config) {
-	if pid, err := readPID(pidFile); err == nil {
+func handleWatchStart(childArgs []string, cfg *Config) {
+	if pid, _, err := readPID(cfg.pidFile); err == nil {
 		if processExists(pid) {
 			fmt.Printf("%s already running (PID %d). Use 'stop' first.\n", cfg.AppName, pid)
 			os.Exit(0)
 		}
-		os.Remove(pidFile)
+		os.Remove(cfg.pidFile)
+	}
+
+	if wg_logf := getWatchdogLogfileName(cfg); cfg.LoggerFile != wg_logf && fileExists(wg_logf) {
+		os.Remove(wg_logf)
 	}
 
 	exe, _ := filepath.Abs(mustExecutable())
 
 	env := append(os.Environ(),
-		pidFileEnvVar+"="+pidFile,
+		pidFileEnvVar+"="+cfg.pidFile,
 		watchdogEnvVar+"=1",
 	)
 	pid := forkDaemon(exe, childArgs, env, cfg)
 
-	if err := writePID(pidFile, pid); err != nil {
-		cfg.Logger.Fatalf("%s: failed to write PID file: %v", cfg.AppName, err)
+	if err := writePID(cfg.pidFile, pid, "watch-start"); err != nil {
+		cfg.logger.Fatalf("%s: failed to write PID file: %v", cfg.AppName, err)
 	}
 	fmt.Printf("%s watchdog started (PID %d)\n", cfg.AppName, pid)
-	if cfg.WatchdogLogger == nil {
-		fmt.Printf("Watchdog log: %s\n", strings.TrimSuffix(pidFile, ".pid") + "-watchdog.log")
+	fmt.Printf("Watchdog log: %s\n", getWatchdogLogfileName(cfg))
+}
+
+func getWatchdogLogfileName(cfg *Config) string {
+	if cfg.WatchdogLoggerFile !="" {
+		return cfg.WatchdogLoggerFile
 	}
+	if cfg.LoggerFile != "" {
+		return cfg.LoggerFile
+	}
+	return strings.TrimSuffix(cfg.pidFile, ".pid") + "-watchdog.log"
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return !os.IsNotExist(err)
 }
 
 // runWatchdog is the watchdog loop. It runs inside the detached watchdog process,
 // repeatedly spawning the worker and restarting it if it crashes.
-func runWatchdog(pidFile string, cfg *Config) {
+func runWatchdog(cfg *Config) {
 	exe, _ := filepath.Abs(mustExecutable())
 
-	if cfg.WatchdogLogger == nil {
-		wg_logfile:= strings.TrimSuffix(pidFile, ".pid") + "-watchdog.log"
+	if wg_logf := getWatchdogLogfileName(cfg); wg_logf != cfg.LoggerFile {
+		cfg.WatchdogLoggerFile= wg_logf
 		
-        f, err := os.OpenFile(wg_logfile, os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0644)
+        f, err := os.OpenFile(cfg.WatchdogLoggerFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
         if err == nil {
-            cfg.Logger = log.New(f, "", log.LstdFlags)
-            cfg.Logger.Printf("%s: started logging to %s", cfg.AppName, wg_logfile)
+            cfg.logger = log.New(f, "", log.LstdFlags)
+			cfg.LoggerFile = cfg.WatchdogLoggerFile
+            cfg.logger.Printf("%s: started logging to %s", cfg.AppName, cfg.WatchdogLoggerFile)
         }
-    } else {
-		cfg.Logger=cfg.WatchdogLogger
-	}
+    }
 
 	// Build a clean env for the worker: strip watchdog/pidfile markers, add worker marker.
 	baseEnv := make([]string, 0, len(os.Environ()))
@@ -284,12 +323,12 @@ func runWatchdog(pidFile string, cfg *Config) {
 	// currentWorker is updated each restart so the signal handler can always
 	// reach the live worker process.
 	var currentWorker *exec.Cmd
-	setupGracefulShutdown(pidFile, cfg, &currentWorker)
+	setupGracefulShutdown(cfg, &currentWorker)
 
 	attempt := 0
 	for {
 		attempt++
-		cfg.Logger.Printf("%s: starting worker (attempt %d)", cfg.AppName, attempt)
+		cfg.logger.Printf("%s: starting worker (attempt %d)", cfg.AppName, attempt)
 
 		cmd := exec.Command(exe, os.Args[1:]...)
 		cmd.Env = workerEnv
@@ -308,20 +347,20 @@ func runWatchdog(pidFile string, cfg *Config) {
 		// Connect stdout and stderr pipes to the logger
 		stdoutPipe, err := cmd.StdoutPipe()
 		if err != nil {
-			cfg.Logger.Printf("%s: failed to create stdout pipe: %v", cfg.AppName, err)
+			cfg.logger.Printf("%s: failed to create stdout pipe: %v", cfg.AppName, err)
 		} else {
-			go pipeToLogger(stdoutPipe, cfg.Logger, "[stdout]")
+			go pipeToLogger(stdoutPipe, cfg.logger, "[stdout]")
 		}
 
 		stderrPipe, err := cmd.StderrPipe()
 		if err != nil {
-			cfg.Logger.Printf("%s: failed to create stderr pipe: %v", cfg.AppName, err)
+			cfg.logger.Printf("%s: failed to create stderr pipe: %v", cfg.AppName, err)
 		} else {
-			go pipeToLogger(stderrPipe, cfg.Logger, "[stderr]")
+			go pipeToLogger(stderrPipe, cfg.logger, "[stderr]")
 		}
 
 		if err := cmd.Start(); err != nil {
-			cfg.Logger.Printf("%s: failed to start worker: %v — retrying in %s",
+			cfg.logger.Printf("%s: failed to start worker: %v — retrying in %s",
 				cfg.AppName, err, cfg.WatchdogRestartDelay)
 			time.Sleep(cfg.WatchdogRestartDelay)
 			continue
@@ -332,35 +371,35 @@ func runWatchdog(pidFile string, cfg *Config) {
 		currentWorker = nil
 
 		if err != nil {
-			cfg.Logger.Printf("%s: worker crashed (%v) — restarting in %s",
+			cfg.logger.Printf("%s: worker crashed (%v) — restarting in %s",
 				cfg.AppName, err, cfg.WatchdogRestartDelay)
 			time.Sleep(cfg.WatchdogRestartDelay)
 		} else {
 			// Clean exit (exit code 0) means intentional stop — watchdog exits too.
-			cfg.Logger.Printf("%s: worker exited cleanly, shutting down", cfg.AppName)
-			os.Remove(pidFile)
+			cfg.logger.Printf("%s: worker exited cleanly, shutting down", cfg.AppName)
+			os.Remove(cfg.pidFile)
 			os.Exit(0)
 		}
 	}
 }
 
-func handleStop(pidFile string, cfg *Config) bool {
-	pid, err := readPID(pidFile)
+func handleStop(cfg *Config) bool {
+	pid, _, err := readPID(cfg.pidFile)
 	if err != nil {
 		fmt.Printf("%s is not running.\n", cfg.AppName)
 		return false
 	}
 	if !processExists(pid) {
 		fmt.Printf("%s is not running (stale PID %d). Cleaning up.\n", cfg.AppName, pid)
-		os.Remove(pidFile)
+		os.Remove(cfg.pidFile)
 		return false
 	}
 
 	proc, _ := os.FindProcess(pid)
 	fmt.Printf("Sending SIGTERM to %s (PID %d)...\n", cfg.AppName, pid)
 	if err := proc.Signal(syscall.SIGTERM); err != nil {
-		os.Remove(pidFile)
-		cfg.Logger.Fatalf("%s: failed to signal process: %v", cfg.AppName, err)
+		os.Remove(cfg.pidFile)
+		cfg.logger.Fatalf("%s: failed to signal process: %v", cfg.AppName, err)
 	}
 
 	// Wait for the process to actually exit.
@@ -371,35 +410,60 @@ func handleStop(pidFile string, cfg *Config) bool {
 	return true
 }
 
-func handleRestart(pidFile string, cfg *Config) {
+func handleRestart(cfg *Config) {
+	_, mode, _ := readPID(cfg.pidFile)
+    if mode == "" {
+        mode = "start" // fallback
+    }
+
 	// Remember the args the running process was launched with so we can
 	// restart it with the same flags.
 	var passArgs []string
-	if pid, err := readPID(pidFile); err == nil {
+	if pid, _, err := readPID(cfg.pidFile); err == nil {
 		if args, err := getProcessArgs(pid); err == nil {
 			passArgs = args[1:]
 		}
 	}
 
-	if handleStop(pidFile, cfg) {
-		handleStart(pidFile, passArgs, cfg)
+	if handleStop(cfg) {
+		switch mode {
+        case "watch-start":
+            handleWatchStart(passArgs, cfg)
+        default:
+            handleStart(passArgs, cfg)
+        }
 	}
 }
 
-func handleStatus(pidFile string, cfg *Config) {
-	pid, err := readPID(pidFile)
+func handleStatus(cfg *Config) {
+	if wg_logf := getWatchdogLogfileName(cfg); fileExists(wg_logf) {
+		fmt.Printf("Watchdog log: %s\n", wg_logf)
+		tailFile(wg_logf, 10)
+	} else if cfg.LoggerFile != "" {
+		fmt.Printf("Log file: %s\n", cfg.LoggerFile)
+		tailFile(cfg.LoggerFile, 10)
+	}
+
+	pid, mode, err := readPID(cfg.pidFile)
 	if err != nil {
 		fmt.Printf("Status: %s stopped\n", cfg.AppName)
 		return
 	}
+
+	if mode == "watch-start" {
+		mode = "watchdog"
+	} else {
+		mode = "daemon"
+	}
+
 	if processExists(pid) {
-		fmt.Printf("Status: %s running (PID %d)\n", cfg.AppName, pid)
+		fmt.Printf("Status: %s %s running (PID %d)\n", cfg.AppName, mode, pid)
 		/*if args, err := getProcessArgs(pid); err == nil {
 			fmt.Printf("Command: %s\n", strings.Join(args, " "))
 		}*/
 	} else {
 		fmt.Printf("Status: %s stopped\nBut process did not exit gracefully. Cleaning up.\n", cfg.AppName)
-		os.Remove(pidFile)
+		os.Remove(cfg.pidFile)
 	}
 }
 
@@ -408,18 +472,18 @@ func handleStatus(pidFile string, cfg *Config) {
 // workerCmd may be nil (plain daemon) or a pointer to the current worker cmd
 // (watchdog) — the pointer itself is stable but the cmd it points to changes
 // each restart, so the handler always signals the live worker.
-func setupGracefulShutdown(pidFile string, cfg *Config, workerCmd **exec.Cmd) {
+func setupGracefulShutdown(cfg *Config, workerCmd **exec.Cmd) {
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
 		sig := <-ch
-		cfg.Logger.Printf("%s: received %s, shutting down...", cfg.AppName, sig)
+		cfg.logger.Printf("%s: received %s, shutting down...", cfg.AppName, sig)
 		if workerCmd != nil && *workerCmd != nil && (*workerCmd).Process != nil {
-			cfg.Logger.Printf("%s watchdog: forwarding %s to worker (PID %d)",
+			cfg.logger.Printf("%s: forwarding %s to worker (PID %d)",
 				cfg.AppName, sig, (*workerCmd).Process.Pid)
 			(*workerCmd).Process.Signal(sig.(syscall.Signal))
 		}
-		os.Remove(pidFile)
+		os.Remove(cfg.pidFile)
 		os.Exit(0)
 	}()
 }
@@ -434,16 +498,25 @@ func mustExecutable() string {
 	return exe
 }
 
-func writePID(path string, pid int) error {
-	return os.WriteFile(path, []byte(strconv.Itoa(pid)+"\n"), 0644)
+func writePID(path string, pid int, mode string) error {
+    return os.WriteFile(path, []byte(strconv.Itoa(pid)+"\n"+mode+"\n"), 0644)
 }
 
-func readPID(path string) (int, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return 0, err
-	}
-	return strconv.Atoi(strings.TrimSpace(string(data)))
+func readPID(path string) (int, string, error) {
+    data, err := os.ReadFile(path)
+    if err != nil {
+        return 0, "", err
+    }
+    lines := strings.SplitN(strings.TrimSpace(string(data)), "\n", 2)
+    pid, err := strconv.Atoi(strings.TrimSpace(lines[0]))
+    if err != nil {
+        return 0, "", err
+    }
+    mode := "start" // default for old PID files that don't have mode
+    if len(lines) > 1 {
+        mode = strings.TrimSpace(lines[1])
+    }
+    return pid, mode, nil
 }
 
 // processExists checks whether a process with the given PID is alive.
@@ -466,4 +539,62 @@ func getProcessArgs(pid int) ([]string, error) {
 		return nil, fmt.Errorf("process %d has no cmdline", pid)
 	}
 	return strings.Split(trimmed, "\x00"), nil
+}
+
+func tailFile(path string, n int) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("could not open file: %w", err)
+	}
+	defer f.Close()
+
+	// Get file size
+	info, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("could not stat file: %w", err)
+	}
+	fileSize := info.Size()
+
+	// Scan backwards to find n newlines
+	bufSize := int64(4096)
+	linesFound := 0
+	offset := fileSize
+	var startPos int64
+
+	for offset > 0 && linesFound <= n {
+		if offset < bufSize {
+			bufSize = offset
+		}
+		offset -= bufSize
+
+		buf := make([]byte, bufSize)
+		_, err := f.ReadAt(buf, offset)
+		if err != nil {
+			return fmt.Errorf("could not read file: %w", err)
+		}
+
+		for i := len(buf) - 1; i >= 0; i-- {
+			if buf[i] == '\n' {
+				linesFound++
+				if linesFound == n {
+					startPos = offset + int64(i) + 1
+					break
+				}
+			}
+		}
+	}
+
+	// Seek to start position and print
+	_, err = f.Seek(startPos, io.SeekStart)
+	if err != nil {
+		return fmt.Errorf("could not seek file: %w", err)
+	}
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		fmt.Println("  ", scanner.Text())
+	}
+	fmt.Println()
+
+	return scanner.Err()
 }

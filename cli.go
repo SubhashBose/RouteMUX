@@ -581,6 +581,7 @@ if daemon.DAEMONIZE_SUPPORTED {
 Daemon options:
   start                    Start RouteMUX as a background daemon process.
   watch-start              Start RouteMUX as a background daemon process with watchdog,
+                           which monitors the process and restarts it if it fails. It
                            and also creates a logfile to monitor for output and errors.
   stop                     Stop RouteMUX daemon
   restart                  Restart RouteMUX daemon

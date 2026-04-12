@@ -238,7 +238,7 @@ RouteMUX can be started as daemon (background process not attached to terminal) 
 | Command | Description |
 |--------|-------------|
 | start  | Start RouteMUX as a daemon |
-| watch-start | Start RouteMUX as daemon along with watchdog that restart the process on failure. Also creates a logfile to monitor process output and errors |
+| watch-start | Start RouteMUX as daemon along with watchdog that monitors and restart the process on failure. Also creates a logfile to monitor process output and errors |
 | stop   | Stop the daemon |
 | restart | Restart the demon process |
 | status | Show the daemon status |
@@ -252,9 +252,11 @@ RouteMUX can be started as daemon (background process not attached to terminal) 
 
 ### Daemonizing RouteMUX
 
-RouteMUX can be started as daemon by appending `start` command with other CLI arguments. Job control commands `stop`, `status`, or `restart` can be used to control the daemon process. RouMUX daemon job control works by identifying the process that was started from same working directory with same executable path, and under same user. This way, RouteMUX allows to have multiple daemon process with job control from multiple working directories, and multiple users. 
+RouteMUX can be started as daemon by appending `start` or `watch-start` command with other CLI arguments. Job control commands `stop`, `status`, or `restart` can be used to control the daemon process. RouteMUX daemon job control works by identifying the process that was started from same working directory with same executable path, and under same user. This way, RouteMUX allows to have multiple daemon process with job control from multiple working directories, and multiple users.
 
-Currently RouteMUX daemonizing feature is in experimental stage, only support UNIX like (specifically POSIX) systems, and does not support Windows OS.
+`watch-start` is the recommended way to start the RouteMUX daemon, unlike simple `start`, this also starts a watchdog daemon that monitor the RouteMUX process. In event of server process failure, the watchdog will restart the process. Additionally, in this mode a logfile will be attached to the daemon, that can be monitored for output and errors. The logfile can be inspected as `tail -f /path/to/logfile-watchdog.log`.
+
+Currently RouteMUX daemonizing feature only supports UNIX like (specifically POSIX) systems, and does not support Windows OS.
 
 ### Examples
 
