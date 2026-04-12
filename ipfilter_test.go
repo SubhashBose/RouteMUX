@@ -285,8 +285,9 @@ func TestLoadCIDRsFromURL(t *testing.T) {
 
 // ---- URL cache fallback test ----
 
-func TestURLSource_CacheFallback(t *testing.T) {
-	// Write a cache file with known CIDRs
+func TestURLSource_CachePreferredAtStartup(t *testing.T) {
+	// If a cache file exists, loadSource must return it immediately WITHOUT
+	// trying the URL — so startup is never delayed by a failing URL fetch.
 	cf, err := os.CreateTemp("", "routemux-cache-*.txt")
 	if err != nil {
 		t.Fatal(err)
@@ -295,18 +296,75 @@ func TestURLSource_CacheFallback(t *testing.T) {
 	fmt.Fprintln(cf, "10.0.0.0/8")
 	cf.Close()
 
-	// Use a URL that will fail
+	// Point to a URL that would block/fail — should never be tried.
+	// If it were tried, the test would be very slow or hang.
 	src := &filterSource{
 		kind:  sourceURL,
-		url:   "http://127.0.0.1:1", // nothing listening here
+		url:   "http://127.0.0.1:1", // nothing listening — fast fail if called
 		cache: cf.Name(),
+	}
+	start := time.Now()
+	nets, err := loadSource(src)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nets) != 1 {
+		t.Errorf("expected 1 net from cache, got %d", len(nets))
+	}
+	// Should return almost instantly — not waiting for a URL timeout
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("loadSource took %v — should be near-instant when cache exists", elapsed)
+	}
+}
+
+func TestURLSource_NoCacheFileFetchesSynchronously(t *testing.T) {
+	// When no cache file exists, loadSource fetches the URL synchronously.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, "192.168.0.0/16")
+	}))
+	defer srv.Close()
+
+	src := &filterSource{
+		kind:  sourceURL,
+		url:   srv.URL,
+		cache: "", // no cache
 	}
 	nets, err := loadSource(src)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(nets) != 1 {
-		t.Errorf("expected 1 net from cache fallback, got %d", len(nets))
+		t.Errorf("got %d nets, want 1", len(nets))
+	}
+}
+
+func TestURLSource_CacheMissingFetchesSynchronously(t *testing.T) {
+	// Cache path given but file does not exist yet (first run) — must fetch synchronously.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, "10.0.0.0/8")
+	}))
+	defer srv.Close()
+
+	cachePath := os.TempDir() + "/routemux-test-cache-missing.txt"
+	os.Remove(cachePath) // ensure absent
+	defer os.Remove(cachePath)
+
+	src := &filterSource{
+		kind:  sourceURL,
+		url:   srv.URL,
+		cache: cachePath,
+	}
+	nets, err := loadSource(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nets) != 1 {
+		t.Errorf("got %d nets, want 1", len(nets))
+	}
+	// Cache should have been written
+	if _, serr := os.Stat(cachePath); os.IsNotExist(serr) {
+		t.Error("cache file should have been written after first synchronous fetch")
 	}
 }
 
@@ -334,7 +392,7 @@ func TestURLSource_CacheWrite(t *testing.T) {
 		t.Errorf("got %d nets, want 1", len(nets))
 	}
 
-	// Cache file should have been written
+	// Cache file should have been written (first sync fetch when no cache exists)
 	cached, err := loadCIDRsFromFile(cachePath)
 	if err != nil {
 		t.Fatalf("cache file not written: %v", err)
@@ -890,4 +948,3 @@ func TestCIDRList_Contains(t *testing.T) {
 		t.Error("192.168.1.1 should not be in 10.0.0.0/8")
 	}
 }
-

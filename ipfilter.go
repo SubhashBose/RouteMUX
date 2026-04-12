@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"path/filepath"
 	"os"
 	"strings"
 	"sync"
@@ -109,6 +110,36 @@ func (cl *CIDRList) StartRefresh() {
 		}
 		idx := i
 		go func() {
+			// refreshFromSource fetches the latest CIDRs for this source.
+			// For URL sources: always fetches directly from the URL (never uses cache).
+			// For file sources: reads the file (mtime already checked by caller).
+			refreshFromSource := func() ([]net.IPNet, error) {
+				if src.kind == sourceURL {
+					cidrs, err := loadCIDRsFromURL(src.url)
+					if err != nil {
+						return nil, err
+					}
+					if src.cache != "" {
+						if werr := writeCacheFile(src.cache, cidrs); werr != nil {
+							log.Printf("ip: warning: could not update cache %q: %v", src.cache, werr)
+						}
+					}
+					return cidrs, nil
+				}
+				return loadCIDRsFromFile(src.path)
+			}
+
+			// For URL sources that loaded from cache at startup, do one immediate
+			// background fetch so the list is current without blocking startup.
+			// This fires before the first ticker tick (which may be hours away).
+			if src.kind == sourceURL && src.cache != "" {
+				if cidrs, err := refreshFromSource(); err == nil {
+					cl.setDynamic(idx, cidrs)
+					log.Printf("ip: refreshed %q (%d CIDRs)", sourceDesc(src), len(cidrs))
+				} else {
+					log.Printf("ip: background refresh: %q failed (%v), keeping cached list", src.url, err)
+				}
+			}
 			ticker := time.NewTicker(src.refresh)
 			defer ticker.Stop()
 			lastMtime := time.Time{}
@@ -124,7 +155,7 @@ func (cl *CIDRList) StartRefresh() {
 					}
 					lastMtime = info.ModTime()
 				}
-				cidrs, err := loadSource(src)
+				cidrs, err := refreshFromSource()
 				if err != nil {
 					log.Printf("ip: refresh: failed to reload %q: %v (keeping previous list)", sourceDesc(src), err)
 					continue
@@ -251,20 +282,34 @@ func (tp *TrustedProxies) StartRefresh() {
 
 // ---- Shared source loading ----
 
+// loadSource fetches CIDRs for a dynamic source.
+//
+// For URL sources with a cache file:
+//   - If the cache file exists and is readable, it is returned immediately
+//     so startup is never delayed by a network round-trip.
+//   - A background goroutine then fetches the URL and, on success, updates
+//     the cache file for next time.
+//   - If the cache file does not exist yet (first run), the URL is fetched
+//     synchronously so the list is populated before the server starts.
+//
+// For URL sources without a cache file, the URL is always fetched synchronously.
 func loadSource(src *filterSource) ([]net.IPNet, error) {
 	switch src.kind {
 	case sourceFile:
 		return loadCIDRsFromFile(src.path)
 	case sourceURL:
+		// If a cache file exists and is readable, use it immediately.
+		if src.cache != "" {
+			if cached, cerr := loadCIDRsFromFile(src.cache); cerr == nil {
+				log.Printf("ip: startup: loaded %d CIDRs from cache %q (URL refresh pending)", len(cached), src.cache)
+				return cached, nil
+			}
+			// Cache missing or unreadable — fall through to synchronous fetch below.
+			log.Printf("ip: startup: no cache at %q, fetching %s synchronously", src.cache, src.url)
+		}
+		// No cache or cache unavailable — fetch synchronously.
 		cidrs, err := loadCIDRsFromURL(src.url)
 		if err != nil {
-			if src.cache != "" {
-				cached, cerr := loadCIDRsFromFile(src.cache)
-				if cerr == nil {
-					log.Printf("ip: URL fetch failed (%v), using cache %q", err, src.cache)
-					return cached, nil
-				}
-			}
 			return nil, err
 		}
 		if src.cache != "" {
@@ -288,7 +333,7 @@ func loadCIDRsFromFile(path string) ([]net.IPNet, error) {
 
 func loadCIDRsFromURL(rawURL string) ([]net.IPNet, error) {
 	client := http.Client{
-		Timeout: 10 * time.Second,
+		Timeout: 12 * time.Second,
 	}
 	resp, err := client.Get(rawURL) //nolint:noctx
 	if err != nil {
@@ -338,7 +383,10 @@ func parseCIDRLines(r io.Reader, origin string) ([]net.IPNet, error) {
 }
 
 func writeCacheFile(path string, nets []net.IPNet) error {
-	f, err := os.CreateTemp("", "routemux-ip-*")
+	// Create the temp file in the same directory as the cache file so that
+	// os.Rename is always an atomic same-filesystem move (never EXDEV).
+	dir := filepath.Dir(path)
+	f, err := os.CreateTemp(dir, ".routemux-ip-*.tmp")
 	if err != nil {
 		return err
 	}
@@ -350,7 +398,11 @@ func writeCacheFile(path string, nets []net.IPNet) error {
 		os.Remove(tmpPath)
 		return err
 	}
-	return os.Rename(tmpPath, path)
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	return nil
 }
 
 func sourceDesc(src *filterSource) string {

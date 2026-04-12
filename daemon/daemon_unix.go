@@ -426,6 +426,7 @@ func handleRestart(cfg *Config) {
 	}
 
 	if handleStop(cfg) {
+		cfg.WatchdogLoggerFile = getWatchdogLogfileName(cfg)+" " // making file nonexistent, tricking to not delete the file on restart
 		switch mode {
         case "watch-start":
             handleWatchStart(passArgs, cfg)
