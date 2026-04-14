@@ -449,10 +449,8 @@ func (s *server) run() error {
 		log.Printf("RouteMUX stopped.")
 		// Re-raise the signal with default action so the process exits with the
 		// correct exit code: 130 (128+SIGINT) or 143 (128+SIGTERM).
-		signal.Reset(receivedSig.(syscall.Signal))
-		syscall.Kill(os.Getpid(), receivedSig.(syscall.Signal))
-		// Kill is asynchronous — block until the signal lands.
-		select {}
+		// Platform-specific: reraiseSignal() is a no-op on Windows.
+		reraiseSignal(receivedSig)
 	}
 	return err
 }
