@@ -3,15 +3,19 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log"
 	"math/rand"
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"os"
+	"os/signal"
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -419,11 +423,38 @@ func (s *server) run() error {
 		Handler: s.handler(),
 	}
 
+	// Catch SIGTERM and SIGINT to log a shutdown message and drain in-flight
+	// requests before exiting. After draining, we re-raise the original signal
+	// with the default handler restored so the process exits with the correct
+	// signal-derived exit code (e.g. 130 for SIGINT, 143 for SIGTERM).
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
+	var receivedSig os.Signal
+	go func() {
+		receivedSig = <-quit
+		log.Printf("RouteMUX received %s, shutting down...", receivedSig)
+		srv.Shutdown(context.Background()) //nolint:errcheck
+	}()
+
+	var err error
 	if s.cfg.TLSCert != "" {
 		log.Printf("TLS enabled (cert: %s)", s.cfg.TLSCert)
-		return srv.ListenAndServeTLS(s.cfg.TLSCert, s.cfg.TLSKey)
+		err = srv.ListenAndServeTLS(s.cfg.TLSCert, s.cfg.TLSKey)
+	} else {
+		err = srv.ListenAndServe()
 	}
-	return srv.ListenAndServe()
+
+	// ErrServerClosed is the normal return after Shutdown() — not a real error.
+	if errors.Is(err, http.ErrServerClosed) {
+		log.Printf("RouteMUX stopped.")
+		// Re-raise the signal with default action so the process exits with the
+		// correct exit code: 130 (128+SIGINT) or 143 (128+SIGTERM).
+		signal.Reset(receivedSig.(syscall.Signal))
+		syscall.Kill(os.Getpid(), receivedSig.(syscall.Signal))
+		// Kill is asynchronous — block until the signal lands.
+		select {}
+	}
+	return err
 }
 
 // isCatchAll returns true if the domain list contains "*" or is empty,

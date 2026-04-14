@@ -57,6 +57,10 @@ type Config struct {
 	// WatchdogLogger file to used for watchdog messages. Logging defaults to log.Default().
 	// Defaults to same as Logger if it is set, otherwise log file is PID-file basename with "-watchdog.log".
 	WatchdogLoggerFile string
+
+	// Restart (when watch-start) worker on clean exit too. Default is restart on error only
+	// Default value false.
+	RestartOnCleanExit bool
 	
 	// (internal variables) Logger is used for daemon-internal messages. Defaults to log.Default().
 	logger *log.Logger
@@ -98,6 +102,11 @@ func Handle(cfg Config) {
 	}
 	if cfg.WatchdogRestartDelay == 0 {
 		cfg.WatchdogRestartDelay = 2 * time.Second
+	}
+	if cfg.WatchdogRestartDelay > 10*time.Millisecond { // this is to offset the delay in messaging in watchdog restart
+		cfg.WatchdogRestartDelay -= 10 * time.Millisecond
+	} else {
+		cfg.WatchdogRestartDelay = 0
 	}
 	//if cfg.watchdogLogger == nil {
 	//	cfg.watchdogLogger = cfg.logger
@@ -349,14 +358,14 @@ func runWatchdog(cfg *Config) {
 		if err != nil {
 			cfg.logger.Printf("%s: failed to create stdout pipe: %v", cfg.AppName, err)
 		} else {
-			go pipeToLogger(stdoutPipe, cfg.logger, "[stdout]")
+			go pipeToLogger(stdoutPipe, cfg.logger, "Worker [stdout]:")
 		}
 
 		stderrPipe, err := cmd.StderrPipe()
 		if err != nil {
 			cfg.logger.Printf("%s: failed to create stderr pipe: %v", cfg.AppName, err)
 		} else {
-			go pipeToLogger(stderrPipe, cfg.logger, "[stderr]")
+			go pipeToLogger(stderrPipe, cfg.logger, "Worker [stderr]:")
 		}
 
 		if err := cmd.Start(); err != nil {
@@ -370,9 +379,14 @@ func runWatchdog(cfg *Config) {
 		err = cmd.Wait() // blocks until worker exits
 		currentWorker = nil
 
-		if err != nil {
-			cfg.logger.Printf("%s: worker crashed (%v) — restarting in %s",
-				cfg.AppName, err, cfg.WatchdogRestartDelay)
+		if err != nil || cfg.RestartOnCleanExit {
+			time.Sleep(10 * time.Millisecond)
+			status_msg := "exited cleanly"
+			if err != nil {
+				status_msg = fmt.Sprintf("crashed (%v)", err)
+			}
+			cfg.logger.Printf("%s: worker %s — restarting in %s",
+				cfg.AppName, status_msg, cfg.WatchdogRestartDelay)
 			time.Sleep(cfg.WatchdogRestartDelay)
 		} else {
 			// Clean exit (exit code 0) means intentional stop — watchdog exits too.
@@ -483,6 +497,21 @@ func setupGracefulShutdown(cfg *Config, workerCmd **exec.Cmd) {
 			cfg.logger.Printf("%s: forwarding %s to worker (PID %d)",
 				cfg.AppName, sig, (*workerCmd).Process.Pid)
 			(*workerCmd).Process.Signal(sig.(syscall.Signal))
+
+			// Wait for worker to exit, but don't wait forever.
+			workerDone := make(chan struct{}, 1)
+			go func() {
+				(*workerCmd).Wait()
+				close(workerDone)
+			}()
+
+			select {
+			case <-workerDone:
+				cfg.logger.Printf("%s: worker exited cleanly", cfg.AppName)
+			case <-time.After(10 * time.Second):
+				cfg.logger.Printf("%s: worker did not exit in time, forcing kill", cfg.AppName)
+				(*workerCmd).Process.Kill()
+			}
 		}
 		os.Remove(cfg.pidFile)
 		os.Exit(0)

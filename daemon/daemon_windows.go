@@ -8,14 +8,50 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 	//"golang.org/x/sys/windows"
 )
 
+// Config holds optional settings for the daemon.
 type Config struct {
-	OnStart       func()
-	AppName       string
+	// OnStart is called in the daemon process after it has started.
+	// Put your main program logic here.
+	OnStart func()
+
+	// AppName is the name of the application.
+	// Defaults to the basename of the current executable.
+	AppName string
+
+	// PidfilePrefix is the prefix for the PID file.
+	// Defaults to the basename of the current executable.
 	PidfilePrefix string
-	Logger        *log.Logger
+
+	//HashKey to be used for the PID file. Default is current working directory
+	HashKey string
+
+	// WaitAfterStart is how long to wait after forking before confirming the
+	// daemon is still alive. Defaults to 500ms.
+	WaitAfterStart time.Duration
+
+	// WatchdogRestartDelay is how long the watchdog waits before restarting a
+	// crashed worker. Defaults to 2s.
+	WatchdogRestartDelay time.Duration
+
+	// Logger file to used for daemon-internal messages. Logging defaults to log.Default().
+	LoggerFile string
+
+	// WatchdogLogger file to used for watchdog messages. Logging defaults to log.Default().
+	// Defaults to same as Logger if it is set, otherwise log file is PID-file basename with "-watchdog.log".
+	WatchdogLoggerFile string
+
+	// Restart (when watch-start) worker on clean exit too. Default is restart on error only
+	// Default value false.
+	RestartOnCleanExit bool
+	
+	// (internal variables) Logger is used for daemon-internal messages. Defaults to log.Default().
+	logger *log.Logger
+
+	pidFile string
 }
 
 const DAEMONIZE_SUPPORTED = false
