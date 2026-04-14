@@ -444,13 +444,10 @@ func (s *server) run() error {
 		err = srv.ListenAndServe()
 	}
 
-	// ErrServerClosed is the normal return after Shutdown() — not a real error.
+	// ErrServerClosed is the normal return after Shutdown() — not an error.
 	if errors.Is(err, http.ErrServerClosed) {
 		log.Printf("RouteMUX stopped.")
-		// Re-raise the signal with default action so the process exits with the
-		// correct exit code: 130 (128+SIGINT) or 143 (128+SIGTERM).
-		// Platform-specific: reraiseSignal() is a no-op on Windows.
-		reraiseSignal(receivedSig)
+		return nil
 	}
 	return err
 }

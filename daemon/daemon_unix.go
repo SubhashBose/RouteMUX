@@ -47,8 +47,8 @@ type Config struct {
 	// daemon is still alive. Defaults to 500ms.
 	WaitAfterStart time.Duration
 
-	// WatchdogRestartDelay is how long the watchdog waits before restarting a
-	// crashed worker. Defaults to 2s.
+	// WatchdogRestartDelay is how long the watchdog waits before restarting a worker.
+	// Defaults to 2s.
 	WatchdogRestartDelay time.Duration
 
 	// Logger file to used for daemon-internal messages. Logging defaults to log.Default().
@@ -102,11 +102,6 @@ func Handle(cfg Config) {
 	}
 	if cfg.WatchdogRestartDelay == 0 {
 		cfg.WatchdogRestartDelay = 2 * time.Second
-	}
-	if cfg.WatchdogRestartDelay > 10*time.Millisecond { // this is to offset the delay in messaging in watchdog restart
-		cfg.WatchdogRestartDelay -= 10 * time.Millisecond
-	} else {
-		cfg.WatchdogRestartDelay = 0
 	}
 	//if cfg.watchdogLogger == nil {
 	//	cfg.watchdogLogger = cfg.logger
@@ -387,7 +382,7 @@ func runWatchdog(cfg *Config) {
 			}
 			cfg.logger.Printf("%s: worker %s — restarting in %s",
 				cfg.AppName, status_msg, cfg.WatchdogRestartDelay)
-			time.Sleep(cfg.WatchdogRestartDelay)
+			time.Sleep(cfg.WatchdogRestartDelay - 10 * time.Millisecond)
 		} else {
 			// Clean exit (exit code 0) means intentional stop — watchdog exits too.
 			cfg.logger.Printf("%s: worker exited cleanly, shutting down", cfg.AppName)
