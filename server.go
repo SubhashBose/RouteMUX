@@ -436,13 +436,29 @@ func (s *server) run() error {
 		srv.Shutdown(context.Background()) //nolint:errcheck
 	}()
 
-	var err error
-	if s.cfg.TLSCert != "" {
-		log.Printf("TLS enabled (cert: %s)", s.cfg.TLSCert)
-		err = srv.ListenAndServeTLS(s.cfg.TLSCert, s.cfg.TLSKey)
-	} else {
-		err = srv.ListenAndServe()
+	// Bind the TCP listener first so we can log only after the socket is
+	// actually ready to accept connections.
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
 	}
+
+	if s.cfg.TLSCert != "" {
+		// Load the certificate and wrap the listener in TLS before logging,
+		// so the message appears only when TLS is also ready.
+		cert, cerr := tls.LoadX509KeyPair(s.cfg.TLSCert, s.cfg.TLSKey)
+		if cerr != nil {
+			ln.Close()
+			return fmt.Errorf("TLS: %w", cerr)
+		}
+		log.Printf("TLS enabled (cert: %s)", s.cfg.TLSCert)
+		tlsCfg := &tls.Config{Certificates: []tls.Certificate{cert}}
+		ln = tls.NewListener(ln, tlsCfg)
+		log.Printf("RouteMUX listening on %s (TLS)", ln.Addr())
+	} else {
+		log.Printf("RouteMUX listening on %s", ln.Addr())
+	}
+	err = srv.Serve(ln)
 
 	// ErrServerClosed is the normal return after Shutdown() — not an error.
 	if errors.Is(err, http.ErrServerClosed) {

@@ -335,7 +335,12 @@ func loadCIDRsFromURL(rawURL string) ([]net.IPNet, error) {
 	client := http.Client{
 		Timeout: 12 * time.Second,
 	}
-	resp, err := client.Get(rawURL) //nolint:noctx
+	req, err := http.NewRequest("GET", rawURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "RouteMUX")
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
