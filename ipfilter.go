@@ -86,12 +86,15 @@ func (cl *CIDRList) Load() error {
 		if src.kind == sourceCIDR {
 			continue
 		}
-		cidrs, err := loadSource(&cl.sources[i])
+		cidrs, cached, err := loadSource(&cl.sources[i])
 		if err != nil {
 			log.Printf("ip: warning: failed to load %q: %v", sourceDesc(&cl.sources[i]), err)
 			cidrs = nil
 		}
 		cl.setDynamic(i, cidrs)
+		if cached {
+			cl.AsyncRefresh(i, true)
+		}
 	}
 	// Final rebuild picks up inline CIDRs (already in sources).
 	cl.mu.Lock()
@@ -100,70 +103,76 @@ func (cl *CIDRList) Load() error {
 	return nil
 }
 
-// StartRefresh launches background goroutines for sources with a non-zero
-// refresh interval. Safe to call after Load().
-func (cl *CIDRList) StartRefresh() {
-	for i := range cl.sources {
-		src := &cl.sources[i]
-		if src.kind == sourceCIDR || src.refresh == 0 {
-			continue
-		}
-		idx := i
-		go func() {
-			// refreshFromSource fetches the latest CIDRs for this source.
-			// For URL sources: always fetches directly from the URL (never uses cache).
-			// For file sources: reads the file (mtime already checked by caller).
-			refreshFromSource := func() ([]net.IPNet, error) {
-				if src.kind == sourceURL {
-					cidrs, err := loadCIDRsFromURL(src.url)
-					if err != nil {
-						return nil, err
-					}
-					if src.cache != "" {
-						if werr := writeCacheFile(src.cache, cidrs); werr != nil {
-							log.Printf("ip: warning: could not update cache %q: %v", src.cache, werr)
-						}
-					}
-					return cidrs, nil
+func (cl *CIDRList) AsyncRefresh(idx int, onetime bool) {
+	src := &cl.sources[idx]
+	if src.kind == sourceCIDR || src.refresh == 0 {
+		return
+	}
+	go func() {
+		// refreshFromSource fetches the latest CIDRs for this source.
+		// For URL sources: always fetches directly from the URL (never uses cache).
+		// For file sources: reads the file (mtime already checked by caller).
+		refreshFromSource := func() ([]net.IPNet, error) {
+			if src.kind == sourceURL {
+				cidrs, err := loadCIDRsFromURL(src.url)
+				if err != nil {
+					return nil, err
 				}
-				return loadCIDRsFromFile(src.path)
+				if src.cache != "" {
+					if werr := writeCacheFile(src.cache, cidrs); werr != nil {
+						log.Printf("ip: warning: could not update cache %q: %v", src.cache, werr)
+					}
+				}
+				return cidrs, nil
 			}
+			return loadCIDRsFromFile(src.path)
+		}
 
-			// For URL sources that loaded from cache at startup, do one immediate
-			// background fetch so the list is current without blocking startup.
-			// This fires before the first ticker tick (which may be hours away).
+		// For URL sources that loaded from cache at startup, do one immediate
+		// background fetch so the list is current without blocking startup.
+		// This fires before the first ticker tick (which may be hours away).
+		if onetime {
 			if src.kind == sourceURL && src.cache != "" {
 				if cidrs, err := refreshFromSource(); err == nil {
 					cl.setDynamic(idx, cidrs)
 					log.Printf("ip: refreshed %q (%d CIDRs)", sourceDesc(src), len(cidrs))
 				} else {
-					log.Printf("ip: background refresh: %q failed (%v), keeping cached list", src.url, err)
+					log.Printf("ip: background refresh: %q failed (%v), keeping cached list", sourceDesc(src), err)
 				}
 			}
-			ticker := time.NewTicker(src.refresh)
-			defer ticker.Stop()
-			lastMtime := time.Time{}
-			for range ticker.C {
-				if src.kind == sourceFile {
-					info, err := os.Stat(src.path)
-					if err != nil {
-						log.Printf("ip: refresh: cannot stat %q: %v", src.path, err)
-						continue
-					}
-					if !info.ModTime().After(lastMtime) {
-						continue
-					}
-					lastMtime = info.ModTime()
-				}
-				cidrs, err := refreshFromSource()
+			return
+		}
+		ticker := time.NewTicker(src.refresh)
+		defer ticker.Stop()
+		lastMtime := time.Time{}
+		for range ticker.C {
+			if src.kind == sourceFile {
+				info, err := os.Stat(src.path)
 				if err != nil {
-					log.Printf("ip: refresh: failed to reload %q: %v (keeping previous list)", sourceDesc(src), err)
+					log.Printf("ip: refresh: cannot stat %q: %v", src.path, err)
 					continue
 				}
-				cl.setDynamic(idx, cidrs)
-				log.Printf("ip: refreshed %q (%d CIDRs)", sourceDesc(src), len(cidrs))
+				if !info.ModTime().After(lastMtime) {
+					continue
+				}
+				lastMtime = info.ModTime()
 			}
-		}()
+			cidrs, err := refreshFromSource()
+			if err != nil {
+				log.Printf("ip: refresh: failed to reload %q: %v (keeping previous list)", sourceDesc(src), err)
+				continue
+			}
+			cl.setDynamic(idx, cidrs)
+			log.Printf("ip: refreshed %q (%d CIDRs)", sourceDesc(src), len(cidrs))
+		}
+	}()
+}
+
+// StartRefresh launches background goroutines for sources with a non-zero
+// refresh interval. Safe to call after Load().
+func (cl *CIDRList) StartRefresh() {
+	for i := range cl.sources {
+		cl.AsyncRefresh(i, false)
 	}
 }
 
@@ -293,16 +302,17 @@ func (tp *TrustedProxies) StartRefresh() {
 //     synchronously so the list is populated before the server starts.
 //
 // For URL sources without a cache file, the URL is always fetched synchronously.
-func loadSource(src *filterSource) ([]net.IPNet, error) {
+func loadSource(src *filterSource) ([]net.IPNet, bool, error) {
 	switch src.kind {
 	case sourceFile:
-		return loadCIDRsFromFile(src.path)
+		cidrs, err := loadCIDRsFromFile(src.path)
+		return cidrs, false, err
 	case sourceURL:
 		// If a cache file exists and is readable, use it immediately.
 		if src.cache != "" {
 			if cached, cerr := loadCIDRsFromFile(src.cache); cerr == nil {
-				log.Printf("ip: startup: loaded %d CIDRs from cache %q (URL refresh pending)", len(cached), src.cache)
-				return cached, nil
+				log.Printf("ip: startup: loaded %d CIDRs from cache %q (URL refresh in progress)", len(cached), src.cache)
+				return cached, true, nil
 			}
 			// Cache missing or unreadable — fall through to synchronous fetch below.
 			log.Printf("ip: startup: no cache at %q, fetching %s synchronously", src.cache, src.url)
@@ -310,16 +320,17 @@ func loadSource(src *filterSource) ([]net.IPNet, error) {
 		// No cache or cache unavailable — fetch synchronously.
 		cidrs, err := loadCIDRsFromURL(src.url)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
+		log.Printf("ip: startup: fetched %d CIDRs", len(cidrs))
 		if src.cache != "" {
 			if werr := writeCacheFile(src.cache, cidrs); werr != nil {
 				log.Printf("ip: warning: could not write cache %q: %v", src.cache, werr)
 			}
 		}
-		return cidrs, nil
+		return cidrs, false, nil
 	}
-	return nil, fmt.Errorf("unexpected source kind %d", src.kind)
+	return nil, false, fmt.Errorf("unexpected source kind %d", src.kind)
 }
 
 func loadCIDRsFromFile(path string) ([]net.IPNet, error) {
