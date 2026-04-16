@@ -103,6 +103,8 @@ func (cl *CIDRList) Load() error {
 	return nil
 }
 
+// AsyncRefresh starts a background goroutine to periodic or 
+// onetime refresh the CIDRs for one source.
 func (cl *CIDRList) AsyncRefresh(idx int, onetime bool) {
 	src := &cl.sources[idx]
 	if src.kind == sourceCIDR || src.refresh == 0 {
@@ -168,7 +170,7 @@ func (cl *CIDRList) AsyncRefresh(idx int, onetime bool) {
 	}()
 }
 
-// StartRefresh launches background goroutines for sources with a non-zero
+// StartRefresh launches background goroutines for all sources with a non-zero
 // refresh interval. Safe to call after Load().
 func (cl *CIDRList) StartRefresh() {
 	for i := range cl.sources {

@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"sync/atomic"
 	"time"
 )
 
@@ -304,7 +305,7 @@ func TestURLSource_CachePreferredAtStartup(t *testing.T) {
 		cache: cf.Name(),
 	}
 	start := time.Now()
-	nets, err := loadSource(src)
+	nets, _, err := loadSource(src)
 	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatal(err)
@@ -330,7 +331,7 @@ func TestURLSource_NoCacheFileFetchesSynchronously(t *testing.T) {
 		url:   srv.URL,
 		cache: "", // no cache
 	}
-	nets, err := loadSource(src)
+	nets, _, err := loadSource(src)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -355,7 +356,7 @@ func TestURLSource_CacheMissingFetchesSynchronously(t *testing.T) {
 		url:   srv.URL,
 		cache: cachePath,
 	}
-	nets, err := loadSource(src)
+	nets, _, err := loadSource(src)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -384,7 +385,7 @@ func TestURLSource_CacheWrite(t *testing.T) {
 		url:   srv.URL,
 		cache: cachePath,
 	}
-	nets, err := loadSource(src)
+	nets, _, err := loadSource(src)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -424,7 +425,7 @@ func TestFileSource_MtimeRefresh(t *testing.T) {
 	filter := &IPFilter{blocked: cl}
 
 	// Initial load
-	cidrs, _ := loadSource(&cl.sources[0])
+	cidrs, _, _ := loadSource(&cl.sources[0])
 	cl.setDynamic(0, cidrs)
 
 	if filter.Allow("10.1.2.3:80") {
@@ -438,7 +439,7 @@ func TestFileSource_MtimeRefresh(t *testing.T) {
 	f2.Close()
 
 	// Manually trigger a reload (simulating the ticker)
-	cidrs2, _ := loadSource(&cl.sources[0])
+	cidrs2, _, _ := loadSource(&cl.sources[0])
 	cl.setDynamic(0, cidrs2)
 
 	if !filter.Allow("10.1.2.3:80") {
@@ -946,5 +947,158 @@ func TestCIDRList_Contains(t *testing.T) {
 	}
 	if cl.Contains(net.ParseIP("192.168.1.1")) {
 		t.Error("192.168.1.1 should not be in 10.0.0.0/8")
+	}
+}
+
+func TestLoadSource_ReturnsCachedTrue_WhenCacheExists(t *testing.T) {
+	// loadSource must return cached=true when it loaded from the cache file,
+	// so Load() knows to trigger an async background refresh (not a second sync fetch).
+	cf, err := os.CreateTemp("", "routemux-cache-*.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(cf.Name())
+	fmt.Fprintln(cf, "10.0.0.0/8")
+	cf.Close()
+
+	src := &filterSource{
+		kind:  sourceURL,
+		url:   "http://127.0.0.1:1", // would fail if called
+		cache: cf.Name(),
+	}
+	_, cached, err := loadSource(src)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cached {
+		t.Error("cached should be true when cache file was used")
+	}
+}
+
+func TestLoadSource_ReturnsCachedFalse_WhenFetchedSynchronously(t *testing.T) {
+	// loadSource must return cached=false after a synchronous URL fetch,
+	// so Load() does NOT trigger a redundant async re-fetch.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, "192.168.0.0/16")
+	}))
+	defer srv.Close()
+
+	cachePath := os.TempDir() + "/routemux-test-cached-false.txt"
+	os.Remove(cachePath)
+	defer os.Remove(cachePath)
+
+	src := &filterSource{
+		kind:  sourceURL,
+		url:   srv.URL,
+		cache: cachePath,
+	}
+	nets, cached, err := loadSource(src)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(nets) != 1 {
+		t.Errorf("got %d nets, want 1", len(nets))
+	}
+	if cached {
+		t.Error("cached should be false after synchronous URL fetch (no pre-existing cache)")
+	}
+}
+
+func TestLoadSource_ReturnsCachedFalse_NoCachePath(t *testing.T) {
+	// No cache path — always fetches synchronously, cached must be false.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, "10.0.0.0/8")
+	}))
+	defer srv.Close()
+
+	src := &filterSource{kind: sourceURL, url: srv.URL}
+	_, cached, err := loadSource(src)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cached {
+		t.Error("cached should be false when no cache path is configured")
+	}
+}
+
+func TestNoDoubleFetch_WhenCacheMissing(t *testing.T) {
+	// When the cache file does not exist, Load() must fetch the URL exactly once
+	// (synchronously) and must NOT trigger a second async fetch.
+	var fetchCount atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fetchCount.Add(1)
+		fmt.Fprintln(w, "10.0.0.0/8")
+	}))
+	defer srv.Close()
+
+	cachePath := os.TempDir() + "/routemux-test-no-double-fetch.txt"
+	os.Remove(cachePath)
+	defer os.Remove(cachePath)
+
+	cl := &CIDRList{}
+	cl.sources = append(cl.sources, filterSource{
+		kind:    sourceURL,
+		url:     srv.URL,
+		cache:   cachePath,
+		refresh: 10 * time.Second,
+	})
+	if err := cl.Load(); err != nil {
+		t.Fatal(err)
+	}
+	cl.StartRefresh()
+
+	// Give any spurious async fetch time to fire
+	time.Sleep(100 * time.Millisecond)
+
+	if n := fetchCount.Load(); n != 1 {
+		t.Errorf("URL fetched %d times, want exactly 1 (no double-fetch)", n)
+	}
+}
+
+func TestOneFetch_ThenAsync_WhenCacheExists(t *testing.T) {
+	// When cache exists: Load() reads cache (no URL fetch), StartRefresh() fires
+	// exactly one async background fetch, and then periodic ticks follow.
+	var fetchCount atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fetchCount.Add(1)
+		fmt.Fprintln(w, "10.0.0.0/8")
+	}))
+	defer srv.Close()
+
+	cf, err := os.CreateTemp("", "routemux-cache-exists-*.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(cf.Name())
+	fmt.Fprintln(cf, "192.168.0.0/16")
+	cf.Close()
+
+	cl := &CIDRList{}
+	cl.sources = append(cl.sources, filterSource{
+		kind:    sourceURL,
+		url:     srv.URL,
+		cache:   cf.Name(),
+		refresh: 10 * time.Second,
+	})
+	if err := cl.Load(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Immediately after Load: cache was used, no URL fetch yet
+	if n := fetchCount.Load(); n != 0 {
+		t.Errorf("URL should not be fetched during Load() when cache exists, got %d fetches", n)
+	}
+
+	cl.StartRefresh()
+
+	// After StartRefresh, one background fetch should fire promptly
+	for i := 0; i < 20; i++ {
+		time.Sleep(50 * time.Millisecond)
+		if fetchCount.Load() >= 1 {
+			break
+		}
+	}
+	if n := fetchCount.Load(); n != 1 {
+		t.Errorf("expected exactly 1 background fetch after StartRefresh, got %d", n)
 	}
 }

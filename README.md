@@ -2,6 +2,10 @@
 
 A lightweight, flexible, and easy configurable reverse proxy written in Go. Routes HTTP and WebSocket traffic to upstream destinations with virtual hosts and per-route configuration for authentication, header manipulation, TLS, timeouts, and weighted load-balancing to multiple upstreams. It is a high performance and multithreaded (thanks to Go) cross-platform server with small memory footprint.
 
+RouteMUX is designed to handle heavy concurrent connections efficiently, while minimizing race conditions, memory usage, and latency.
+It offers several advanced features (e.g., header manipulation, ip filter, trusted proxy) that may introduce additional overhead—ranging from tens of nanoseconds to a few milliseconds in latency, and a few tens of bytes of memory per connection. However, the core design philosophy ensures that these features are only activated when explicitly enabled for a given route.
+As a result, RouteMUX avoids unnecessary processing paths. For example, when running `routemux --route / --dest http://localhost:8080`, the connection throughput is most optimized and as efficient as possible.
+
 ## Features
 
 - **[Path-based routing](#routing)** — forward different URL paths to different upstream services
@@ -615,7 +619,7 @@ Files and URLs contain one IP or CIDR per line. Lines starting with `#` and blan
 
 The `refresh=` interval uses Go duration syntax: `30m`, `6h`, `24h`, etc. For file sources, RouteMUX polls the file's modification time — it only re-reads when the file has actually changed. For URL sources, RouteMUX re-fetches on the interval regardless. Timeout for URL fetch is 10s.
 
-The `cache=` option (URL sources only) persists the fetched list to a local file. On startup, if the URL fetch fails (e.g. no network), RouteMUX falls back to the cache file. On every successful fetch, the cache file is updated atomically.
+The `cache=` option (URL sources only) persists the fetched list to a local file. On startup, if cache exists, RouteMUX uses the cache without waiting for URL fetch, and URL is refreshed in background while server is ready. This prevents delay in startup if URL is slow or unavailable (e.g. no network). If no cache available on startup, then RouteMUX waits for the URL to be fetched before it starts listening. On every successful fetch, the cache file is updated atomically.
 
 ### YAML configuration
 
