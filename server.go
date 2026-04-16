@@ -91,6 +91,12 @@ func (s *server) buildVHosts() error {
 		}
 		s.vhosts = append(s.vhosts, vhostEntry{domains: domains, mux: mux})
 	}
+	// Sort vhosts: specific-domain entries before catch-alls ("*" or empty).
+	// This ensures a request for domain.com always matches ["domain.com"]
+	// before ["*"], regardless of the order they appear in the config.
+	sort.SliceStable(s.vhosts, func(i, j int) bool {
+		return !isCatchAll(s.vhosts[i].domains) && isCatchAll(s.vhosts[j].domains)
+	})
 	s.singleMux = len(s.vhosts) == 1 && isCatchAll(s.vhosts[0].domains)
 	return nil
 }

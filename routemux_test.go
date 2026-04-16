@@ -3365,3 +3365,175 @@ func TestWebSocket_Auth(t *testing.T) {
 		t.Errorf("with auth: status = %d, want 101", resp2.StatusCode)
 	}
 }
+// ---- vhost ordering: specific domains must win over catch-all ----
+
+func TestVHost_SpecificBeforeCatchAll_CatchAllFirst(t *testing.T) {
+	// catch-all vhost is declared FIRST in config — specific should still win
+	var hitSpecific, hitCatchAll bool
+	specific := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hitSpecific = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer specific.Close()
+	catchall := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hitCatchAll = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer catchall.Close()
+
+	cfg := &Config{
+		Port: 8080,
+		// ["*"] declared BEFORE ["domain.com"] — the bug order
+		VHosts: []VHost{
+			{Domains: []string{"*"}, Routes: map[string]*RouteConfig{
+				"/": {Upstreams: []Upstream{mustUpstream(catchall.URL+"/", 1)}},
+			}},
+			{Domains: []string{"domain.com"}, Routes: map[string]*RouteConfig{
+				"/": {Upstreams: []Upstream{mustUpstream(specific.URL+"/", 1)}},
+			}},
+		},
+	}
+	srv, err := newServer(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/", nil)
+	req.Host = "domain.com"
+	http.DefaultClient.Do(req)
+
+	if !hitSpecific {
+		t.Error("request for domain.com should hit specific vhost, not catch-all")
+	}
+	if hitCatchAll {
+		t.Error("catch-all should not be hit when specific vhost matches")
+	}
+}
+
+func TestVHost_SpecificBeforeCatchAll_SpecificFirst(t *testing.T) {
+	// specific vhost is declared FIRST — should also work (regression guard)
+	var hitSpecific, hitCatchAll bool
+	specific := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hitSpecific = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer specific.Close()
+	catchall := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hitCatchAll = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer catchall.Close()
+
+	cfg := &Config{
+		Port: 8080,
+		VHosts: []VHost{
+			{Domains: []string{"domain.com"}, Routes: map[string]*RouteConfig{
+				"/": {Upstreams: []Upstream{mustUpstream(specific.URL+"/", 1)}},
+			}},
+			{Domains: []string{"*"}, Routes: map[string]*RouteConfig{
+				"/": {Upstreams: []Upstream{mustUpstream(catchall.URL+"/", 1)}},
+			}},
+		},
+	}
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/", nil)
+	req.Host = "domain.com"
+	http.DefaultClient.Do(req)
+
+	if !hitSpecific {
+		t.Error("specific vhost should be matched")
+	}
+	if hitCatchAll {
+		t.Error("catch-all should not be hit")
+	}
+}
+
+func TestVHost_CatchAllStillHandlesUnknownDomain(t *testing.T) {
+	// After sorting, unknown domains should still fall through to catch-all
+	var hitCatchAll bool
+	catchall := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hitCatchAll = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer catchall.Close()
+	specific := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer specific.Close()
+
+	cfg := &Config{
+		Port: 8080,
+		VHosts: []VHost{
+			{Domains: []string{"*"}, Routes: map[string]*RouteConfig{
+				"/": {Upstreams: []Upstream{mustUpstream(catchall.URL+"/", 1)}},
+			}},
+			{Domains: []string{"domain.com"}, Routes: map[string]*RouteConfig{
+				"/": {Upstreams: []Upstream{mustUpstream(specific.URL+"/", 1)}},
+			}},
+		},
+	}
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	// unknown.com should hit the catch-all
+	req, _ := http.NewRequest("GET", ts.URL+"/", nil)
+	req.Host = "unknown.com"
+	http.DefaultClient.Do(req)
+
+	if !hitCatchAll {
+		t.Error("unknown domain should be handled by catch-all vhost")
+	}
+}
+
+func TestVHost_YAML_SpecificBeforeCatchAll(t *testing.T) {
+	// Verify via YAML config that ordering is corrected
+	specific := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Vhost", "specific")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer specific.Close()
+	catchall := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Vhost", "catchall")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer catchall.Close()
+
+	f, _ := os.CreateTemp("", "routemux-*.yml")
+	f.WriteString(`
+global:
+  port: 8080
+vhosts:
+  - domains: ["*"]
+    routes:
+      /:
+        dest: ` + catchall.URL + `/
+  - domains: ["myapp.example.com"]
+    routes:
+      /:
+        dest: ` + specific.URL + `/
+`)
+	f.Close()
+	defer os.Remove(f.Name())
+
+	cfg, err := loadConfigFile(f.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/", nil)
+	req.Host = "myapp.example.com"
+	resp, _ := http.DefaultClient.Do(req)
+
+	if resp.Header.Get("X-Vhost") != "specific" {
+		t.Errorf("X-Vhost = %q, want specific (catch-all declared first in YAML should not win)", resp.Header.Get("X-Vhost"))
+	}
+}
