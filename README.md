@@ -2,10 +2,6 @@
 
 A lightweight, flexible, and easy configurable reverse proxy written in Go. Routes HTTP and WebSocket traffic to upstream destinations with virtual hosts and per-route configuration for authentication, header manipulation, TLS, timeouts, and weighted load-balancing to multiple upstreams. It is a high performance and multithreaded (thanks to Go) cross-platform server with small memory footprint.
 
-RouteMUX is designed to handle heavy concurrent connections efficiently, while minimizing race conditions, memory usage, and latency.
-It offers several advanced features (e.g., header manipulation, ip filter, trusted proxy) that may introduce additional overhead—ranging from tens of nanoseconds to a few milliseconds in latency, and a few tens of bytes of memory per connection. However, the core design philosophy ensures that these features are only activated when explicitly enabled for a given route.
-As a result, RouteMUX avoids unnecessary processing paths. For example, when running `routemux --route / --dest http://localhost:8080`, the connection throughput is most optimized and as efficient as possible.
-
 ## Features
 
 - **[Path-based routing](#routing)** — forward different URL paths to different upstream services
@@ -22,6 +18,22 @@ As a result, RouteMUX avoids unnecessary processing paths. For example, when run
 - **[Environment variable support](#environment-variable-support)** - environment variable substitution is globally supported in `config.yml` file using `${env.VARIABLE}`.
 - **[Inbuilt support to run as daemon](#daemonizing-routemux)** - can run as daemon process, detached from terminal
 - **Zero external dependencies** - standalone binary (~7 MB size) available in 15 OS and architecture combinations.
+
+## Design philosophy
+
+RouteMUX is designed to handle heavy concurrent connections efficiently, while minimizing race conditions, memory usage, and latency.
+It offers several complex features (e.g., header manipulation, ip filter, trusted proxy) that inevitably introduce some additional overhead — ranging from tens of nanoseconds to a few milliseconds in latency, and a few tens of bytes of memory per connection. However, the core design philosophy ensures that a particular channel of process is not activated unless the related feature is enabled for the given route. For example, if there are multiple routes declared, and a particular route needs header values for `add-header` manipulation, then only connections for that route will keep a copy of header variables that can be reused for header manipulation, while connections for all other routes take the shortest path with minimum overhead. 
+
+Therefore, RouteMUX pre-determines on startup for each route what process is necessary. As a result, having a feature available in RouteMUX will have no (negligible) overhead per connection if that route does not use the feature. For a most basic configuration like `routemux --route / --dest http://localhost:8080`, the connection throughput is most optimized and is as efficient as possible.
+
+Some examples are:
+- Headers manipulations syntax is parsed and stored in simple structure at the startup only
+- Copy of header is only made if Header variables and header values are in use
+- `trusted_xff` variable is evaluated using trusted proxy ip list only if it is being used
+- Load balancing channel is activated only if multiple `dest` is declared for a route
+- Environment variables are replaced only at the startup while parsing the config file.
+
+Another design philosophy is to maintain 100% interoperability of configurations through CLI as well as config file. No matter how complex a config file looks like, it can be fully implemented through CLI, and vice-versa. However, this is not guarantee for all features to be added in future, although full effort will be made to maintain it like this. 
 
 ---
 
