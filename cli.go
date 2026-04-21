@@ -51,6 +51,10 @@ func parseAll(args []string) (*Config, error) {
 		}
 	}
 
+	// Store metadata for hot reload
+	base.ConfigPath = configPath
+	base.OriginalArgs = args
+
 	// --- 3. Apply CLI overrides ---
 	if err := applyCLI(base, args); err != nil {
 		return nil, err
@@ -582,9 +586,13 @@ Daemon options:
   start                    Start RouteMUX as a background daemon process.
   watch-start              Start RouteMUX as a background daemon process with watchdog,
                            which monitors the process and restarts it if it fails. It
-                           and also creates a logfile to monitor for output and errors.
+                           and also creates a log-file to monitor for output and errors.
+                           'watch-start' is recommended over 'start' to run as daemon.
   stop                     Stop RouteMUX daemon
   restart                  Restart RouteMUX daemon
+  reload                   Sends signal to RouteMUX daemon process to gracefully reload
+                           configuration from file. Note, by default RouteMUX always watches
+                           config file for changes and gracefully reloads automatically. 
   status                   Show RouteMUX daemon status
 `)
 }

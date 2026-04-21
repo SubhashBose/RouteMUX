@@ -151,6 +151,8 @@ func Handle(cfg Config) {
 		_ = handleStop(&cfg)
 	case "restart":
 		handleRestart(&cfg)
+	case "reload":
+		handleReload(&cfg)
 	case "status":
 		handleStatus(&cfg)
 	default:
@@ -166,7 +168,7 @@ func Handle(cfg Config) {
 func parseArgs(args []string) (command string, rest []string) {
 	for i := len(args) - 1; i >= 0; i-- {
 		switch args[i] {
-		case "start", "watch-start", "stop", "restart", "status":
+		case "start", "watch-start", "stop", "restart", "reload", "status":
 			rest = make([]string, 0, len(args)-1)
 			rest = append(rest, args[:i]...)
 			rest = append(rest, args[i+1:]...)
@@ -328,6 +330,7 @@ func runWatchdog(cfg *Config) {
 	// reach the live worker process.
 	var currentWorker *exec.Cmd
 	setupGracefulShutdown(cfg, &currentWorker)
+	forwardSignal(cfg, &currentWorker)
 
 	attempt := 0
 	for {
@@ -445,6 +448,24 @@ func handleRestart(cfg *Config) {
 	}
 }
 
+func handleReload(cfg *Config) {
+	pid, _, err := readPID(cfg.pidFile)
+	if err != nil {
+		fmt.Printf("%s is not running.\n", cfg.AppName)
+		return  // ← missing
+	}
+	if !processExists(pid) {
+		fmt.Printf("%s is not running (stale PID %d). Cleaning up.\n", cfg.AppName, pid)
+		os.Remove(cfg.pidFile)
+		return  // ← missing
+	}
+	proc, _ := os.FindProcess(pid)
+	fmt.Printf("Sending SIGHUP to %s (PID %d)...\n", cfg.AppName, pid)
+	if err := proc.Signal(syscall.SIGHUP); err != nil {
+		cfg.logger.Fatalf("%s: failed to signal process: %v", cfg.AppName, err)
+	}
+}
+
 func handleStatus(cfg *Config) {
 	if wg_logf := getWatchdogLogfileName(cfg); fileExists(wg_logf) {
 		fmt.Printf("Watchdog log: %s\n", wg_logf)
@@ -510,6 +531,23 @@ func setupGracefulShutdown(cfg *Config, workerCmd **exec.Cmd) {
 		}
 		os.Remove(cfg.pidFile)
 		os.Exit(0)
+	}()
+}
+
+func forwardSignal(cfg *Config, workerCmd **exec.Cmd) {
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGHUP)
+	go func() {
+		for {
+			sig := <-ch  // block until signal arrives
+			if workerCmd != nil && *workerCmd != nil && (*workerCmd).Process != nil {
+				cfg.logger.Printf("%s: received %s, forwarding to worker (PID %d)",
+					cfg.AppName, sig, (*workerCmd).Process.Pid)
+				(*workerCmd).Process.Signal(sig.(syscall.Signal))
+			} else {
+				cfg.logger.Printf("%s: received %s but no worker is running", cfg.AppName, sig)
+			}
+		}
 	}()
 }
 

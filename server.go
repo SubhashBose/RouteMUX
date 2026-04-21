@@ -11,11 +11,10 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"os"
-	"os/signal"
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
+	"sync/atomic"
 	"time"
 )
 
@@ -25,9 +24,21 @@ type ctxKeyRequestHost struct{}
 type ctxKeyXFFCopy struct{}
 
 type server struct {
-	cfg      *Config
-	bindIP   string // resolved from cfg.Listen
-	vhosts   []vhostEntry
+	state    atomic.Pointer[serverState]
+	bindIP   string // resolved from cfg.Listen (does not change on reload)
+
+	// Hot reload coordination.
+	// reloadMu ensures only one Reload() runs at a time — concurrent triggers
+	// (simultaneous SIGHUP + file change) are dropped rather than queued.
+	// timerMu protects reloadTimer for the debounce logic.
+	reloadMu    sync.Mutex
+	timerMu     sync.Mutex
+	reloadTimer *time.Timer
+}
+
+type serverState struct {
+	cfg       *Config
+	vhosts    []vhostEntry
 	singleMux bool // true when only one vhost AND it is a catch-all (*) — skip host matching
 }
 
@@ -53,10 +64,18 @@ func newServer(cfg *Config) (*server, error) {
 		return nil, err
 	}
 
-	s := &server{cfg: cfg, bindIP: bindIP}
-	if err := s.buildVHosts(); err != nil {
+	s := &server{bindIP: bindIP}
+	vhosts, singleMux, err := s.compileVHosts(cfg)
+	if err != nil {
 		return nil, err
 	}
+
+	s.state.Store(&serverState{
+		cfg:       cfg,
+		vhosts:    vhosts,
+		singleMux: singleMux,
+	})
+
 	if cfg.IPFilter != nil {
 		if err := cfg.IPFilter.Load(); err != nil {
 			return nil, fmt.Errorf("ip-filter: %w", err)
@@ -73,36 +92,36 @@ func newServer(cfg *Config) (*server, error) {
 }
 
 func (s *server) listenAddr() string {
-	return fmt.Sprintf("%s:%d", s.bindIP, s.cfg.Port)
+	return fmt.Sprintf("%s:%d", s.bindIP, s.state.Load().cfg.Port)
 }
 
-// buildVHosts compiles all vhosts into vhostEntry values, each with its own ServeMux.
-func (s *server) buildVHosts() error {
-	s.vhosts = nil
-	for _, vh := range s.cfg.VHosts {
+// compileVHosts compiles all vhosts into vhostEntry values, each with its own ServeMux.
+func (s *server) compileVHosts(cfg *Config) ([]vhostEntry, bool, error) {
+	var vhosts []vhostEntry
+	for _, vh := range cfg.VHosts {
 		domains := make([]string, len(vh.Domains))
 		for i, d := range vh.Domains {
 			domains[i] = strings.ToLower(d)
 		}
 		log.Printf("vhost [%s]:", strings.Join(domains, ", "))
-		mux, err := s.buildMux(vh.Routes)
+		mux, err := s.buildMux(vh.Routes, cfg)
 		if err != nil {
-			return err
+			return nil, false, err
 		}
-		s.vhosts = append(s.vhosts, vhostEntry{domains: domains, mux: mux})
+		vhosts = append(vhosts, vhostEntry{domains: domains, mux: mux})
 	}
 	// Sort vhosts: specific-domain entries before catch-alls ("*" or empty).
 	// This ensures a request for domain.com always matches ["domain.com"]
 	// before ["*"], regardless of the order they appear in the config.
-	sort.SliceStable(s.vhosts, func(i, j int) bool {
-		return !isCatchAll(s.vhosts[i].domains) && isCatchAll(s.vhosts[j].domains)
+	sort.SliceStable(vhosts, func(i, j int) bool {
+		return !isCatchAll(vhosts[i].domains) && isCatchAll(vhosts[j].domains)
 	})
-	s.singleMux = len(s.vhosts) == 1 && isCatchAll(s.vhosts[0].domains)
-	return nil
+	singleMux := len(vhosts) == 1 && isCatchAll(vhosts[0].domains)
+	return vhosts, singleMux, nil
 }
 
 // buildMux builds a ServeMux for a single vhost's route map.
-func (s *server) buildMux(routes map[string]*RouteConfig) (*http.ServeMux, error) {
+func (s *server) buildMux(routes map[string]*RouteConfig, cfg *Config) (*http.ServeMux, error) {
 	mux := http.NewServeMux()
 
 	// Sort routes longest-first so more specific paths win.
@@ -121,7 +140,7 @@ func (s *server) buildMux(routes map[string]*RouteConfig) (*http.ServeMux, error
 			picker = newUpstreamPicker(rc.Upstreams, rc.LBMode)
 		}
 
-		handler, err := s.buildRouteHandler(path, picker, rc)
+		handler, err := s.buildRouteHandler(path, picker, rc, cfg)
 		if err != nil {
 			return nil, err
 		}
@@ -145,7 +164,7 @@ func (s *server) buildMux(routes map[string]*RouteConfig) (*http.ServeMux, error
 }
 
 // buildRouteHandler creates the http.Handler for one route.
-func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc *RouteConfig) (http.Handler, error) {
+func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc *RouteConfig, cfg *Config) (http.Handler, error) {
 	// -- Static STATUS response route --
 	if rc.StatusCode != 0 {
 		var h http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -156,7 +175,7 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 				fmt.Fprint(w, rc.StatusText)
 			}
 		})
-		effectiveAuth := s.cfg.GlobalAuth
+		effectiveAuth := cfg.GlobalAuth
 		if rc.AuthExplicit {
 			effectiveAuth = rc.Auth
 		}
@@ -186,7 +205,7 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 	}
 
 	// -- Effective auth for this route (used in Director closure and WS handler) --
-	effectiveAuth := s.cfg.GlobalAuth
+	effectiveAuth := cfg.GlobalAuth
 	if rc.AuthExplicit {
 		effectiveAuth = rc.Auth // may be nil (no auth)
 	}
@@ -255,11 +274,11 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 			// trusted: global flag OR connecting IP is in trusted-proxies list.
 			// clientIP is already parsed above — reuse it to avoid double SplitHostPort.
 			var clientNetIP net.IP
-			if s.cfg.TrustedProxies != nil {
+			if cfg.TrustedProxies != nil {
 				clientNetIP = net.ParseIP(clientIP)
 			}
-			trusted := s.cfg.TrustClientHeaders ||
-				(clientNetIP != nil && s.cfg.TrustedProxies.list.Contains(clientNetIP))
+			trusted := cfg.TrustClientHeaders ||
+				(clientNetIP != nil && cfg.TrustedProxies.list.Contains(clientNetIP))
 			if clientIP != "" {
 				if trusted {
 					if prior, ok := req.Header["X-Forwarded-For"]; ok {
@@ -318,7 +337,7 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 					requestURI = req.RequestURI
 				}
 				for name, ph := range rc.ParsedAddHeaders {
-					resolved := ph.eval(requestHost, clientIP, clientPort, scheme, requestURI, xffCopy, s.cfg, originalHeaders)
+					resolved := ph.eval(requestHost, clientIP, clientPort, scheme, requestURI, xffCopy, cfg, originalHeaders)
 					if strings.EqualFold(name, "host") {
 						req.Host = resolved
 						continue
@@ -355,17 +374,14 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 	// handleWS uses effectiveAuth which is declared above.
 	handleWS := func(w http.ResponseWriter, r *http.Request) {
 		upstream := picker.pick(lbMode)
-		serveWebSocket(w, r, upstream.ParsedURL, routePath, rc, effectiveAuth, s.cfg)
+		serveWebSocket(w, r, upstream.ParsedURL, routePath, rc, effectiveAuth, cfg)
 	}
 
 	var h http.Handler = proxy
 
 	// Wrap with timeout if needed.
 	if clientTimeout > 0 {
-		inner := h
-		h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			http.TimeoutHandler(inner, clientTimeout, "Gateway Timeout").ServeHTTP(w, r)
-		})
+		h = http.TimeoutHandler(h, clientTimeout, "Gateway Timeout")
 	}
 
 	// Wrap with basic auth if needed.
@@ -423,24 +439,45 @@ func manipulateClientHeaders(respHeaders http.Header, originalHeaders http.Heade
 }
 
 func (s *server) run() error {
+	state := s.state.Load()
 	addr := s.listenAddr()
 	srv := &http.Server{
 		Addr:    addr,
 		Handler: s.handler(),
 	}
 
-	// Catch SIGTERM and SIGINT to log a shutdown message and drain in-flight
-	// requests before exiting. After draining, we re-raise the original signal
-	// with the default handler restored so the process exits with the correct
-	// signal-derived exit code (e.g. 130 for SIGINT, 143 for SIGTERM).
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
-	var receivedSig os.Signal
-	go func() {
-		receivedSig = <-quit
-		log.Printf("RouteMUX received %s, shutting down...", receivedSig)
-		srv.Shutdown(context.Background()) //nolint:errcheck
-	}()
+	// 1. Setup platform-specific signal handling (SIGHUP for reload, SIGINT/SIGTERM for shutdown)
+	s.setupSignals(srv)
+
+	// 2. Setup config file watcher (polling)
+	if state.cfg.ConfigPath != "" {
+		// ConfigPath is set from CLI and never changes across reloads —
+		// capture it once so the ticker doesn't load the atomic pointer each tick.
+		configPath := state.cfg.ConfigPath
+		go func() {
+			lastStat, err := os.Stat(configPath)
+			if err != nil {
+				log.Printf("Watcher: could not stat config file: %v", err)
+			}
+			lastMtime := time.Time{}
+			if lastStat != nil {
+				lastMtime = lastStat.ModTime()
+			}
+
+			ticker := time.NewTicker(2 * time.Second)
+			defer ticker.Stop()
+			for range ticker.C {
+				stat, err := os.Stat(configPath)
+				if err != nil {
+					continue
+				}
+				if stat.ModTime().After(lastMtime) {
+					lastMtime = stat.ModTime()
+					s.scheduledReload(true)
+				}
+			}
+		}()
+	}
 
 	// Bind the TCP listener first so we can log only after the socket is
 	// actually ready to accept connections.
@@ -449,15 +486,15 @@ func (s *server) run() error {
 		return err
 	}
 
-	if s.cfg.TLSCert != "" {
+	if state.cfg.TLSCert != "" {
 		// Load the certificate and wrap the listener in TLS before logging,
 		// so the message appears only when TLS is also ready.
-		cert, cerr := tls.LoadX509KeyPair(s.cfg.TLSCert, s.cfg.TLSKey)
+		cert, cerr := tls.LoadX509KeyPair(state.cfg.TLSCert, state.cfg.TLSKey)
 		if cerr != nil {
 			ln.Close()
 			return fmt.Errorf("TLS: %w", cerr)
 		}
-		log.Printf("TLS enabled (cert: %s)", s.cfg.TLSCert)
+		log.Printf("TLS enabled (cert: %s)", state.cfg.TLSCert)
 		tlsCfg := &tls.Config{Certificates: []tls.Certificate{cert}}
 		ln = tls.NewListener(ln, tlsCfg)
 		log.Printf("RouteMUX listening on %s (TLS)", ln.Addr())
@@ -488,35 +525,30 @@ func isCatchAll(domains []string) bool {
 // handler returns the top-level HTTP handler.
 // IP filter (if configured) is checked first, before vhost dispatch.
 // When there is only one catch-all vhost (singleMux), vhost dispatch is skipped.
+// handler returns the top-level HTTP handler.
+// IP filter and vhost dispatch are inlined — no closure allocation per request.
 func (s *server) handler() http.Handler {
-	inner := s.vhostHandler()
-	if s.cfg.IPFilter == nil {
-		return inner
-	}
-	ipf := s.cfg.IPFilter
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !ipf.Allow(r.RemoteAddr) {
+		state := s.state.Load()
+
+		if state.cfg.IPFilter != nil && !state.cfg.IPFilter.Allow(r.RemoteAddr) {
 			closeConnection(w)
 			return
 		}
-		inner.ServeHTTP(w, r)
-	})
-}
 
-// vhostHandler returns the handler that dispatches by Host header.
-func (s *server) vhostHandler() http.Handler {
-	if s.singleMux {
-		return s.vhosts[0].mux
-	}
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if state.singleMux {
+			state.vhosts[0].mux.ServeHTTP(w, r)
+			return
+		}
+
 		// Strip port from Host header for matching.
 		host := strings.ToLower(r.Host)
 		if h, _, err := net.SplitHostPort(host); err == nil {
 			host = h
 		}
-		for i := range s.vhosts {
-			if s.vhosts[i].matchHost(host) {
-				s.vhosts[i].mux.ServeHTTP(w, r)
+		for i := range state.vhosts {
+			if state.vhosts[i].matchHost(host) {
+				state.vhosts[i].mux.ServeHTTP(w, r)
 				return
 			}
 		}
@@ -648,4 +680,118 @@ func (p *upstreamPicker) pick(mode string) *Upstream {
 		}
 	}
 	return &p.upstreams[0] // unreachable, but safe fallback
+}
+
+// scheduledReload debounces rapid reload triggers (e.g. editor writing a
+// config file in multiple steps) by coalescing calls within 200ms into a
+// single Reload(). Both the file watcher and the SIGHUP handler call this
+// instead of Reload() directly. fileMod indicates whether the reload was
+// triggered by a file modification, this is for proper logging message.
+func (s *server) scheduledReload(fileMod bool) {
+	s.timerMu.Lock()
+	if s.reloadTimer != nil {
+		s.reloadTimer.Reset(200 * time.Millisecond)
+		s.timerMu.Unlock()
+		return
+	}
+	s.reloadTimer = time.AfterFunc(200*time.Millisecond, func() {
+		s.timerMu.Lock()
+		s.reloadTimer = nil
+		s.timerMu.Unlock()
+		s.Reload(fileMod)
+	})
+	s.timerMu.Unlock()
+}
+
+func (s *server) Reload(fileMod bool) {
+	// Prevent concurrent reloads — if one is already running, drop this trigger.
+	if !s.reloadMu.TryLock() {
+		log.Printf("Reload already in progress, skipping concurrent trigger.")
+		return
+	}
+	defer s.reloadMu.Unlock()
+
+
+	oldState := s.state.Load()
+	if oldState.cfg.ConfigPath == "" {
+		log.Printf("Reload: no config file to reload")
+		return
+	}
+
+	if(fileMod) {
+		log.Printf("Config file changed, reloading...")
+	} else {
+		log.Printf("Received signal to reload config, reloading...")
+	}
+
+	// 1. Re-parse everything (config file + CLI overrides)
+	newCfg, err := parseAll(oldState.cfg.OriginalArgs)
+	if err != nil {
+		log.Printf("Reload failed: %v (keeping old config)", err)
+		return
+	}
+
+	if err := newCfg.validate(); err != nil {
+		log.Printf("Reload failed (validation): %v (keeping old config)", err)
+		return
+	}
+
+	// 2. Check for non-reloadable changes (Port, Listen, TLS).
+	// These are fixed at server start and require a full restart to change.
+	if newCfg.Port != oldState.cfg.Port || newCfg.Listen != oldState.cfg.Listen {
+		log.Printf("Reload: Port or Listen address changes require a full restart. Reverting to current values: %s:%d", oldState.cfg.Listen, oldState.cfg.Port)
+		newCfg.Port = oldState.cfg.Port
+		newCfg.Listen = oldState.cfg.Listen
+	}
+	if newCfg.TLSCert != oldState.cfg.TLSCert || newCfg.TLSKey != oldState.cfg.TLSKey {
+		log.Printf("Reload: TLS cert/key changes require a full restart. Reverting to current values.")
+		newCfg.TLSCert = oldState.cfg.TLSCert
+		newCfg.TLSKey = oldState.cfg.TLSKey
+	}
+
+	// 3. Compile new vhosts
+	vhosts, singleMux, err := s.compileVHosts(newCfg)
+	if err != nil {
+		log.Printf("Reload failed (compile): %v (keeping old config)", err)
+		return
+	}
+
+	// 4. Initialize new IP filters and trusted proxies
+	if newCfg.IPFilter != nil {
+		if err := newCfg.IPFilter.Load(); err != nil {
+			log.Printf("Reload failed (ip-filter): %v (keeping old config)", err)
+			return
+		}
+	}
+	if newCfg.TrustedProxies != nil {
+		if err := newCfg.TrustedProxies.Load(); err != nil {
+			log.Printf("Reload failed (trusted-proxies): %v (keeping old config)", err)
+			return
+		}
+	}
+
+	// 5. Swap state
+	newState := &serverState{
+		cfg:       newCfg,
+		vhosts:    vhosts,
+		singleMux: singleMux,
+	}
+	s.state.Store(newState)
+
+	// 6. Stop old background tasks and start new ones
+	if oldState.cfg.IPFilter != nil {
+		oldState.cfg.IPFilter.Stop()
+	}
+	if oldState.cfg.TrustedProxies != nil {
+		oldState.cfg.TrustedProxies.Stop()
+	}
+
+	if newCfg.IPFilter != nil {
+		newCfg.IPFilter.StartRefresh()
+	}
+	if newCfg.TrustedProxies != nil {
+		newCfg.TrustedProxies.StartRefresh()
+	}
+
+	log.Printf("Reload successful.")
 }

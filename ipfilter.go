@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -43,6 +44,8 @@ type CIDRList struct {
 	nets    []net.IPNet
 	sources []filterSource
 	dynamic map[int][]net.IPNet // idx → current loaded CIDRs for file/URL sources
+
+	cancel context.CancelFunc // stops background refresh
 }
 
 // Contains reports whether ip is in any of the list's networks.
@@ -82,6 +85,14 @@ func (cl *CIDRList) setDynamic(idx int, cidrs []net.IPNet) {
 // Load performs the initial fetch of all file/URL sources.
 // Called once at startup. Safe to call multiple times (idempotent).
 func (cl *CIDRList) Load() error {
+	cl.mu.Lock()
+	if cl.cancel != nil {
+		cl.cancel()
+	}
+	var ctx context.Context
+	ctx, cl.cancel = context.WithCancel(context.Background())
+	cl.mu.Unlock()
+
 	for i, src := range cl.sources {
 		if src.kind == sourceCIDR {
 			continue
@@ -93,7 +104,7 @@ func (cl *CIDRList) Load() error {
 		}
 		cl.setDynamic(i, cidrs)
 		if cached {
-			cl.AsyncRefresh(i, true)
+			cl.AsyncRefresh(ctx, i, true)
 		}
 	}
 	// Final rebuild picks up inline CIDRs (already in sources).
@@ -105,7 +116,7 @@ func (cl *CIDRList) Load() error {
 
 // AsyncRefresh starts a background goroutine to periodic or 
 // onetime refresh the CIDRs for one source.
-func (cl *CIDRList) AsyncRefresh(idx int, onetime bool) {
+func (cl *CIDRList) AsyncRefresh(ctx context.Context, idx int, onetime bool) {
 	src := &cl.sources[idx]
 	if src.kind == sourceCIDR || src.refresh == 0 {
 		return
@@ -147,25 +158,30 @@ func (cl *CIDRList) AsyncRefresh(idx int, onetime bool) {
 		ticker := time.NewTicker(src.refresh)
 		defer ticker.Stop()
 		lastMtime := time.Time{}
-		for range ticker.C {
-			if src.kind == sourceFile {
-				info, err := os.Stat(src.path)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if src.kind == sourceFile {
+					info, err := os.Stat(src.path)
+					if err != nil {
+						log.Printf("ip: refresh: cannot stat %q: %v", src.path, err)
+						continue
+					}
+					if !info.ModTime().After(lastMtime) {
+						continue
+					}
+					lastMtime = info.ModTime()
+				}
+				cidrs, err := refreshFromSource()
 				if err != nil {
-					log.Printf("ip: refresh: cannot stat %q: %v", src.path, err)
+					log.Printf("ip: refresh: failed to reload %q: %v (keeping previous list)", sourceDesc(src), err)
 					continue
 				}
-				if !info.ModTime().After(lastMtime) {
-					continue
-				}
-				lastMtime = info.ModTime()
+				cl.setDynamic(idx, cidrs)
+				log.Printf("ip: refreshed %q (%d CIDRs)", sourceDesc(src), len(cidrs))
 			}
-			cidrs, err := refreshFromSource()
-			if err != nil {
-				log.Printf("ip: refresh: failed to reload %q: %v (keeping previous list)", sourceDesc(src), err)
-				continue
-			}
-			cl.setDynamic(idx, cidrs)
-			log.Printf("ip: refreshed %q (%d CIDRs)", sourceDesc(src), len(cidrs))
 		}
 	}()
 }
@@ -173,9 +189,27 @@ func (cl *CIDRList) AsyncRefresh(idx int, onetime bool) {
 // StartRefresh launches background goroutines for all sources with a non-zero
 // refresh interval. Safe to call after Load().
 func (cl *CIDRList) StartRefresh() {
-	for i := range cl.sources {
-		cl.AsyncRefresh(i, false)
+	cl.mu.Lock()
+	if cl.cancel != nil {
+		cl.cancel()
 	}
+	var ctx context.Context
+	ctx, cl.cancel = context.WithCancel(context.Background())
+	cl.mu.Unlock()
+
+	for i := range cl.sources {
+		cl.AsyncRefresh(ctx, i, false)
+	}
+}
+
+// Stop stops all background refresh goroutines.
+func (cl *CIDRList) Stop() {
+	cl.mu.Lock()
+	if cl.cancel != nil {
+		cl.cancel()
+		cl.cancel = nil
+	}
+	cl.mu.Unlock()
 }
 
 // Len returns the number of networks currently in the list.
@@ -259,6 +293,16 @@ func (f *IPFilter) StartRefresh() {
 	}
 }
 
+// Stop stops all background refresh goroutines.
+func (f *IPFilter) Stop() {
+	if f.blocked != nil {
+		f.blocked.Stop()
+	}
+	if f.allowed != nil {
+		f.allowed.Stop()
+	}
+}
+
 // ---- TrustedProxies ----
 
 // TrustedProxies holds a CIDRList of proxy addresses whose X-Forwarded-*
@@ -289,6 +333,11 @@ func (tp *TrustedProxies) Load() error {
 // StartRefresh launches background refresh goroutines.
 func (tp *TrustedProxies) StartRefresh() {
 	tp.list.StartRefresh()
+}
+
+// Stop stops background refresh.
+func (tp *TrustedProxies) Stop() {
+	tp.list.Stop()
 }
 
 // ---- Shared source loading ----

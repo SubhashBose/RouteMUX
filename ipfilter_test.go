@@ -723,6 +723,7 @@ func TestCLI_IPFilterFile(t *testing.T) {
 	defer os.Remove(f.Name())
 
 	cfg, err := parseAll([]string{
+		"--config", "",
 		"--ip-filter-block", f.Name(),
 		"--route", "/",
 		"--dest", "http://localhost:3000/",
@@ -915,6 +916,7 @@ routes:
 
 func TestCLI_TrustedProxy(t *testing.T) {
 	cfg, err := parseAll([]string{
+		"--config", "",
 		"--trusted-proxy", "10.0.0.0/8",
 		"--trusted-proxy", "192.168.0.0/16",
 		"--route", "/", "--dest", "http://localhost:3000/",

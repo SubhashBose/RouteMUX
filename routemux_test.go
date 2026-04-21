@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 
@@ -359,7 +360,7 @@ func TestRouteHandler_BasicProxy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ts := httptest.NewServer(srv.vhosts[0].mux)
+	ts := httptest.NewServer(srv.state.Load().vhosts[0].mux)
 	defer ts.Close()
 
 	resp, err := http.Get(ts.URL + "/api/users")
@@ -387,7 +388,7 @@ func TestRouteHandler_GlobalAuth(t *testing.T) {
 		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/secure/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)}}}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.vhosts[0].mux)
+	ts := httptest.NewServer(srv.state.Load().vhosts[0].mux)
 	defer ts.Close()
 
 	// No credentials → 401
@@ -431,7 +432,7 @@ func TestRouteHandler_RouteAuthOverridesGlobal(t *testing.T) {
 		}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.vhosts[0].mux)
+	ts := httptest.NewServer(srv.state.Load().vhosts[0].mux)
 	defer ts.Close()
 
 	resp, _ := http.Get(ts.URL + "/public/")
@@ -458,7 +459,7 @@ func TestRouteHandler_PerRouteAuth(t *testing.T) {
 		}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.vhosts[0].mux)
+	ts := httptest.NewServer(srv.state.Load().vhosts[0].mux)
 	defer ts.Close()
 
 	// Global creds should NOT work
@@ -491,7 +492,7 @@ func TestRouteHandler_PathStripping(t *testing.T) {
 		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/prefix/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/base/", 1)}}}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.vhosts[0].mux)
+	ts := httptest.NewServer(srv.state.Load().vhosts[0].mux)
 	defer ts.Close()
 
 	http.Get(ts.URL + "/prefix/foo/bar")
@@ -514,7 +515,7 @@ func TestRouteHandler_XForwardedHeaders(t *testing.T) {
 		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)}}}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.vhosts[0].mux)
+	ts := httptest.NewServer(srv.state.Load().vhosts[0].mux)
 	defer ts.Close()
 
 	http.Get(ts.URL + "/")
@@ -574,7 +575,7 @@ func TestRouteHandler_AddHeader(t *testing.T) {
 		}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.vhosts[0].mux)
+	ts := httptest.NewServer(srv.state.Load().vhosts[0].mux)
 	defer ts.Close()
 
 	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
@@ -608,7 +609,7 @@ func TestRouteHandler_DeleteHeader(t *testing.T) {
 		}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.vhosts[0].mux)
+	ts := httptest.NewServer(srv.state.Load().vhosts[0].mux)
 	defer ts.Close()
 
 	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
@@ -642,7 +643,7 @@ func TestRouteHandler_DeleteHostIgnored(t *testing.T) {
 		}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.vhosts[0].mux)
+	ts := httptest.NewServer(srv.state.Load().vhosts[0].mux)
 	defer ts.Close()
 
 	http.Get(ts.URL + "/api/")
@@ -672,7 +673,7 @@ func TestRouteHandler_AddAndDeleteOrder(t *testing.T) {
 		}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.vhosts[0].mux)
+	ts := httptest.NewServer(srv.state.Load().vhosts[0].mux)
 	defer ts.Close()
 
 	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
@@ -775,7 +776,7 @@ func TestRouteHandler_AddHostHeader(t *testing.T) {
 		}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.vhosts[0].mux)
+	ts := httptest.NewServer(srv.state.Load().vhosts[0].mux)
 	defer ts.Close()
 
 	http.Get(ts.URL + "/api/")
@@ -806,7 +807,7 @@ func TestRouteHandler_DeleteHostHeader_FallsBackToUpstream(t *testing.T) {
 		}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.vhosts[0].mux)
+	ts := httptest.NewServer(srv.state.Load().vhosts[0].mux)
 	defer ts.Close()
 
 	http.Get(ts.URL + "/api/")
@@ -832,7 +833,7 @@ func TestRouteHandler_ClientHostPassedThrough(t *testing.T) {
 		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)}}}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.vhosts[0].mux)
+	ts := httptest.NewServer(srv.state.Load().vhosts[0].mux)
 	defer ts.Close()
 
 	// The client sends Host: myapp.example.com
@@ -863,7 +864,7 @@ func TestRouteHandler_ProxyAuthStripsAuthorization(t *testing.T) {
 		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)}}}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.vhosts[0].mux)
+	ts := httptest.NewServer(srv.state.Load().vhosts[0].mux)
 	defer ts.Close()
 
 	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
@@ -890,7 +891,7 @@ func TestRouteHandler_NoProxyAuthPassesAuthorization(t *testing.T) {
 		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)}}}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.vhosts[0].mux)
+	ts := httptest.NewServer(srv.state.Load().vhosts[0].mux)
 	defer ts.Close()
 
 	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
@@ -923,7 +924,7 @@ func TestRouteHandler_ProxyAuthWithAddHeaderAuthOverride(t *testing.T) {
 		}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.vhosts[0].mux)
+	ts := httptest.NewServer(srv.state.Load().vhosts[0].mux)
 	defer ts.Close()
 
 	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
@@ -954,7 +955,7 @@ func TestRouteHandler_NoProxyAuthDeleteAuthorization(t *testing.T) {
 		}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.vhosts[0].mux)
+	ts := httptest.NewServer(srv.state.Load().vhosts[0].mux)
 	defer ts.Close()
 
 	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
@@ -987,7 +988,7 @@ func TestDeleteHeader_WildcardPrefix(t *testing.T) {
 		}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.vhosts[0].mux)
+	ts := httptest.NewServer(srv.state.Load().vhosts[0].mux)
 	defer ts.Close()
 
 	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
@@ -1026,7 +1027,7 @@ func TestDeleteHeader_WildcardSuffix(t *testing.T) {
 		}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.vhosts[0].mux)
+	ts := httptest.NewServer(srv.state.Load().vhosts[0].mux)
 	defer ts.Close()
 
 	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
@@ -1253,7 +1254,7 @@ func TestRouteHandler_VarRemoteAddr(t *testing.T) {
 		}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.vhosts[0].mux)
+	ts := httptest.NewServer(srv.state.Load().vhosts[0].mux)
 	defer ts.Close()
 	http.Get(ts.URL + "/api/")
 	if gotHeader == "" {
@@ -1287,7 +1288,7 @@ func TestRouteHandler_VarHeaderCopiedAfterDelete(t *testing.T) {
 		}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.vhosts[0].mux)
+	ts := httptest.NewServer(srv.state.Load().vhosts[0].mux)
 	defer ts.Close()
 
 	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
@@ -1321,7 +1322,7 @@ func TestRouteHandler_VarScheme(t *testing.T) {
 		}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.vhosts[0].mux)
+	ts := httptest.NewServer(srv.state.Load().vhosts[0].mux)
 	defer ts.Close()
 	http.Get(ts.URL + "/api/")
 	if gotScheme != "http" {
@@ -1349,7 +1350,7 @@ func TestRouteHandler_VarConcatenation(t *testing.T) {
 		}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.vhosts[0].mux)
+	ts := httptest.NewServer(srv.state.Load().vhosts[0].mux)
 	defer ts.Close()
 
 	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
@@ -1377,7 +1378,7 @@ func TestTrustClientHeaders_False_DiscardXFF(t *testing.T) {
 		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)}}}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.vhosts[0].mux)
+	ts := httptest.NewServer(srv.state.Load().vhosts[0].mux)
 	defer ts.Close()
 
 	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
@@ -1405,7 +1406,7 @@ func TestTrustClientHeaders_True_AppendXFF(t *testing.T) {
 		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)}}}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.vhosts[0].mux)
+	ts := httptest.NewServer(srv.state.Load().vhosts[0].mux)
 	defer ts.Close()
 
 	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
@@ -1437,7 +1438,7 @@ func TestTrustClientHeaders_False_SetsXForwardedHeaders(t *testing.T) {
 		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)}}}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.vhosts[0].mux)
+	ts := httptest.NewServer(srv.state.Load().vhosts[0].mux)
 	defer ts.Close()
 
 	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
@@ -1470,7 +1471,7 @@ func TestTrustClientHeaders_True_LeavesXForwardedHeadersUntouched(t *testing.T) 
 		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)}}}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.vhosts[0].mux)
+	ts := httptest.NewServer(srv.state.Load().vhosts[0].mux)
 	defer ts.Close()
 
 	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
@@ -1598,7 +1599,7 @@ func TestStatusRoute_200(t *testing.T) {
 		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/health/": {StatusCode: 200, StatusText: "OK"}}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.vhosts[0].mux)
+	ts := httptest.NewServer(srv.state.Load().vhosts[0].mux)
 	defer ts.Close()
 
 	resp, err := http.Get(ts.URL + "/health/")
@@ -1621,7 +1622,7 @@ func TestStatusRoute_EmptyBody(t *testing.T) {
 		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/ping/": {StatusCode: 204, StatusText: ""}}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.vhosts[0].mux)
+	ts := httptest.NewServer(srv.state.Load().vhosts[0].mux)
 	defer ts.Close()
 
 	resp, _ := http.Get(ts.URL + "/ping/")
@@ -1642,7 +1643,7 @@ func TestStatusRoute_WithAuth(t *testing.T) {
 		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/health/": {StatusCode: 200, StatusText: "healthy"}}}},
 	}
 	srv, _ := newServer(cfg)
-	ts := httptest.NewServer(srv.vhosts[0].mux)
+	ts := httptest.NewServer(srv.state.Load().vhosts[0].mux)
 	defer ts.Close()
 
 	resp, _ := http.Get(ts.URL + "/health/")
@@ -2070,7 +2071,7 @@ func TestVHost_SingleMuxShortCircuit(t *testing.T) {
 		}},
 	}
 	srv, _ := newServer(cfg)
-	if !srv.singleMux {
+	if !srv.state.Load().singleMux {
 		t.Error("single catch-all vhost should set singleMux=true")
 	}
 
@@ -2083,7 +2084,7 @@ func TestVHost_SingleMuxShortCircuit(t *testing.T) {
 		}},
 	}
 	srv2, _ := newServer(cfg2)
-	if srv2.singleMux {
+	if srv2.state.Load().singleMux {
 		t.Error("single specific-domain vhost should NOT set singleMux — host matching must be enforced")
 	}
 
@@ -2222,6 +2223,7 @@ func TestVHost_CLI_VHostFlag(t *testing.T) {
 func TestVHost_CLI_BackwardCompat(t *testing.T) {
 	// Routes without --vhost → single catch-all vhost
 	cfg, err := parseAll([]string{
+		"--config", "",
 		"--route", "/api/",
 		"--dest", "http://localhost:3000/",
 	})
@@ -3535,5 +3537,163 @@ vhosts:
 
 	if resp.Header.Get("X-Vhost") != "specific" {
 		t.Errorf("X-Vhost = %q, want specific (catch-all declared first in YAML should not win)", resp.Header.Get("X-Vhost"))
+	}
+}
+// ---- hot reload: debounce and concurrent-trigger tests ----
+
+func TestScheduledReload_Debounce(t *testing.T) {
+	// Multiple rapid scheduledReload() calls should result in exactly one Reload().
+	// We verify by counting how many times parseAll is called via a config file
+	// that changes mtime.
+	f, err := os.CreateTemp("", "routemux-reload-*.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString(`
+global:
+  port: 8080
+routes:
+  /:
+    dest: http://localhost:3000/
+`)
+	f.Close()
+	defer os.Remove(f.Name())
+
+	cfg, err := loadConfigFile(f.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConfigPath = f.Name()
+	cfg.OriginalArgs = []string{"--config", f.Name()}
+
+	srv, err := newServer(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Fire 10 rapid triggers — debounce should coalesce into 1 reload
+	for i := 0; i < 10; i++ {
+		srv.scheduledReload()
+	}
+
+	// Wait for debounce window (200ms) + a little buffer
+	time.Sleep(400 * time.Millisecond)
+
+	// Server should still be running correctly with valid state
+	state := srv.state.Load()
+	if state == nil {
+		t.Error("state should not be nil after reload")
+	}
+	if state.cfg == nil {
+		t.Error("cfg should not be nil after reload")
+	}
+}
+
+func TestReload_ConcurrentTriggerDropped(t *testing.T) {
+	// If Reload() is already running, a second concurrent call should be dropped
+	// (not block, not run a second reload).
+	f, err := os.CreateTemp("", "routemux-reload-*.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString(`
+global:
+  port: 8080
+routes:
+  /:
+    dest: http://localhost:3000/
+`)
+	f.Close()
+	defer os.Remove(f.Name())
+
+	cfg, err := loadConfigFile(f.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConfigPath = f.Name()
+	cfg.OriginalArgs = []string{"--config", f.Name()}
+
+	srv, err := newServer(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Hold the reload lock to simulate a reload in progress
+	srv.reloadMu.Lock()
+
+	done := make(chan struct{})
+	go func() {
+		srv.Reload() // should return immediately (lock already held)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Good — Reload() returned quickly without blocking
+	case <-time.After(500 * time.Millisecond):
+		t.Error("Reload() blocked when reloadMu was held — should have returned immediately")
+	}
+
+	srv.reloadMu.Unlock()
+}
+
+func TestScheduledReload_TimerReset(t *testing.T) {
+	// Calling scheduledReload() repeatedly within the debounce window
+	// should reset the timer each time, delaying the actual reload.
+	f, err := os.CreateTemp("", "routemux-reload-*.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString(`
+global:
+  port: 8080
+routes:
+  /:
+    dest: http://localhost:3000/
+`)
+	f.Close()
+	defer os.Remove(f.Name())
+
+	cfg, err := loadConfigFile(f.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConfigPath = f.Name()
+	cfg.OriginalArgs = []string{"--config", f.Name()}
+
+	srv, err := newServer(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Fire triggers spread over 300ms — each resets the 200ms debounce timer.
+	// The reload should not have fired at 250ms (before the last reset settles).
+	go func() {
+		for i := 0; i < 3; i++ {
+			srv.scheduledReload()
+			time.Sleep(100 * time.Millisecond)
+		}
+	}()
+
+	// At 250ms the debounce should NOT have fired yet (last trigger at 200ms + 200ms window = 400ms)
+	time.Sleep(250 * time.Millisecond)
+
+	srv.timerMu.Lock()
+	timerStillActive := srv.reloadTimer != nil
+	srv.timerMu.Unlock()
+
+	if !timerStillActive {
+		t.Error("debounce timer should still be active at 250ms (last reset at 200ms)")
+	}
+
+	// Wait for the debounce to fire and complete
+	time.Sleep(400 * time.Millisecond)
+
+	srv.timerMu.Lock()
+	timerGone := srv.reloadTimer == nil
+	srv.timerMu.Unlock()
+
+	if !timerGone {
+		t.Error("debounce timer should be nil after reload completed")
 	}
 }

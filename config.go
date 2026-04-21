@@ -65,11 +65,11 @@ func expandEnvVars(data []byte) []byte {
 
 		val, ok := os.LookupEnv(varName)
 		if !ok {
-			def_msg := "using empty string"
+			defMsg := "using empty string"
 			if defaultVal != "" {
-				def_msg = fmt.Sprintf("using default %s", defaultVal)
+				defMsg = fmt.Sprintf("using default %s", defaultVal)
 			}
-			log.Printf("config: environment variable %q is not set (%s)", varName, def_msg)
+			log.Printf("config: environment variable %q is not set (%s)", varName, defMsg)
 			val = defaultVal
 		}
 		result = append(result, []byte(val)...)
@@ -88,6 +88,10 @@ type Config struct {
 	VHosts             []VHost    // ordered list; matched top-to-bottom per request
 	IPFilter           *IPFilter        // nil = no IP filtering
 	TrustedProxies     *TrustedProxies  // nil = use global TrustClientHeaders
+
+	// Metadata for hot reload
+	ConfigPath   string   // Path to the config file being used (if any)
+	OriginalArgs []string // Original CLI arguments (excluding the config flag itself)
 }
 
 // VHost groups a set of routes under one or more domain names.
