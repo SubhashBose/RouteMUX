@@ -18,6 +18,7 @@ import (
 	"time"
 	"bufio"
 	"io"
+	"sync/atomic"
 )
 
 const DAEMONIZE_SUPPORTED = true
@@ -61,11 +62,28 @@ type Config struct {
 	// Restart (when watch-start) worker on clean exit too. Default is restart on error only
 	// Default value false.
 	RestartOnCleanExit bool
+
+	// Command strings to be used for start/stop/restart/status commands.
+	// Defaults to "start", "watch-start", "stop", "restart", "reload", "status".
+	// set like this in your main daemon.Config: (omit the commands not needed) 
+	//daemon.Commands{Start: "start", WatchStart: "watch-start", Stop: "stop", Restart: "restart", Reload: "reload", Status: "status"},
+	CommandStrings Commands
 	
 	// (internal variables) Logger is used for daemon-internal messages. Defaults to log.Default().
 	logger *log.Logger
 
 	pidFile string
+
+	watchdogShuttingDown atomic.Bool  // (internal) set to true when watchdog in shutting down state
+}
+
+type Commands struct {
+	Start string
+	WatchStart string
+	Stop string
+	Restart string
+	Reload string
+	Status string
 }
 
 
@@ -106,9 +124,18 @@ func Handle(cfg Config) {
 	//if cfg.watchdogLogger == nil {
 	//	cfg.watchdogLogger = cfg.logger
 	//}
+	if cfg.CommandStrings == (Commands{}) {
+		cfg.CommandStrings.Start = "start"
+		cfg.CommandStrings.WatchStart = "watch-start"
+		cfg.CommandStrings.Stop = "stop"
+		cfg.CommandStrings.Restart = "restart"
+		cfg.CommandStrings.Reload = "reload"
+		cfg.CommandStrings.Status = "status"
+	}
 
 	// Role: plain worker (child of watchdog) — just run OnStart, no PID file handling.
 	if os.Getenv(workerEnvVar) == "1" {
+		log.SetFlags(log.Flags() &^ (log.Ldate | log.Ltime))
 		if cfg.OnStart != nil {
 			cfg.OnStart()
 		}
@@ -134,7 +161,7 @@ func Handle(cfg Config) {
 	}
 
 	// Role: parent — parse command and act.
-	command, passArgs := parseArgs(os.Args[1:])
+	command, passArgs := parseArgs(os.Args[1:], &cfg.CommandStrings)
 
 	pidFile, err := pidFilePath(cfg)
 	cfg.pidFile = pidFile
@@ -143,39 +170,56 @@ func Handle(cfg Config) {
 	}
 
 	switch command {
-	case "start":
-		handleStart(passArgs, &cfg)
-	case "watch-start":
-		handleWatchStart(passArgs, &cfg)
-	case "stop":
-		_ = handleStop(&cfg)
-	case "restart":
-		handleRestart(&cfg)
-	case "reload":
-		handleReload(&cfg)
-	case "status":
-		handleStatus(&cfg)
 	default:
 		// No control command — run normally attached to terminal.
 		if cfg.OnStart != nil {
 			cfg.OnStart()
 		}
+	case "":
+		if cfg.OnStart != nil {
+			cfg.OnStart()
+		}
+	case cfg.CommandStrings.Start:
+		handleStart(passArgs, &cfg)
+	case cfg.CommandStrings.WatchStart:
+		handleWatchStart(passArgs, &cfg)
+	case cfg.CommandStrings.Stop:
+		_ = handleStop(&cfg)
+	case cfg.CommandStrings.Restart:
+		handleRestart(&cfg)
+	case cfg.CommandStrings.Reload:
+		handleReload(&cfg)
+	case cfg.CommandStrings.Status:
+		handleStatus(&cfg)
 	}
 }
 
 // ---- internal ---------------------------------------------------------------
 
-func parseArgs(args []string) (command string, rest []string) {
-	for i := len(args) - 1; i >= 0; i-- {
-		switch args[i] {
-		case "start", "watch-start", "stop", "restart", "reload", "status":
-			rest = make([]string, 0, len(args)-1)
-			rest = append(rest, args[:i]...)
-			rest = append(rest, args[i+1:]...)
-			return args[i], rest
-		}
-	}
-	return "", args
+func parseArgs(args []string, commandStrings *Commands) (command string, rest []string) {
+    validCommands := make(map[string]struct{})
+    for _, cmd := range []string{
+        commandStrings.Start,
+        commandStrings.WatchStart,
+        commandStrings.Stop,
+        commandStrings.Restart,
+        commandStrings.Reload,
+        commandStrings.Status,
+    } {
+        if cmd != "" {
+            validCommands[cmd] = struct{}{}
+        }
+    }
+
+    for i := len(args) - 1; i >= 0; i-- {
+        if _, ok := validCommands[args[i]]; ok {
+            rest = make([]string, 0, len(args)-1)
+            rest = append(rest, args[:i]...)
+            rest = append(rest, args[i+1:]...)
+            return args[i], rest
+        }
+    }
+    return "", args
 }
 
 func pidFilePath(cfg Config) (string, error) {
@@ -377,15 +421,18 @@ func runWatchdog(cfg *Config) {
 		err = cmd.Wait() // blocks until worker exits
 		currentWorker = nil
 
+		if cfg.watchdogShuttingDown.Load() {
+			time.Sleep(100 * time.Millisecond) // allowing setupGracefulShutdown() to shutdown
+		}
+
 		if err != nil || cfg.RestartOnCleanExit {
-			time.Sleep(10 * time.Millisecond)
 			status_msg := "exited cleanly"
 			if err != nil {
 				status_msg = fmt.Sprintf("crashed (%v)", err)
 			}
 			cfg.logger.Printf("%s: worker %s — restarting in %s",
 				cfg.AppName, status_msg, cfg.WatchdogRestartDelay)
-			time.Sleep(cfg.WatchdogRestartDelay - 10 * time.Millisecond)
+			time.Sleep(cfg.WatchdogRestartDelay)
 		} else {
 			// Clean exit (exit code 0) means intentional stop — watchdog exits too.
 			cfg.logger.Printf("%s: worker exited cleanly, shutting down", cfg.AppName)
@@ -512,6 +559,7 @@ func setupGracefulShutdown(cfg *Config, workerCmd **exec.Cmd) {
 		if workerCmd != nil && *workerCmd != nil && (*workerCmd).Process != nil {
 			cfg.logger.Printf("%s: forwarding %s to worker (PID %d)",
 				cfg.AppName, sig, (*workerCmd).Process.Pid)
+			cfg.watchdogShuttingDown.Store(true)
 			(*workerCmd).Process.Signal(sig.(syscall.Signal))
 
 			// Wait for worker to exit, but don't wait forever.
@@ -523,7 +571,7 @@ func setupGracefulShutdown(cfg *Config, workerCmd **exec.Cmd) {
 
 			select {
 			case <-workerDone:
-				cfg.logger.Printf("%s: worker exited cleanly", cfg.AppName)
+				cfg.logger.Printf("%s: worker exited cleanly, bye!", cfg.AppName)
 			case <-time.After(10 * time.Second):
 				cfg.logger.Printf("%s: worker did not exit in time, forcing kill", cfg.AppName)
 				(*workerCmd).Process.Kill()

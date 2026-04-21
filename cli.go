@@ -11,7 +11,7 @@ import (
 	"github.com/SubhashBose/GoPkg-selfupdater"
 )
 
-var version = "0.3"
+var version = "0.4"
 
 // parseAll merges config file + CLI args into a final Config.
 // CLI args take precedence over config file.
