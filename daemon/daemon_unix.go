@@ -23,10 +23,6 @@ import (
 
 const DAEMONIZE_SUPPORTED = true
 
-const pidFileEnvVar  = "DAEMON_PID_FILE"
-const watchdogEnvVar = "DAEMON_IS_WATCHDOG"
-const workerEnvVar   = "DAEMON_IS_WORKER"
-
 // Config holds optional settings for the daemon.
 type Config struct {
 	// OnStart is called in the daemon process after it has started.
@@ -72,9 +68,8 @@ type Config struct {
 	// (internal variables) Logger is used for daemon-internal messages. Defaults to log.Default().
 	logger *log.Logger
 
+	// (internal) path of PID file.
 	pidFile string
-
-	watchdogShuttingDown atomic.Bool  // (internal) set to true when watchdog in shutting down state
 }
 
 type Commands struct {
@@ -85,6 +80,12 @@ type Commands struct {
 	Reload string
 	Status string
 }
+
+const pidFileEnvVar  = "DAEMON_PID_FILE"
+const watchdogEnvVar = "DAEMON_IS_WATCHDOG"
+const workerEnvVar   = "DAEMON_IS_WORKER"
+// set to true when watchdog in shutting down state
+var watchdogShuttingDown atomic.Bool
 
 
 // Handle inspects os.Args for control commands and acts accordingly.
@@ -169,6 +170,7 @@ func Handle(cfg Config) {
 		cfg.logger.Fatalf("%s daemon: cannot determine PID file path: %v", cfg.AppName, err)
 	}
 
+	/*
 	switch command {
 	default:
 		// No control command — run normally attached to terminal.
@@ -191,6 +193,23 @@ func Handle(cfg Config) {
 		handleReload(&cfg)
 	case cfg.CommandStrings.Status:
 		handleStatus(&cfg)
+	}
+	*/
+	// instead of case using a map of functions
+	handlers := map[string]func(){
+		cfg.CommandStrings.Start:      func() { handleStart(passArgs, &cfg) },
+		cfg.CommandStrings.WatchStart: func() { handleWatchStart(passArgs, &cfg) },
+		cfg.CommandStrings.Stop:       func() { _ = handleStop(&cfg) },
+		cfg.CommandStrings.Restart:    func() { handleRestart(&cfg) },
+		cfg.CommandStrings.Reload:     func() { handleReload(&cfg) },
+		cfg.CommandStrings.Status:     func() { handleStatus(&cfg) },
+	}
+	if handler, ok := handlers[command]; command != "" && ok {
+		handler()
+	} else {
+		if cfg.OnStart != nil {
+			cfg.OnStart()
+		}
 	}
 }
 
@@ -421,8 +440,8 @@ func runWatchdog(cfg *Config) {
 		err = cmd.Wait() // blocks until worker exits
 		currentWorker = nil
 
-		if cfg.watchdogShuttingDown.Load() {
-			time.Sleep(100 * time.Millisecond) // allowing setupGracefulShutdown() to shutdown
+		if watchdogShuttingDown.Load() {
+			select {} // halting, allowing setupGracefulShutdown() to shutdown
 		}
 
 		if err != nil || cfg.RestartOnCleanExit {
@@ -499,12 +518,12 @@ func handleReload(cfg *Config) {
 	pid, _, err := readPID(cfg.pidFile)
 	if err != nil {
 		fmt.Printf("%s is not running.\n", cfg.AppName)
-		return  // ← missing
+		return
 	}
 	if !processExists(pid) {
 		fmt.Printf("%s is not running (stale PID %d). Cleaning up.\n", cfg.AppName, pid)
 		os.Remove(cfg.pidFile)
-		return  // ← missing
+		return
 	}
 	proc, _ := os.FindProcess(pid)
 	fmt.Printf("Sending SIGHUP to %s (PID %d)...\n", cfg.AppName, pid)
@@ -559,7 +578,7 @@ func setupGracefulShutdown(cfg *Config, workerCmd **exec.Cmd) {
 		if workerCmd != nil && *workerCmd != nil && (*workerCmd).Process != nil {
 			cfg.logger.Printf("%s: forwarding %s to worker (PID %d)",
 				cfg.AppName, sig, (*workerCmd).Process.Pid)
-			cfg.watchdogShuttingDown.Store(true)
+			watchdogShuttingDown.Store(true)
 			(*workerCmd).Process.Signal(sig.(syscall.Signal))
 
 			// Wait for worker to exit, but don't wait forever.
@@ -571,7 +590,7 @@ func setupGracefulShutdown(cfg *Config, workerCmd **exec.Cmd) {
 
 			select {
 			case <-workerDone:
-				cfg.logger.Printf("%s: worker exited cleanly, bye!", cfg.AppName)
+				cfg.logger.Printf("%s: worker exited cleanly", cfg.AppName)
 			case <-time.After(10 * time.Second):
 				cfg.logger.Printf("%s: worker did not exit in time, forcing kill", cfg.AppName)
 				(*workerCmd).Process.Kill()
