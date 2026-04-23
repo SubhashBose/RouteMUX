@@ -35,7 +35,7 @@ func parseAll(args []string) (*Config, error) {
 		case "--no-strict-yaml":
 			// Disable strict YAML parsing before config file is loaded so the
 			// flag takes effect during yaml.Unmarshal.
-			strictYAML=false
+			strictYAML = false
 		}
 	}
 	if !skipConfig && !explicitConfig {
@@ -616,10 +616,10 @@ Daemon options:
 	fmt.Print(`
 General flags:
   --help, -h               Show this help
-  --version                Show RouteMUX version
+  --version                Show RouteMUX version and build date
   --upgrade                Self-upgrade RouteMUX to the latest version
   --no-strict-yaml         Disable strict YAML parsing (allow unknown config keys)
-  --validate               Validate configuration and exit without serving.
+  --validate               Validate configuration and exit without serving
 
 Sets of --route followed by route options can be repeated to define multiple routes.
 Options in command line and config.yml file are combined, where command line options takes precedence.

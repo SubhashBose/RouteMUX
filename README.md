@@ -17,6 +17,7 @@ A lightweight, flexible, and easy configurable reverse proxy written in Go. Rout
 - **[Trusted proxy support](#trusted-proxy-support)** — `trust-client-headers` global flag or per-IP `trusted-proxies` list (similar to IP filter) for selective proxy trust. A special header manipulation variable `${trusted_xff}` is available, that sets the real client IP after evaluating trusted proxies.
 - **[Environment variable support](#environment-variable-support)** - environment variable substitution is globally supported in `config.yml` file using `${env.VARIABLE}`.
 - **[Inbuilt support to run as daemon](#daemonizing-routemux)** - can run as daemon process, detached from terminal
+- **[Graceful reload of configuration](#graceful-reload-of-configuration)** - can gracefully reload modified configuration, without interrupting ongoing connection or requiring server restart
 - **Zero external dependencies** - standalone binary (~7 MB size) available in 15 OS and architecture combinations.
 
 ## Design philosophy
@@ -180,6 +181,8 @@ vhosts:
 `vhost:` and `domains:` block/key can be omitted from config, only having routes as the root block, 
 then all the defined routes belong to the default host `["*"]`, i.e, all hostnames.
 
+By default RouteMUX will strictly evaluate the YAML config file and report error for any unrecognized fields. This is done to avoid typographical errors, where an user may run the server with a missing configuration without noticing it. The strict validation of the YAML file can be disabled with command-line flag `--no-strict-yaml`, however, not recommended from security point-of-view. 
+
 ### Environment variable support
 
 Environment variable substitution is globally supported in configuration file. `${env.VARIABLE}` can be used to access `VARIABLE` from system environment. An optional default value can be passed as `${env.VARIABLE:default}`. `\$` is used to escape as string literal (like `\${env.VAR}` → `${env.VAR}`). The variable substitution only happens during the initial parsing of YAML file.
@@ -257,6 +260,7 @@ RouteMUX can be started as daemon (background process not attached to terminal) 
 | watch-start | Start RouteMUX as daemon along with watchdog that monitors and restart the process on failure. Also creates a logfile to monitor process output and errors |
 | stop   | Stop the daemon |
 | restart | Restart the demon process |
+| reload | Sends signal to RouteMUX daemon process to gracefully reload configuration from file. |
 | status | Show the daemon status |
 
 ### General flags
@@ -264,15 +268,22 @@ RouteMUX can be started as daemon (background process not attached to terminal) 
 | Flag | Description |
 |------|-------------|
 | `--help, -h` | Display help information |
+| `--version` | Show RouteMUX version and build date |
 | `--upgrade` | Self update the RouteMUX binary to the latest release version |
+| `--no-strict-yaml` | Disable strict YAML parsing (allow unknown config keys) |
+| `--validate` | Validate configuration and exit without serving |
 
 ### Daemonizing RouteMUX
 
-RouteMUX can be started as daemon by appending `start` or `watch-start` command with other CLI arguments. Job control commands `stop`, `status`, or `restart` can be used to control the daemon process. RouteMUX daemon job control works by identifying the process that was started from same working directory with same executable path, and under same user. This way, RouteMUX allows to have multiple daemon process with job control from multiple working directories, and multiple users.
+RouteMUX can be started as daemon by appending `start` or `watch-start` command with other CLI arguments. Job control commands `stop`, `status`, `reload`, or `restart` can be used to control the daemon process. RouteMUX daemon job control works by identifying the process that was started from same working directory with same executable path, and under same user. This way, RouteMUX allows to have multiple daemon process with job control from multiple working directories, and multiple users.
 
 `watch-start` is the recommended way to start the RouteMUX daemon, unlike simple `start`, this also starts a watchdog daemon that monitor the RouteMUX process. In event of server process failure, the watchdog will restart the process. Additionally, in this mode a logfile will be attached to the daemon, that can be monitored for output and errors. The logfile can be inspected as `tail -f /path/to/logfile-watchdog.log`.
 
 Currently RouteMUX daemonizing feature only supports UNIX like (specifically POSIX) systems, and does not support Windows OS.
+
+### Graceful reload of configuration
+
+RoutuMUX can gracefully relaod configuration without requiring server restart or interrupting ongoing connections. The reload is triggered on config file change, or by daemon `reload` command, or by issuing SIGHUP signal to the running server process. On Windows, reload is only triggered by config file change. While reloading, if any error is encountered, then RouteMUX will report and continue to run with previous working version of the configuration.
 
 ### Examples
 

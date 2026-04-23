@@ -7,7 +7,6 @@ import (
 	"net/url"
 	"os"
 	"reflect"
-	"sync"
 	"strings"
 	"gopkg.in/yaml.v3"
 )
@@ -256,10 +255,9 @@ func (r *fileRoute) UnmarshalYAML(value *yaml.Node) error {
 // reflection only runs once per type, not on every decode call.
 var (
 	yamlFieldsCache   = map[reflect.Type]map[string]struct{}{}
-	yamlFieldsCacheMu sync.RWMutex
 
-	// strictYAML controls whether unknown YAML keys are rejected.
-	// Set to false by --no-strict-yaml CLI flag. Checked by all UnmarshalYAML methods.
+// strictYAML controls whether unknown YAML keys are rejected.
+// Set to false by --no-strict-yaml CLI flag. Checked by all UnmarshalYAML methods.
 	strictYAML = true
 )
 
@@ -269,12 +267,9 @@ func knownYAMLFields(t reflect.Type) map[string]struct{} {
 	if t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
-	yamlFieldsCacheMu.RLock()
 	if m, ok := yamlFieldsCache[t]; ok {
-		yamlFieldsCacheMu.RUnlock()
 		return m
 	}
-	yamlFieldsCacheMu.RUnlock()
 
 	m := make(map[string]struct{})
 	for i := 0; i < t.NumField(); i++ {
@@ -291,9 +286,7 @@ func knownYAMLFields(t reflect.Type) map[string]struct{} {
 		}
 	}
 
-	yamlFieldsCacheMu.Lock()
 	yamlFieldsCache[t] = m
-	yamlFieldsCacheMu.Unlock()
 	return m
 }
 

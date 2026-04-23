@@ -3922,7 +3922,7 @@ routes:
 	defer os.Remove(f.Name())
 
 	// Reset strict mode (may have been altered by other tests)
-	strictYAML.Store(true)
+	strictYAML = true
 
 	_, err := parseAll([]string{"--config", f.Name()})
 	if err == nil {
@@ -3932,8 +3932,8 @@ routes:
 
 func TestNoStrictYAML_CLIFlag(t *testing.T) {
 	// Verify the flag is correctly parsed and stored
-	strictYAML.Store(true) // reset
-	defer strictYAML.Store(true) // restore after test
+	strictYAML = true // reset
+	defer func() { strictYAML = true }() // restore after test
 
 	yml := `
 global:
@@ -3951,7 +3951,7 @@ routes:
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if strictYAML.Load() {
+	if strictYAML {
 		t.Error("strictYAML should be false after --no-strict-yaml")
 	}
 }
