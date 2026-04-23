@@ -5,11 +5,18 @@ import "testing"
 // parseArgs is in daemon_unix.go (build tag !windows) and daemon_windows.go.
 // These tests run on the current platform.
 
-
-// ---- daemon parseArgs tests ----
+// defaultCmds returns the default Commands set used in tests.
+func defaultCmds() Commands {
+	return Commands{
+		Start: "start", WatchStart: "watch-start",
+		Stop: "stop", Restart: "restart",
+		Reload: "reload", Status: "status",
+	}
+}
 
 func TestParseArgs_Start(t *testing.T) {
-	cmd, rest := parseArgs([]string{"--port", "8080", "start"})
+	cmds := defaultCmds()
+	cmd, rest := parseArgs([]string{"--port", "8080", "start"}, &cmds)
 	if cmd != "start" {
 		t.Errorf("command = %q, want start", cmd)
 	}
@@ -19,7 +26,8 @@ func TestParseArgs_Start(t *testing.T) {
 }
 
 func TestParseArgs_Stop(t *testing.T) {
-	cmd, rest := parseArgs([]string{"stop"})
+	cmds := defaultCmds()
+	cmd, rest := parseArgs([]string{"stop"}, &cmds)
 	if cmd != "stop" {
 		t.Errorf("command = %q, want stop", cmd)
 	}
@@ -29,7 +37,8 @@ func TestParseArgs_Stop(t *testing.T) {
 }
 
 func TestParseArgs_Status(t *testing.T) {
-	cmd, rest := parseArgs([]string{"--config", "cfg.yml", "status"})
+	cmds := defaultCmds()
+	cmd, rest := parseArgs([]string{"--config", "cfg.yml", "status"}, &cmds)
 	if cmd != "status" {
 		t.Errorf("command = %q, want status", cmd)
 	}
@@ -39,7 +48,8 @@ func TestParseArgs_Status(t *testing.T) {
 }
 
 func TestParseArgs_Restart(t *testing.T) {
-	cmd, rest := parseArgs([]string{"--port", "443", "restart"})
+	cmds := defaultCmds()
+	cmd, rest := parseArgs([]string{"--port", "443", "restart"}, &cmds)
 	if cmd != "restart" {
 		t.Errorf("command = %q, want restart", cmd)
 	}
@@ -49,7 +59,8 @@ func TestParseArgs_Restart(t *testing.T) {
 }
 
 func TestParseArgs_NoCommand(t *testing.T) {
-	cmd, rest := parseArgs([]string{"--port", "8080", "--config", "c.yml"})
+	cmds := defaultCmds()
+	cmd, rest := parseArgs([]string{"--port", "8080", "--config", "c.yml"}, &cmds)
 	if cmd != "" {
 		t.Errorf("command should be empty for no daemon command, got %q", cmd)
 	}
@@ -59,8 +70,9 @@ func TestParseArgs_NoCommand(t *testing.T) {
 }
 
 func TestParseArgs_CommandInMiddle(t *testing.T) {
+	cmds := defaultCmds()
 	// parseArgs scans right-to-left — last occurrence of command word wins
-	cmd, rest := parseArgs([]string{"--port", "8080", "start", "--config", "cfg.yml"})
+	cmd, rest := parseArgs([]string{"--port", "8080", "start", "--config", "cfg.yml"}, &cmds)
 	if cmd != "start" {
 		t.Errorf("command = %q, want start", cmd)
 	}
@@ -71,7 +83,8 @@ func TestParseArgs_CommandInMiddle(t *testing.T) {
 }
 
 func TestParseArgs_Empty(t *testing.T) {
-	cmd, rest := parseArgs([]string{})
+	cmds := defaultCmds()
+	cmd, rest := parseArgs([]string{}, &cmds)
 	if cmd != "" {
 		t.Errorf("empty args: command should be empty, got %q", cmd)
 	}

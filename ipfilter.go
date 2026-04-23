@@ -8,6 +8,8 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"reflect"
+	"gopkg.in/yaml.v3"
 	"path/filepath"
 	"os"
 	"strings"
@@ -509,6 +511,20 @@ func cidrContains(nets []net.IPNet, ip net.IP) bool {
 type IPFilterConfig struct {
 	Blocked []string `yaml:"blocked"`
 	Allowed []string `yaml:"allowed"`
+}
+
+// UnmarshalYAML for IPFilterConfig — detects unknown ip-filter keys.
+func (cfg *IPFilterConfig) UnmarshalYAML(value *yaml.Node) error {
+	if err := checkUnknownFields(value, reflect.TypeOf(IPFilterConfig{})); err != nil {
+		return err
+	}
+	type plain IPFilterConfig
+	var tmp plain
+	if err := value.Decode(&tmp); err != nil {
+		return err
+	}
+	*cfg = IPFilterConfig(tmp)
+	return nil
 }
 
 // TrustedProxiesConfig is the YAML structure for the trusted-proxies global block.

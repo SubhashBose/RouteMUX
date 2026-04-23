@@ -6,6 +6,8 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"reflect"
+	"sync"
 	"strings"
 	"gopkg.in/yaml.v3"
 )
@@ -226,6 +228,10 @@ func (d *destValue) UnmarshalYAML(value *yaml.Node) error {
 // UnmarshalYAML implements yaml.Unmarshaler so we can detect whether the
 // "auth" key was present in the document (even when its value is empty/null).
 func (r *fileRoute) UnmarshalYAML(value *yaml.Node) error {
+	// Check for unknown keys before decoding — catches typos early.
+	if err := checkUnknownFields(value, reflect.TypeOf(fileRoute{})); err != nil {
+		return err
+	}
 	// Alias type prevents infinite recursion when calling Decode.
 	type plain fileRoute
 	var tmp plain
@@ -243,6 +249,107 @@ func (r *fileRoute) UnmarshalYAML(value *yaml.Node) error {
 			}
 		}
 	}
+	return nil
+}
+
+// yamlFieldsCache caches the known yaml field names per struct type so
+// reflection only runs once per type, not on every decode call.
+var (
+	yamlFieldsCache   = map[reflect.Type]map[string]struct{}{}
+	yamlFieldsCacheMu sync.RWMutex
+)
+
+// knownYAMLFields returns a set of yaml tag names for the given struct type,
+// building and caching the result on first use.
+func knownYAMLFields(t reflect.Type) map[string]struct{} {
+	if t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	yamlFieldsCacheMu.RLock()
+	if m, ok := yamlFieldsCache[t]; ok {
+		yamlFieldsCacheMu.RUnlock()
+		return m
+	}
+	yamlFieldsCacheMu.RUnlock()
+
+	m := make(map[string]struct{})
+	for i := 0; i < t.NumField(); i++ {
+		tag := t.Field(i).Tag.Get("yaml")
+		if tag == "" || tag == "-" {
+			continue
+		}
+		// Tag may be "name,omitempty" — take only the name part.
+		if idx := strings.IndexByte(tag, ','); idx >= 0 {
+			tag = tag[:idx]
+		}
+		if tag != "" {
+			m[tag] = struct{}{}
+		}
+	}
+
+	yamlFieldsCacheMu.Lock()
+	yamlFieldsCache[t] = m
+	yamlFieldsCacheMu.Unlock()
+	return m
+}
+
+// checkUnknownFields returns an error if the YAML mapping node contains any
+// key not present as a yaml struct tag on the given type. Derives the
+// known-field set from struct tags via reflection — stays in sync with the
+// struct definition automatically, no hand-written lists to maintain.
+func checkUnknownFields(node *yaml.Node, t reflect.Type) error {
+	if node.Kind != yaml.MappingNode {
+		return nil
+	}
+	knownSet := knownYAMLFields(t)
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		key := node.Content[i].Value
+		if _, ok := knownSet[key]; !ok {
+			return fmt.Errorf("line %d: unknown config key %q", node.Content[i].Line, key)
+		}
+	}
+	return nil
+}
+
+// UnmarshalYAML for fileConfig — detects unknown top-level keys.
+func (fc *fileConfig) UnmarshalYAML(value *yaml.Node) error {
+	if err := checkUnknownFields(value, reflect.TypeOf(fileConfig{})); err != nil {
+		return err
+	}
+	type plain fileConfig
+	var tmp plain
+	if err := value.Decode(&tmp); err != nil {
+		return err
+	}
+	*fc = fileConfig(tmp)
+	return nil
+}
+
+// UnmarshalYAML for fileGlobal — detects unknown global keys.
+func (fg *fileGlobal) UnmarshalYAML(value *yaml.Node) error {
+	if err := checkUnknownFields(value, reflect.TypeOf(fileGlobal{})); err != nil {
+		return err
+	}
+	type plain fileGlobal
+	var tmp plain
+	if err := value.Decode(&tmp); err != nil {
+		return err
+	}
+	*fg = fileGlobal(tmp)
+	return nil
+}
+
+// UnmarshalYAML for fileVHost — detects unknown vhost keys.
+func (fv *fileVHost) UnmarshalYAML(value *yaml.Node) error {
+	if err := checkUnknownFields(value, reflect.TypeOf(fileVHost{})); err != nil {
+		return err
+	}
+	type plain fileVHost
+	var tmp plain
+	if err := value.Decode(&tmp); err != nil {
+		return err
+	}
+	*fv = fileVHost(tmp)
 	return nil
 }
 

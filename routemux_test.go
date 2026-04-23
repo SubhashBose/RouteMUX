@@ -3573,7 +3573,7 @@ routes:
 
 	// Fire 10 rapid triggers — debounce should coalesce into 1 reload
 	for i := 0; i < 10; i++ {
-		srv.scheduledReload()
+		srv.scheduledReload(false)
 	}
 
 	// Wait for debounce window (200ms) + a little buffer
@@ -3623,7 +3623,7 @@ routes:
 
 	done := make(chan struct{})
 	go func() {
-		srv.Reload() // should return immediately (lock already held)
+		srv.Reload(false) // should return immediately (lock already held)
 		close(done)
 	}()
 
@@ -3670,7 +3670,7 @@ routes:
 	// The reload should not have fired at 250ms (before the last reset settles).
 	go func() {
 		for i := 0; i < 3; i++ {
-			srv.scheduledReload()
+			srv.scheduledReload(false)
 			time.Sleep(100 * time.Millisecond)
 		}
 	}()
@@ -3695,5 +3695,183 @@ routes:
 
 	if !timerGone {
 		t.Error("debounce timer should be nil after reload completed")
+	}
+}
+// ---- Unknown config key detection tests ----
+
+func TestUnknownKey_TopLevel(t *testing.T) {
+	yml := `
+global:
+  port: 8080
+typo-key: bad
+routes:
+  /:
+    dest: http://localhost:3000/
+`
+	f, _ := os.CreateTemp("", "routemux-*.yml")
+	f.WriteString(yml)
+	f.Close()
+	defer os.Remove(f.Name())
+
+	_, err := loadConfigFile(f.Name())
+	if err == nil {
+		t.Error("expected error for unknown top-level key")
+	}
+	if err != nil && !strings.Contains(err.Error(), "typo-key") {
+		t.Errorf("error should mention the unknown key, got: %v", err)
+	}
+}
+
+func TestUnknownKey_Global(t *testing.T) {
+	yml := `
+global:
+  port: 8080
+  prot: 9090
+routes:
+  /:
+    dest: http://localhost:3000/
+`
+	f, _ := os.CreateTemp("", "routemux-*.yml")
+	f.WriteString(yml)
+	f.Close()
+	defer os.Remove(f.Name())
+
+	_, err := loadConfigFile(f.Name())
+	if err == nil {
+		t.Error("expected error for unknown global key 'prot' (typo of 'port')")
+	}
+	if err != nil && !strings.Contains(err.Error(), "prot") {
+		t.Errorf("error should mention 'prot', got: %v", err)
+	}
+}
+
+func TestUnknownKey_Route(t *testing.T) {
+	yml := `
+global:
+  port: 8080
+routes:
+  /api/:
+    dest: http://localhost:3000/
+    timout: 30s
+`
+	f, _ := os.CreateTemp("", "routemux-*.yml")
+	f.WriteString(yml)
+	f.Close()
+	defer os.Remove(f.Name())
+
+	_, err := loadConfigFile(f.Name())
+	if err == nil {
+		t.Error("expected error for unknown route key 'timout' (typo of 'timeout')")
+	}
+	if err != nil && !strings.Contains(err.Error(), "timout") {
+		t.Errorf("error should mention 'timout', got: %v", err)
+	}
+}
+
+func TestUnknownKey_VHost(t *testing.T) {
+	yml := `
+global:
+  port: 8080
+vhosts:
+  - domain: ["example.com"]
+    routes:
+      /:
+        dest: http://localhost:3000/
+`
+	f, _ := os.CreateTemp("", "routemux-*.yml")
+	f.WriteString(yml)
+	f.Close()
+	defer os.Remove(f.Name())
+
+	_, err := loadConfigFile(f.Name())
+	if err == nil {
+		t.Error("expected error for unknown vhost key 'domain' (typo of 'domains')")
+	}
+	if err != nil && !strings.Contains(err.Error(), "domain") {
+		t.Errorf("error should mention 'domain', got: %v", err)
+	}
+}
+
+func TestUnknownKey_IPFilter(t *testing.T) {
+	yml := `
+global:
+  port: 8080
+  ip-filter:
+    block:
+      - 10.0.0.0/8
+routes:
+  /:
+    dest: http://localhost:3000/
+`
+	f, _ := os.CreateTemp("", "routemux-*.yml")
+	f.WriteString(yml)
+	f.Close()
+	defer os.Remove(f.Name())
+
+	_, err := loadConfigFile(f.Name())
+	if err == nil {
+		t.Error("expected error for unknown ip-filter key 'block' (typo of 'blocked')")
+	}
+	if err != nil && !strings.Contains(err.Error(), "block") {
+		t.Errorf("error should mention 'block', got: %v", err)
+	}
+}
+
+func TestUnknownKey_ValidConfigPasses(t *testing.T) {
+	yml := `
+global:
+  port: 8080
+  trust-client-headers: false
+  ip-filter:
+    blocked:
+      - 10.0.0.0/8
+    allowed:
+      - 192.168.0.0/16
+vhosts:
+  - domains: ["example.com"]
+    routes:
+      /api/:
+        dest: http://localhost:3000/
+        timeout: 30s
+        dest-add-header:
+          X-Real-IP: ${remote_addr}
+        dest-del-header:
+          - Cookie
+        client-add-header:
+          X-Served-By: RouteMUX
+        client-del-header:
+          - Server
+`
+	f, _ := os.CreateTemp("", "routemux-*.yml")
+	f.WriteString(yml)
+	f.Close()
+	defer os.Remove(f.Name())
+
+	_, err := loadConfigFile(f.Name())
+	if err != nil {
+		t.Errorf("valid config should not error, got: %v", err)
+	}
+}
+
+func TestUnknownKey_ErrorIncludesLineNumber(t *testing.T) {
+	yml := `global:
+  port: 8080
+  unknown-global-key: value
+routes:
+  /:
+    dest: http://localhost:3000/
+`
+	f, _ := os.CreateTemp("", "routemux-*.yml")
+	f.WriteString(yml)
+	f.Close()
+	defer os.Remove(f.Name())
+
+	_, err := loadConfigFile(f.Name())
+	if err == nil {
+		t.Fatal("expected error for unknown key")
+	}
+	// Error should include line number for easy navigation
+	if !strings.Contains(err.Error(), "line") && !strings.Contains(err.Error(), "3") {
+		t.Errorf("error should include line number, got: %v", err)
 	}
 }
