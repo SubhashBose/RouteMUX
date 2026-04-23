@@ -257,6 +257,10 @@ func (r *fileRoute) UnmarshalYAML(value *yaml.Node) error {
 var (
 	yamlFieldsCache   = map[reflect.Type]map[string]struct{}{}
 	yamlFieldsCacheMu sync.RWMutex
+
+	// strictYAML controls whether unknown YAML keys are rejected.
+	// Set to false by --no-strict-yaml CLI flag. Checked by all UnmarshalYAML methods.
+	strictYAML = true
 )
 
 // knownYAMLFields returns a set of yaml tag names for the given struct type,
@@ -297,8 +301,9 @@ func knownYAMLFields(t reflect.Type) map[string]struct{} {
 // key not present as a yaml struct tag on the given type. Derives the
 // known-field set from struct tags via reflection — stays in sync with the
 // struct definition automatically, no hand-written lists to maintain.
+// When --no-strict-yaml is set, this is a no-op.
 func checkUnknownFields(node *yaml.Node, t reflect.Type) error {
-	if node.Kind != yaml.MappingNode {
+	if !strictYAML || node.Kind != yaml.MappingNode {
 		return nil
 	}
 	knownSet := knownYAMLFields(t)

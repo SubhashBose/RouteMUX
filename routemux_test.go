@@ -3875,3 +3875,83 @@ routes:
 		t.Errorf("error should include line number, got: %v", err)
 	}
 }
+
+// ---- --no-strict-yaml flag tests ----
+
+func TestNoStrictYAML_AllowsUnknownKeys(t *testing.T) {
+	// With --no-strict-yaml, unknown keys should be silently ignored
+	yml := `
+global:
+  port: 8080
+  unknown-global-key: ignored
+routes:
+  /:
+    dest: http://localhost:3000/
+    typo-timeout: 30s
+`
+	f, _ := os.CreateTemp("", "routemux-*.yml")
+	f.WriteString(yml)
+	f.Close()
+	defer os.Remove(f.Name())
+
+	cfg, err := parseAll([]string{
+		"--no-strict-yaml",
+		"--config", f.Name(),
+	})
+	if err != nil {
+		t.Errorf("--no-strict-yaml: expected no error for unknown keys, got: %v", err)
+	}
+	if cfg == nil {
+		t.Error("config should not be nil")
+	}
+}
+
+func TestStrictYAML_Default(t *testing.T) {
+	// Without --no-strict-yaml, unknown keys should error
+	yml := `
+global:
+  port: 8080
+  unknown-global-key: value
+routes:
+  /:
+    dest: http://localhost:3000/
+`
+	f, _ := os.CreateTemp("", "routemux-*.yml")
+	f.WriteString(yml)
+	f.Close()
+	defer os.Remove(f.Name())
+
+	// Reset strict mode (may have been altered by other tests)
+	strictYAML.Store(true)
+
+	_, err := parseAll([]string{"--config", f.Name()})
+	if err == nil {
+		t.Error("strict mode (default): expected error for unknown key")
+	}
+}
+
+func TestNoStrictYAML_CLIFlag(t *testing.T) {
+	// Verify the flag is correctly parsed and stored
+	strictYAML.Store(true) // reset
+	defer strictYAML.Store(true) // restore after test
+
+	yml := `
+global:
+  port: 8080
+routes:
+  /:
+    dest: http://localhost:3000/
+`
+	f, _ := os.CreateTemp("", "routemux-*.yml")
+	f.WriteString(yml)
+	f.Close()
+	defer os.Remove(f.Name())
+
+	_, err := parseAll([]string{"--no-strict-yaml", "--config", f.Name()})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strictYAML.Load() {
+		t.Error("strictYAML should be false after --no-strict-yaml")
+	}
+}

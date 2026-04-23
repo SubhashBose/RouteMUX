@@ -501,6 +501,10 @@ func (s *server) run() error {
 	} else {
 		log.Printf("RouteMUX listening on %s", ln.Addr())
 	}
+	if configValidateOnly {
+		log.Printf("Config validation (only) successful, not serving.")
+		return nil
+	}
 	err = srv.Serve(ln)
 
 	// ErrServerClosed is the normal return after Shutdown() — not an error.

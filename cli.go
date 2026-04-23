@@ -12,6 +12,7 @@ import (
 )
 
 var version = "0.4"
+var buildDate = ""
 
 // parseAll merges config file + CLI args into a final Config.
 // CLI args take precedence over config file.
@@ -23,7 +24,7 @@ func parseAll(args []string) (*Config, error) {
 	skipConfig := false
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
-		case "--help", "-h", "--upgrade":
+		case "--help", "-h", "--upgrade", "--version":
 			skipConfig = true
 		case "--config":
 			if i+1 < len(args) {
@@ -31,6 +32,10 @@ func parseAll(args []string) (*Config, error) {
 				explicitConfig = true
 				i++
 			}
+		case "--no-strict-yaml":
+			// Disable strict YAML parsing before config file is loaded so the
+			// flag takes effect during yaml.Unmarshal.
+			strictYAML=false
 		}
 	}
 	if !skipConfig && !explicitConfig {
@@ -148,6 +153,8 @@ func expandArgs(in []string) []string {
 	}
 	return out
 }
+
+var configValidateOnly = false
 
 func applyCLI(cfg *Config, rawArgs []string) error {
 	args := expandArgs(rawArgs)
@@ -460,6 +467,16 @@ func applyCLI(cfg *Config, rawArgs []string) error {
 		case "--help", "-h":
 			printHelp()
 			os.Exit(0)
+		case "--no-strict-yaml":
+			// Already handled in the first pass before config file loading.
+			// Consumed here so the second pass doesn't treat it as unknown.
+			i++
+		case "--version":
+			fmt.Printf("RouteMUX version %s %s\n", version, buildDate)
+			os.Exit(0)
+		case "--validate":
+			configValidateOnly = true
+			i++
 		default:
 			return fmt.Errorf("unknown argument: %q", arg)
 		}
@@ -599,7 +616,10 @@ Daemon options:
 	fmt.Print(`
 General flags:
   --help, -h               Show this help
+  --version                Show RouteMUX version
   --upgrade                Self-upgrade RouteMUX to the latest version
+  --no-strict-yaml         Disable strict YAML parsing (allow unknown config keys)
+  --validate               Validate configuration and exit without serving.
 
 Sets of --route followed by route options can be repeated to define multiple routes.
 Options in command line and config.yml file are combined, where command line options takes precedence.

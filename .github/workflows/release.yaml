@@ -16,6 +16,7 @@ jobs:
     outputs:
       tagname: ${{ steps.resolve_tag.outputs.tag }}
       version: ${{ steps.resolve_tag.outputs.version }}
+      builddate: ${{ steps.resolve_tag.outputs.builddate }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -46,6 +47,7 @@ jobs:
 
           echo "tag=$candidate" >> $GITHUB_OUTPUT
           echo "version=${candidate#v}" >> $GITHUB_OUTPUT
+          echo "builddate=(built $(date -u +'%Y-%m-%d-%H:%M UTC'))" >> $GITHUB_OUTPUT
 
       #- name: Create tag
       #  id: create_time_tag
@@ -86,7 +88,7 @@ jobs:
           goos: ${{ matrix.goos }}
           goarch: ${{ matrix.goarch }}
           goversion: "1.24"
-          ldflags: "-w -s -buildid= -X main.version=${{ needs.create-release.outputs.version }}"
+          ldflags: '-w -s -buildid= -X main.version=${{ needs.create-release.outputs.version }} -X "main.buildDate=${{ needs.create-release.outputs.builddate }}"'
           md5sum: false
           release_tag: ${{ needs.create-release.outputs.tagname }}
           asset_name: "routemux-${{ matrix.goos }}-${{ matrix.goarch }}"
