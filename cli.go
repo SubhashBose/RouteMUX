@@ -472,7 +472,11 @@ func applyCLI(cfg *Config, rawArgs []string) error {
 			// Consumed here so the second pass doesn't treat it as unknown.
 			i++
 		case "--version":
-			fmt.Printf("RouteMUX version %s %s\n", version, buildDate)
+			if buildDate != "" {
+				fmt.Printf("RouteMUX version %s (built %s)\n", version, buildDate)
+			} else {
+				fmt.Printf("RouteMUX version %s\n", version)
+			}
 			os.Exit(0)
 		case "--validate":
 			configValidateOnly = true

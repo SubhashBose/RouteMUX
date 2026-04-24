@@ -47,7 +47,7 @@ jobs:
 
           echo "tag=$candidate" >> $GITHUB_OUTPUT
           echo "version=${candidate#v}" >> $GITHUB_OUTPUT
-          echo "builddate=(built $(date -u +'%Y-%m-%d-%H:%M UTC'))" >> $GITHUB_OUTPUT
+          echo "builddate=$(date -u +'%Y-%m-%d-%H:%M UTC')" >> $GITHUB_OUTPUT
 
       #- name: Create tag
       #  id: create_time_tag

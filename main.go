@@ -27,6 +27,12 @@ func run() {
 		os.Exit(1)
 	}
 
+	// --validate: config parsed and validated successfully — exit without serving.
+	if configValidateOnly {
+		fmt.Println("Config OK.")
+		return
+	}
+
 	server, err := newServer(cfg)
 	if err != nil {
 		log.Fatalf("Failed to create server: %v", err)
