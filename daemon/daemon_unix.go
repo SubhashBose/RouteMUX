@@ -51,8 +51,8 @@ type Config struct {
 	// Logger file to used for daemon-internal messages. Logging defaults to log.Default().
 	LoggerFile string
 
-	// WatchdogLogger file to used for watchdog messages. Logging defaults to log.Default().
-	// Defaults to same as Logger if it is set, otherwise log file is PID-file basename with "-watchdog.log".
+	// WatchdogLogger file to used for watchdog messages.
+	// Defaults to same as LoggerFile if it is set, otherwise log file is PID-file basename with "-watchdog.log".
 	WatchdogLoggerFile string
 
 	// Restart (when watch-start) worker on clean exit too. Default is restart on error only
@@ -64,6 +64,10 @@ type Config struct {
 	// set like this in your main daemon.Config: (omit the commands not needed) 
 	//daemon.Commands{Start: "start", WatchStart: "watch-start", Stop: "stop", Restart: "restart", Reload: "reload", Status: "status"},
 	CommandStrings Commands
+
+	// Log and PID file modtime refresh interval to avoid OS cleaning up /tmp.
+	// Defaults to 12h.
+	TmpFileTouchInterval time.Duration
 	
 	// (internal variables) Logger is used for daemon-internal messages. Defaults to log.Default().
 	logger *log.Logger
@@ -99,39 +103,37 @@ var watchdogShuttingDown atomic.Bool
 //	./myapp [flags] status       — print whether the daemon is running
 //	./myapp [flags]              — run attached to the terminal (no daemonizing)
 func Handle(cfg Config) {
-	if cfg.LoggerFile == "" {
-		cfg.logger = log.Default()
-	} else {
-		f, err := os.OpenFile(cfg.LoggerFile, os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0644)
-		if err == nil {
-			cfg.logger = log.New(f, "", log.LstdFlags)
-			//cfg.logger.Printf("%s: started logging to %s", cfg.AppName, cfg.LoggerFile)
+
+	setBasicDefaults := func() {
+		if cfg.TmpFileTouchInterval == 0 {
+			cfg.TmpFileTouchInterval = 12 * time.Hour
 		}
+		if cfg.AppName == "" {
+			exe, _ := os.Executable()
+			cfg.AppName = filepath.Base(exe)
+		}
+		if cfg.PidfilePrefix == "" {
+			exe, _ := os.Executable()
+			cfg.PidfilePrefix = filepath.Base(exe)
+		}
+		if cfg.WaitAfterStart == 0 {
+			cfg.WaitAfterStart = 500 * time.Millisecond
+		}
+		if cfg.WatchdogRestartDelay == 0 {
+			cfg.WatchdogRestartDelay = 2 * time.Second
+		}
+		// Always have a valid logger as fallback
+		cfg.logger = log.Default()
 	}
-	if cfg.AppName == "" {
-		exe, _ := os.Executable()
-		cfg.AppName = filepath.Base(exe)
-	}
-	if cfg.PidfilePrefix == "" {
-		exe, _ := os.Executable()
-		cfg.PidfilePrefix = filepath.Base(exe)
-	}
-	if cfg.WaitAfterStart == 0 {
-		cfg.WaitAfterStart = 500 * time.Millisecond
-	}
-	if cfg.WatchdogRestartDelay == 0 {
-		cfg.WatchdogRestartDelay = 2 * time.Second
-	}
-	//if cfg.watchdogLogger == nil {
-	//	cfg.watchdogLogger = cfg.logger
-	//}
-	if cfg.CommandStrings == (Commands{}) {
-		cfg.CommandStrings.Start = "start"
-		cfg.CommandStrings.WatchStart = "watch-start"
-		cfg.CommandStrings.Stop = "stop"
-		cfg.CommandStrings.Restart = "restart"
-		cfg.CommandStrings.Reload = "reload"
-		cfg.CommandStrings.Status = "status"
+	
+	initLogger := func() {
+		if cfg.LoggerFile != "" {
+			f, err := os.OpenFile(cfg.LoggerFile, os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0644)
+			if err == nil {
+				cfg.logger = log.New(f, "", log.LstdFlags)
+				refreshModTime(cfg.LoggerFile, cfg.TmpFileTouchInterval)
+			}
+		}
 	}
 
 	// Role: plain worker (child of watchdog) — just run OnStart, no PID file handling.
@@ -145,30 +147,39 @@ func Handle(cfg Config) {
 
 	// Role: watchdog daemon — monitor and restart the worker.
 	if os.Getenv(watchdogEnvVar) == "1" {
+		setBasicDefaults()
 		cfg.pidFile = os.Getenv(pidFileEnvVar)
 		cfg.AppName = cfg.AppName + " watchdog"
+		refreshModTime(cfg.pidFile, cfg.TmpFileTouchInterval)
 		runWatchdog(&cfg)
 		return
 	}
 
 	// Role: plain daemon — set up graceful shutdown and run OnStart.
 	if pidFile := os.Getenv(pidFileEnvVar); pidFile != "" {
+		setBasicDefaults()
+		initLogger()
 		cfg.pidFile = pidFile
 		setupGracefulShutdown(&cfg, nil)
+		refreshModTime(cfg.pidFile, cfg.TmpFileTouchInterval)
 		if cfg.OnStart != nil {
 			cfg.OnStart()
 		}
 		return
 	}
 
+
+	if cfg.CommandStrings == (Commands{}) {
+		cfg.CommandStrings.Start = "start"
+		cfg.CommandStrings.WatchStart = "watch-start"
+		cfg.CommandStrings.Stop = "stop"
+		cfg.CommandStrings.Restart = "restart"
+		cfg.CommandStrings.Reload = "reload"
+		cfg.CommandStrings.Status = "status"
+	}
+
 	// Role: parent — parse command and act.
 	command, passArgs := parseArgs(os.Args[1:], &cfg.CommandStrings)
-
-	pidFile, err := pidFilePath(cfg)
-	cfg.pidFile = pidFile
-	if err != nil {
-		cfg.logger.Fatalf("%s daemon: cannot determine PID file path: %v", cfg.AppName, err)
-	}
 
 	/*
 	switch command {
@@ -205,6 +216,14 @@ func Handle(cfg Config) {
 		cfg.CommandStrings.Status:     func() { handleStatus(&cfg) },
 	}
 	if handler, ok := handlers[command]; command != "" && ok {
+		setBasicDefaults()
+		initLogger()
+		pidFile, err := pidFilePath(cfg)
+		if err != nil {
+			cfg.logger.Fatalf("%s daemon: cannot determine PID file path: %v", cfg.AppName, err)
+		}
+		cfg.pidFile = pidFile
+
 		handler()
 	} else {
 		if cfg.OnStart != nil {
@@ -367,16 +386,15 @@ func fileExists(path string) bool {
 func runWatchdog(cfg *Config) {
 	exe, _ := filepath.Abs(mustExecutable())
 
-	if wg_logf := getWatchdogLogfileName(cfg); wg_logf != cfg.LoggerFile {
-		cfg.WatchdogLoggerFile= wg_logf
-		
-        f, err := os.OpenFile(cfg.WatchdogLoggerFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-        if err == nil {
-            cfg.logger = log.New(f, "", log.LstdFlags)
-			cfg.LoggerFile = cfg.WatchdogLoggerFile
-            cfg.logger.Printf("%s: started logging to %s", cfg.AppName, cfg.WatchdogLoggerFile)
-        }
-    }
+	cfg.WatchdogLoggerFile = getWatchdogLogfileName(cfg)
+	
+	f, err := os.OpenFile(cfg.WatchdogLoggerFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err == nil {
+		cfg.logger = log.New(f, "", log.LstdFlags)
+		cfg.LoggerFile = cfg.WatchdogLoggerFile
+		cfg.logger.Printf("%s: started logging to %s", cfg.AppName, cfg.WatchdogLoggerFile)
+		refreshModTime(cfg.WatchdogLoggerFile, cfg.TmpFileTouchInterval)
+	}
 
 	// Build a clean env for the worker: strip watchdog/pidfile markers, add worker marker.
 	baseEnv := make([]string, 0, len(os.Environ()))
@@ -727,4 +745,22 @@ func tailFile(path string, n int) error {
 	fmt.Println()
 
 	return scanner.Err()
+}
+
+// refreshModTime touches the file every interval to prevent
+// the OS from cleaning it up from /tmp due to inactivity.
+func refreshModTime(path string, interval time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for range ticker.C {
+			now := time.Now()
+			if err := os.Chtimes(path, now, now); err != nil {
+				// File may have been deleted externally — stop refreshing.
+				//return
+				
+				continue
+			}
+		}
+	}()
 }
