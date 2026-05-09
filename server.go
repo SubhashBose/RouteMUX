@@ -175,7 +175,7 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 	if rc.StaticFilePath != "" {
 		filePath := rc.StaticFilePath
 		statuscode := rc.StatusCode
-		contentType := rc.StaticFileContentType
+		contentType := guessContentType(filePath)
 		var h http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			fileBytes, err := os.ReadFile(filePath)
 			if err != nil {
@@ -187,8 +187,8 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 				}
 				return
 			}
-			manipulateClientHeaders(w.Header(), nil, r, rc)
 			w.Header().Set("Content-Type", contentType)
+			manipulateClientHeaders(w.Header(), nil, r, rc)
 			w.WriteHeader(statuscode)
 			w.Write(fileBytes) //nolint:errcheck
 		})

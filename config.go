@@ -124,7 +124,6 @@ type RouteConfig struct {
 	StatusCode         int               // non-zero: static response route
 	StatusText         string            // body text for static response
 	StaticFilePath     string            // non-empty: serve this file as the response
-	StaticFileContentType string         // content-type override; auto-detected from extension if empty
 	NoTLSVerify        bool              // skip TLS verification for all upstreams
 	Auth               *Auth             // nil = inherit global-auth; explicitly cleared = no auth
 	AuthExplicit       bool              // true when auth was set explicitly (even as empty)
@@ -495,26 +494,26 @@ func parseDestField(dest string) (code int, text string, isStatus bool) {
 
 
 // parseFileField checks if a dest value is a FILE directive.
-// Format: "FILE <code> <path> [content-type]" (case-insensitive).
-// Returns (statusCode, filePath, contentType, isFile).
+// Format: "FILE <code> <path>  |  FILE <path>" (case-insensitive).
+// Returns (statusCode, filePath, isFile).
 // If content-type is omitted, it is auto-detected from the file extension.
-func parseFileField(dest string) (code int, filePath, contentType string, isFile bool) {
+func parseFileField(dest string) (code int, filePath string, isFile bool) {
 	if !strings.HasPrefix(strings.ToUpper(dest), "FILE ") {
-		return 0, "", "", false
+		return 0, "", false
 	}
 	fields := strings.Fields(dest[5:]) // strip "FILE "
+	if len(fields) < 1 {
+		return 0, "", false
+	}
 	if len(fields) < 2 {
-		return 0, "", "", false
+		return 200, fields[0], true
 	}
 	var n int
 	if _, err := fmt.Sscanf(fields[0], "%d", &n); err != nil || n < 100 || n > 599 {
-		return 0, "", "", false
+		return 0, "", false
 	}
 	filePath = fields[1]
-	if len(fields) >= 3 {
-		contentType = fields[2]
-	}
-	return n, filePath, contentType, true
+	return n, filePath, true
 }
 
 // guessContentType returns a basic content-type for the given filename based
@@ -598,15 +597,10 @@ func applyDestEntries(rc *RouteConfig, entries []string, routePath string) error
 			rc.StatusText = text
 			return nil
 		}
-		code, filePath, ct, isFile := parseFileField(entries[0])
+		code, filePath, isFile := parseFileField(entries[0])
 		if isFile {
 			rc.StatusCode = code
 			rc.StaticFilePath = filePath
-			if ct != "" {
-				rc.StaticFileContentType = ct
-			} else {
-				rc.StaticFileContentType = guessContentType(filePath)
-			}
 			return nil
 		}
 		parsed, err := url.Parse(entries[0])
