@@ -150,7 +150,9 @@ func (s *server) buildMux(routes map[string]*RouteConfig, cfg *Config) (*http.Se
 			pattern += "/"
 		}
 		mux.Handle(pattern, handler)
-		if rc.StatusCode != 0 {
+		if rc.StaticFilePath != "" {
+			log.Printf("  route %s  →  FILE %s", pattern, rc.StaticFilePath)
+		} else if rc.StatusCode != 0 {
 			log.Printf("  route %s  →  STATUS %d", pattern, rc.StatusCode)
 		} else {
 			urls := make([]string, len(rc.Upstreams))
@@ -165,6 +167,38 @@ func (s *server) buildMux(routes map[string]*RouteConfig, cfg *Config) (*http.Se
 
 // buildRouteHandler creates the http.Handler for one route.
 func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc *RouteConfig, cfg *Config) (http.Handler, error) {
+	// -- Static FILE response route --
+	// File is read from disk on every request so updated content is served
+	// immediately without a reload. The OS page cache means repeated reads
+	// of the same file are served from RAM, not physical disk.
+	// If the file is not found at request time, a 404 is returned.
+	if rc.StaticFilePath != "" {
+		filePath := rc.StaticFilePath
+		statuscode := rc.StatusCode
+		contentType := rc.StaticFileContentType
+		var h http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			fileBytes, err := os.ReadFile(filePath)
+			if err != nil {
+				if os.IsNotExist(err) {
+					http.Error(w, "Not Found", http.StatusNotFound)
+				} else {
+					http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+					log.Printf("file route %q: error reading %q: %v", filePath, filePath, err)
+				}
+				return
+			}
+			manipulateClientHeaders(w.Header(), nil, r, rc)
+			w.Header().Set("Content-Type", contentType)
+			w.WriteHeader(statuscode)
+			w.Write(fileBytes) //nolint:errcheck
+		})
+		effectiveAuth := cfg.GlobalAuth
+		if rc.AuthExplicit {
+			effectiveAuth = rc.Auth
+		}
+		return requireBasicAuth(effectiveAuth, h), nil
+	}
+
 	// -- Static STATUS response route --
 	if rc.StatusCode != 0 {
 		var h http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

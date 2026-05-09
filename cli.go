@@ -586,8 +586,10 @@ Route options (must follow --route PATH):
   --dest URL               Upstream destination URL (repeatable).
                            Repeated --dest <URL> [weight=<N>] per route forms load-balancer,
                            where weight is optional, default is 1.
-                           --dest STATUS <code> [text] is also supported, where a HTTP
+         or HTTP_CODE      --dest STATUS <code> [text] is also supported, where a HTTP
                            response code is returned with optional static text body.
+         or FILE           --dest FILE <code> <path> [content-type] serves a static file.
+                           Content-type is auto-detected from extension if omitted.
   --load-balancer-mode     Load balancer mode, "round-robin" or "random", (default: random) 
   --noTLSverify            Skip TLS verification for upstream(s)
   --auth U:P               Per-route Basic Auth (overrides global-auth; "" disables auth)
@@ -672,6 +674,9 @@ Config file (config.yml) example:
 
         "/health/":
            dest: STATUS 200 Health is ok
+
+        "/file/":
+           dest: FILE 200 ./static/file.txt
 
 The 'domains' and set of 'route' under it is repeatable for different hosts.
 The 'vhost' and 'domains' can be omitted if there is no host/domain configuration needed. 

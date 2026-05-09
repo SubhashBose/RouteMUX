@@ -3955,3 +3955,277 @@ routes:
 		t.Error("strictYAML should be false after --no-strict-yaml")
 	}
 }
+// ---- FILE static route tests ----
+
+func TestParseFileField_Basic(t *testing.T) {
+	code, path, ct, ok := parseFileField("FILE 200 /tmp/index.html")
+	if !ok { t.Fatal("should be FILE directive") }
+	if code != 200 { t.Errorf("code = %d, want 200", code) }
+	if path != "/tmp/index.html" { t.Errorf("path = %q", path) }
+	if ct != "" { t.Errorf("ct should be empty (auto-detect), got %q", ct) }
+}
+
+func TestParseFileField_WithContentType(t *testing.T) {
+	code, path, ct, ok := parseFileField("FILE 200 /tmp/data.bin application/octet-stream")
+	if !ok { t.Fatal("should be FILE directive") }
+	if code != 200 { t.Errorf("code = %d, want 200", code) }
+	if path != "/tmp/data.bin" { t.Errorf("path = %q", path) }
+	if ct != "application/octet-stream" { t.Errorf("ct = %q", ct) }
+}
+
+func TestParseFileField_CaseInsensitive(t *testing.T) {
+	_, _, _, ok := parseFileField("file 200 /tmp/x.html")
+	if !ok { t.Error("FILE directive should be case-insensitive") }
+}
+
+func TestParseFileField_NotAFileDirective(t *testing.T) {
+	_, _, _, ok := parseFileField("http://localhost:3000/")
+	if ok { t.Error("regular URL should not parse as FILE directive") }
+}
+
+func TestGuessContentType(t *testing.T) {
+	cases := []struct{ ext, want string }{
+		{"index.html", "text/html; charset=utf-8"},
+		{"page.htm", "text/html; charset=utf-8"},
+		{"notes.txt", "text/plain; charset=utf-8"},
+		{"app.log", "text/plain; charset=utf-8"},
+		{"style.css", "text/css; charset=utf-8"},
+		{"app.js", "application/javascript"},
+		{"data.json", "application/json"},
+		{"photo.jpg", "image/jpeg"},
+		{"photo.jpeg", "image/jpeg"},
+		{"image.png", "image/png"},
+		{"anim.gif", "image/gif"},
+		{"icon.svg", "image/svg+xml"},
+		{"doc.pdf", "application/pdf"},
+		{"archive.zip", "application/zip"},
+		{"unknown.xyz", "application/octet-stream"},
+		{"noextension", "application/octet-stream"},
+	}
+	for _, tc := range cases {
+		got := guessContentType(tc.ext)
+		if got != tc.want {
+			t.Errorf("guessContentType(%q) = %q, want %q", tc.ext, got, tc.want)
+		}
+	}
+}
+
+func TestFileRoute_ServesContent(t *testing.T) {
+	// Create a temp HTML file
+	f, _ := os.CreateTemp("", "routemux-*.html")
+	f.WriteString("<h1>Hello</h1>")
+	f.Close()
+	defer os.Remove(f.Name())
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/page/": {
+			StatusCode:            200,
+			StaticFilePath:        f.Name(),
+			StaticFileContentType: "text/html; charset=utf-8",
+		},
+	})
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/page/")
+	if err != nil { t.Fatal(err) }
+	if resp.StatusCode != 200 {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "text/html; charset=utf-8" {
+		t.Errorf("Content-Type = %q, want text/html; charset=utf-8", ct)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "<h1>Hello</h1>" {
+		t.Errorf("body = %q, want <h1>Hello</h1>", body)
+	}
+}
+
+func TestFileRoute_CustomStatusCode(t *testing.T) {
+	f, _ := os.CreateTemp("", "routemux-*.html")
+	f.WriteString("Not Found")
+	f.Close()
+	defer os.Remove(f.Name())
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/missing/": {
+			StatusCode:            404,
+			StaticFilePath:        f.Name(),
+			StaticFileContentType: "text/html; charset=utf-8",
+		},
+	})
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	resp, _ := http.Get(ts.URL + "/missing/")
+	if resp.StatusCode != 404 {
+		t.Errorf("status = %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestFileRoute_AutoContentType(t *testing.T) {
+	f, _ := os.CreateTemp("", "routemux-*.json")
+	f.WriteString(`{"ok":true}`)
+	f.Close()
+	defer os.Remove(f.Name())
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/data/": {
+			StatusCode:            200,
+			StaticFilePath:        f.Name(),
+			StaticFileContentType: guessContentType(f.Name()),
+		},
+	})
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	resp, _ := http.Get(ts.URL + "/data/")
+	if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+}
+
+func TestFileRoute_YAML(t *testing.T) {
+	htmlFile, _ := os.CreateTemp("", "routemux-*.html")
+	htmlFile.WriteString("<html>test</html>")
+	htmlFile.Close()
+	defer os.Remove(htmlFile.Name())
+
+	ymlFile, _ := os.CreateTemp("", "routemux-*.yml")
+	ymlFile.WriteString(`
+global:
+  port: 8080
+routes:
+  /page/:
+    dest: FILE 200 ` + htmlFile.Name() + `
+`)
+	ymlFile.Close()
+	defer os.Remove(ymlFile.Name())
+
+	cfg, err := loadConfigFile(ymlFile.Name())
+	if err != nil { t.Fatal(err) }
+
+	rc := cfg.VHosts[0].Routes["/page/"]
+	if rc == nil { t.Fatal("route not found") }
+	if rc.StaticFilePath != htmlFile.Name() {
+		t.Errorf("StaticFilePath = %q, want %q", rc.StaticFilePath, htmlFile.Name())
+	}
+	if rc.StaticFileContentType != "text/html; charset=utf-8" {
+		t.Errorf("content-type = %q, want text/html", rc.StaticFileContentType)
+	}
+	if rc.StatusCode != 200 {
+		t.Errorf("StatusCode = %d, want 200", rc.StatusCode)
+	}
+}
+
+func TestFileRoute_YAML_ExplicitContentType(t *testing.T) {
+	f, _ := os.CreateTemp("", "routemux-*.bin")
+	f.WriteString("binary")
+	f.Close()
+	defer os.Remove(f.Name())
+
+	ymlFile, _ := os.CreateTemp("", "routemux-*.yml")
+	ymlFile.WriteString(`
+global:
+  port: 8080
+routes:
+  /dl/:
+    dest: FILE 200 ` + f.Name() + ` application/octet-stream
+`)
+	ymlFile.Close()
+	defer os.Remove(ymlFile.Name())
+
+	cfg, err := loadConfigFile(ymlFile.Name())
+	if err != nil { t.Fatal(err) }
+	rc := cfg.VHosts[0].Routes["/dl/"]
+	if rc.StaticFileContentType != "application/octet-stream" {
+		t.Errorf("explicit ct = %q", rc.StaticFileContentType)
+	}
+}
+
+func TestFileRoute_MissingFileReturns404(t *testing.T) {
+	// File is read per-request; missing file should return 404, not crash startup.
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/page/": {
+			StatusCode:            200,
+			StaticFilePath:        "/nonexistent/path/file.html",
+			StaticFileContentType: "text/html; charset=utf-8",
+		},
+	})
+	// validate() should succeed — missing file is a runtime 404, not a config error
+	if err := cfg.validate(); err != nil {
+		t.Errorf("validate should not fail for missing file, got: %v", err)
+	}
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	resp, _ := http.Get(ts.URL + "/page/")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("missing file: status = %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestFileRoute_FileUpdatedWithoutReload(t *testing.T) {
+	// File is read per-request — updated content is served without a reload.
+	f, _ := os.CreateTemp("", "routemux-*.html")
+	f.WriteString("version 1")
+	f.Close()
+	defer os.Remove(f.Name())
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/page/": {
+			StatusCode:            200,
+			StaticFilePath:        f.Name(),
+			StaticFileContentType: "text/html; charset=utf-8",
+		},
+	})
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	resp1, _ := http.Get(ts.URL + "/page/")
+	body1, _ := io.ReadAll(resp1.Body)
+	if string(body1) != "version 1" {
+		t.Errorf("initial content = %q, want version 1", body1)
+	}
+
+	// Update the file without reloading the server
+	os.WriteFile(f.Name(), []byte("version 2"), 0644)
+
+	resp2, _ := http.Get(ts.URL + "/page/")
+	body2, _ := io.ReadAll(resp2.Body)
+	if string(body2) != "version 2" {
+		t.Errorf("after update = %q, want version 2 (no reload needed)", body2)
+	}
+}
+
+func TestFileRoute_ClientHeaders(t *testing.T) {
+	// client-del-header and client-add-header should work on FILE routes
+	f, _ := os.CreateTemp("", "routemux-*.txt")
+	f.WriteString("hello")
+	f.Close()
+	defer os.Remove(f.Name())
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/file/": {
+			StatusCode:            200,
+			StaticFilePath:        f.Name(),
+			StaticFileContentType: "text/plain; charset=utf-8",
+			ParsedClientAddHeaders: map[string]parsedHeaderValue{
+				"X-Custom": compileHeaderValue("added"),
+			},
+		},
+	})
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	resp, _ := http.Get(ts.URL + "/file/")
+	if resp.Header.Get("X-Custom") != "added" {
+		t.Errorf("X-Custom = %q, want added", resp.Header.Get("X-Custom"))
+	}
+}

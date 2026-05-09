@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"path/filepath"
 	"os"
 	"reflect"
 	"strings"
@@ -122,6 +123,8 @@ type RouteConfig struct {
 	LBMode             string            // "random" (default) or "round-robin"
 	StatusCode         int               // non-zero: static response route
 	StatusText         string            // body text for static response
+	StaticFilePath     string            // non-empty: serve this file as the response
+	StaticFileContentType string         // content-type override; auto-detected from extension if empty
 	NoTLSVerify        bool              // skip TLS verification for all upstreams
 	Auth               *Auth             // nil = inherit global-auth; explicitly cleared = no auth
 	AuthExplicit       bool              // true when auth was set explicitly (even as empty)
@@ -150,9 +153,10 @@ func (c *Config) validate() error {
 			return fmt.Errorf("vhost %v has no routes", vh.Domains)
 		}
 		for path, r := range vh.Routes {
-			if r.StatusCode == 0 && len(r.Upstreams) == 0 {
+			if r.StatusCode == 0 && len(r.Upstreams) == 0 && r.StaticFilePath == "" {
 				return fmt.Errorf("%v route %q has no dest", vh.Domains, path)
 			}
+
 		}
 	}
 	if (c.TLSCert == "") != (c.TLSKey == "") {
@@ -490,6 +494,66 @@ func parseDestField(dest string) (code int, text string, isStatus bool) {
 }
 
 
+// parseFileField checks if a dest value is a FILE directive.
+// Format: "FILE <code> <path> [content-type]" (case-insensitive).
+// Returns (statusCode, filePath, contentType, isFile).
+// If content-type is omitted, it is auto-detected from the file extension.
+func parseFileField(dest string) (code int, filePath, contentType string, isFile bool) {
+	if !strings.HasPrefix(strings.ToUpper(dest), "FILE ") {
+		return 0, "", "", false
+	}
+	fields := strings.Fields(dest[5:]) // strip "FILE "
+	if len(fields) < 2 {
+		return 0, "", "", false
+	}
+	var n int
+	if _, err := fmt.Sscanf(fields[0], "%d", &n); err != nil || n < 100 || n > 599 {
+		return 0, "", "", false
+	}
+	filePath = fields[1]
+	if len(fields) >= 3 {
+		contentType = fields[2]
+	}
+	return n, filePath, contentType, true
+}
+
+// guessContentType returns a basic content-type for the given filename based
+// on its extension. Falls back to application/octet-stream for unknown types.
+func guessContentType(filename string) string {
+	ext := strings.ToLower(filepath.Ext(filename))
+	switch ext {
+	case ".html", ".htm":
+		return "text/html; charset=utf-8"
+	case ".txt", ".log", ".md":
+		return "text/plain; charset=utf-8"
+	case ".css":
+		return "text/css; charset=utf-8"
+	case ".js":
+		return "application/javascript"
+	case ".json":
+		return "application/json"
+	case ".xml":
+		return "application/xml"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".png":
+		return "image/png"
+	case ".gif":
+		return "image/gif"
+	case ".svg":
+		return "image/svg+xml"
+	case ".ico":
+		return "image/x-icon"
+	case ".pdf":
+		return "application/pdf"
+	case ".zip":
+		return "application/zip"
+	default:
+		return "application/octet-stream"
+	}
+}
+
+
 // parseUpstreamString parses a single upstream entry from a dest list.
 // Format: "URL [weight=N]"
 // Returns an error if the entry looks like a STATUS directive (not valid in a list).
@@ -497,6 +561,9 @@ func parseUpstreamString(s string) (Upstream, error) {
 	s = strings.TrimSpace(s)
 	if strings.HasPrefix(strings.ToUpper(s), "STATUS") {
 		return Upstream{}, fmt.Errorf("STATUS is not valid in a multi-dest list; use a single dest: STATUS <code> <text>")
+	}
+	if strings.HasPrefix(strings.ToUpper(s), "FILE") {
+		return Upstream{}, fmt.Errorf("FILE is not valid in a multi-dest list; use a single dest: FILE <code> <path> [content-type]")
 	}
 	// Split off optional weight= suffix
 	weight := 1
@@ -524,11 +591,22 @@ func applyDestEntries(rc *RouteConfig, entries []string, routePath string) error
 		return nil // no dest — validate() will catch this
 	}
 	if len(entries) == 1 {
-		// Single entry: may be a URL or a STATUS directive.
+		// Single entry: may be a URL, STATUS directive, or FILE directive.
 		code, text, isStatus := parseDestField(entries[0])
 		if isStatus {
 			rc.StatusCode = code
 			rc.StatusText = text
+			return nil
+		}
+		code, filePath, ct, isFile := parseFileField(entries[0])
+		if isFile {
+			rc.StatusCode = code
+			rc.StaticFilePath = filePath
+			if ct != "" {
+				rc.StaticFileContentType = ct
+			} else {
+				rc.StaticFileContentType = guessContentType(filePath)
+			}
 			return nil
 		}
 		parsed, err := url.Parse(entries[0])

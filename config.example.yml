@@ -80,6 +80,11 @@ vhosts:
         client-add-header:
           Location: https://google.com
 
+      /file/:
+        dest: FILE 200 /var/www/index.html
+        # Optional content type specified, otherwise detected from file extension
+        # dest: FILE 200 /var/www/data.json application/json
+
       # Public route — explicitly disables auth even when global-auth is set:
       # /public/:
       #   dest: http://localhost:9000/
