@@ -3958,28 +3958,28 @@ routes:
 // ---- FILE static route tests ----
 
 func TestParseFileField_Basic(t *testing.T) {
-	code, path, ct, ok := parseFileField("FILE 200 /tmp/index.html")
+	code, path, ok := parseFileField("FILE 200 /tmp/index.html")
 	if !ok { t.Fatal("should be FILE directive") }
 	if code != 200 { t.Errorf("code = %d, want 200", code) }
 	if path != "/tmp/index.html" { t.Errorf("path = %q", path) }
-	if ct != "" { t.Errorf("ct should be empty (auto-detect), got %q", ct) }
 }
 
-func TestParseFileField_WithContentType(t *testing.T) {
-	code, path, ct, ok := parseFileField("FILE 200 /tmp/data.bin application/octet-stream")
+// TestParseFileField_ExtraTokensIgnored verifies that extra tokens after the path are ignored gracefully.
+func TestParseFileField_ExtraTokensIgnored(t *testing.T) {
+	// Extra token after path is silently ignored (content-type was removed)
+	code, path, ok := parseFileField("FILE 200 /tmp/data.bin something-extra")
 	if !ok { t.Fatal("should be FILE directive") }
 	if code != 200 { t.Errorf("code = %d, want 200", code) }
-	if path != "/tmp/data.bin" { t.Errorf("path = %q", path) }
-	if ct != "application/octet-stream" { t.Errorf("ct = %q", ct) }
+	if path != "/tmp/data.bin" { t.Errorf("path = %q, want /tmp/data.bin", path) }
 }
 
 func TestParseFileField_CaseInsensitive(t *testing.T) {
-	_, _, _, ok := parseFileField("file 200 /tmp/x.html")
+	_, _, ok := parseFileField("file 200 /tmp/x.html")
 	if !ok { t.Error("FILE directive should be case-insensitive") }
 }
 
 func TestParseFileField_NotAFileDirective(t *testing.T) {
-	_, _, _, ok := parseFileField("http://localhost:3000/")
+	_, _, ok := parseFileField("http://localhost:3000/")
 	if ok { t.Error("regular URL should not parse as FILE directive") }
 }
 
@@ -4021,7 +4021,6 @@ func TestFileRoute_ServesContent(t *testing.T) {
 		"/page/": {
 			StatusCode:            200,
 			StaticFilePath:        f.Name(),
-			StaticFileContentType: "text/html; charset=utf-8",
 		},
 	})
 	srv, _ := newServer(cfg)
@@ -4052,7 +4051,6 @@ func TestFileRoute_CustomStatusCode(t *testing.T) {
 		"/missing/": {
 			StatusCode:            404,
 			StaticFilePath:        f.Name(),
-			StaticFileContentType: "text/html; charset=utf-8",
 		},
 	})
 	srv, _ := newServer(cfg)
@@ -4066,6 +4064,7 @@ func TestFileRoute_CustomStatusCode(t *testing.T) {
 }
 
 func TestFileRoute_AutoContentType(t *testing.T) {
+	// Content-type is auto-detected from file extension
 	f, _ := os.CreateTemp("", "routemux-*.json")
 	f.WriteString(`{"ok":true}`)
 	f.Close()
@@ -4073,9 +4072,8 @@ func TestFileRoute_AutoContentType(t *testing.T) {
 
 	cfg := makeConfig(8080, map[string]*RouteConfig{
 		"/data/": {
-			StatusCode:            200,
-			StaticFilePath:        f.Name(),
-			StaticFileContentType: guessContentType(f.Name()),
+			StatusCode:     200,
+			StaticFilePath: f.Name(),
 		},
 	})
 	srv, _ := newServer(cfg)
@@ -4084,7 +4082,7 @@ func TestFileRoute_AutoContentType(t *testing.T) {
 
 	resp, _ := http.Get(ts.URL + "/data/")
 	if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
-		t.Errorf("Content-Type = %q, want application/json", ct)
+		t.Errorf("Content-Type = %q, want application/json (auto-detected)", ct)
 	}
 }
 
@@ -4113,17 +4111,19 @@ routes:
 	if rc.StaticFilePath != htmlFile.Name() {
 		t.Errorf("StaticFilePath = %q, want %q", rc.StaticFilePath, htmlFile.Name())
 	}
-	if rc.StaticFileContentType != "text/html; charset=utf-8" {
-		t.Errorf("content-type = %q, want text/html", rc.StaticFileContentType)
+	// Content-type is auto-detected at handler build time from the file extension
+	if ct := guessContentType(rc.StaticFilePath); ct != "text/html; charset=utf-8" {
+		t.Errorf("guessContentType = %q, want text/html", ct)
 	}
 	if rc.StatusCode != 200 {
 		t.Errorf("StatusCode = %d, want 200", rc.StatusCode)
 	}
 }
 
-func TestFileRoute_YAML_ExplicitContentType(t *testing.T) {
-	f, _ := os.CreateTemp("", "routemux-*.bin")
-	f.WriteString("binary")
+func TestFileRoute_YAML_CodeOptional(t *testing.T) {
+	// HTTP code is optional in YAML config too
+	f, _ := os.CreateTemp("", "routemux-*.html")
+	f.WriteString("<html>ok</html>")
 	f.Close()
 	defer os.Remove(f.Name())
 
@@ -4132,17 +4132,21 @@ func TestFileRoute_YAML_ExplicitContentType(t *testing.T) {
 global:
   port: 8080
 routes:
-  /dl/:
-    dest: FILE 200 ` + f.Name() + ` application/octet-stream
+  /page/:
+    dest: FILE ` + f.Name() + `
 `)
 	ymlFile.Close()
 	defer os.Remove(ymlFile.Name())
 
 	cfg, err := loadConfigFile(ymlFile.Name())
 	if err != nil { t.Fatal(err) }
-	rc := cfg.VHosts[0].Routes["/dl/"]
-	if rc.StaticFileContentType != "application/octet-stream" {
-		t.Errorf("explicit ct = %q", rc.StaticFileContentType)
+	rc := cfg.VHosts[0].Routes["/page/"]
+	if rc == nil { t.Fatal("route not found") }
+	if rc.StatusCode != 200 {
+		t.Errorf("default code = %d, want 200", rc.StatusCode)
+	}
+	if rc.StaticFilePath != f.Name() {
+		t.Errorf("path = %q", rc.StaticFilePath)
 	}
 }
 
@@ -4152,7 +4156,6 @@ func TestFileRoute_MissingFileReturns404(t *testing.T) {
 		"/page/": {
 			StatusCode:            200,
 			StaticFilePath:        "/nonexistent/path/file.html",
-			StaticFileContentType: "text/html; charset=utf-8",
 		},
 	})
 	// validate() should succeed — missing file is a runtime 404, not a config error
@@ -4180,7 +4183,6 @@ func TestFileRoute_FileUpdatedWithoutReload(t *testing.T) {
 		"/page/": {
 			StatusCode:            200,
 			StaticFilePath:        f.Name(),
-			StaticFileContentType: "text/html; charset=utf-8",
 		},
 	})
 	srv, _ := newServer(cfg)
@@ -4214,7 +4216,6 @@ func TestFileRoute_ClientHeaders(t *testing.T) {
 		"/file/": {
 			StatusCode:            200,
 			StaticFilePath:        f.Name(),
-			StaticFileContentType: "text/plain; charset=utf-8",
 			ParsedClientAddHeaders: map[string]parsedHeaderValue{
 				"X-Custom": compileHeaderValue("added"),
 			},
@@ -4227,5 +4228,51 @@ func TestFileRoute_ClientHeaders(t *testing.T) {
 	resp, _ := http.Get(ts.URL + "/file/")
 	if resp.Header.Get("X-Custom") != "added" {
 		t.Errorf("X-Custom = %q, want added", resp.Header.Get("X-Custom"))
+	}
+}
+
+func TestFileRoute_ContentTypeOverrideViaClientHeader(t *testing.T) {
+	// Content-type auto-detection can be overridden with client-add-header
+	f, _ := os.CreateTemp("", "routemux-*.txt")
+	f.WriteString(`{"ok":true}`)
+	f.Close()
+	defer os.Remove(f.Name())
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/data/": {
+			StatusCode:     200,
+			StaticFilePath: f.Name(),
+			ParsedClientAddHeaders: map[string]parsedHeaderValue{
+				"Content-Type": compileHeaderValue("application/json"),
+			},
+		},
+	})
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	resp, _ := http.Get(ts.URL + "/data/")
+	if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json (via client-add-header)", ct)
+	}
+}
+
+func TestFileRoute_CustomCode(t *testing.T) {
+	// Non-200 HTTP code in FILE directive
+	f, _ := os.CreateTemp("", "routemux-*.html")
+	f.WriteString("Maintenance")
+	f.Close()
+	defer os.Remove(f.Name())
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/maint/": {StatusCode: 503, StaticFilePath: f.Name()},
+	})
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	resp, _ := http.Get(ts.URL + "/maint/")
+	if resp.StatusCode != 503 {
+		t.Errorf("status = %d, want 503", resp.StatusCode)
 	}
 }

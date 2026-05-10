@@ -13,6 +13,7 @@ A lightweight, flexible, and easy configurable reverse proxy written in Go. Rout
 - **[Header manipulation](#upstream-request-header-manipulation)** — add, overwrite, or delete headers per route for client response or upstream request, with wildcard support (`CF-*`, `X-*`) and variable interpolation (`${remote_addr}`, `${header.User-Agent}`, etc.)
 - **[Load balancing](#load-balancing)** — weighted random or weighted round-robin across multiple upstream destinations
 - **[Static responses](#static-responses-status)** — return a fixed HTTP status code and body directly from RouteMUX, no upstream needed
+- **[Serve static file ](#serving-static-file-file)** — serve a static file directly from RouteMUX with auto-detected content-type, no upstream needed
 - **[IP filter](#ip-filter)** — allow or block connections by IP address or CIDR range, loaded from inline values, local files, or remote URLs with optional periodic refresh
 - **[Trusted proxy support](#trusted-proxy-support)** — `trust-client-headers` global flag or per-IP `trusted-proxies` list (similar to IP filter) for selective proxy trust. A special header manipulation variable `${trusted_xff}` is available, that sets the real client IP after evaluating trusted proxies.
 - **[Environment variable support](#environment-variable-support)** - environment variable substitution is globally supported in `config.yml` file using `${env.VARIABLE}`.
@@ -239,7 +240,7 @@ Following are the route options must follow `--route`. The `--route` + route opt
 
 | Flag | Description |
 |------|-------------|
-| `--dest URL` | Upstream destination (repeatable — multiple `--dest` flags with URL and optional weight=<N> create a load-balanced route). Use `STATUS <code> [text]` for a static response. |
+| `--dest URL` | Upstream destination (repeatable — multiple `--dest` flags with URL and optional weight=<N> create a load-balanced route). Use `STATUS <code> [text]` for a static response. Use `FILE [code] <path>` to serve a static file. |
 | `--load-balancer-mode MODE` | Load balancer mode: `random` (default) or `round-robin` |
 | `--noTLSverify` | Skip TLS certificate verification for this upstream |
 | `--auth USER:PASS` | Per-route Basic Auth (overrides `--global-auth`) |
@@ -532,9 +533,9 @@ The same `${variable}` syntax as `dest-add-header`, with one difference:
 
 This means `${header.Content-Type}` in a `client-add-header` value resolves to the `Content-Type` the upstream sent back — useful for echo/transform patterns.
 
-### Works with static (`STATUS`) routes
+### Works with static (`STATUS`) and file (`FILE`) routes
 
-`client-add-header` and `client-del-header` apply to STATUS routes too. Since there is no upstream response, `${header.Name}` resolves to an empty string.
+`client-add-header` and `client-del-header` apply to STATUS and FILE routes too. Since there is no upstream response, `${header.Name}` resolves to an empty string.
 
 ```yaml
 routes:
@@ -609,6 +610,89 @@ The format is `STATUS <code> [text]` where:
 Auth still applies to STATUS routes — a route with `global-auth` or per-route `auth` will require credentials before returning the static response.
 
 STATUS is only valid as a single `dest` string. Mixing STATUS with other upstreams in a list is an error.
+
+See also: [Static File Responses (`FILE`)](#serving-static-file-file) for serving a file instead of inline text.
+
+---
+
+## Serving static File (`FILE`)
+
+A route can serve a static file directly from RouteMUX without forwarding to any upstream. The file is read from disk on every request, so updated content is served immediately without a reload. If the file is not found at request time, a `404 Not Found` is returned.
+
+```yaml
+routes:
+  /page/:
+    dest: FILE /path/to/index.html        # HTTP 200 (default)
+
+  /maintenance/:
+    dest: FILE 503 /path/to/maintenance.html
+
+  /json/:
+    dest: FILE /path/to/data.json
+
+  /data/:
+    dest: FILE /path/to/data.dat
+    client-add-header:
+      Content-Type: text/plain
+```
+
+The format is `FILE [code] <path>` where:
+- `[code]` is an optional HTTP status code (100–599). Defaults to `200` if omitted.
+- `<path>` is the path to the file to serve.
+
+### Content-Type
+
+The `Content-Type` header is **auto-detected** from the file extension:
+
+| Extension | Content-Type |
+|-----------|-------------|
+| `.html`, `.htm` | `text/html; charset=utf-8` |
+| `.txt`, `.log`, `.md` | `text/plain; charset=utf-8` |
+| `.css` | `text/css; charset=utf-8` |
+| `.js` | `application/javascript` |
+| `.json` | `application/json` |
+| `.xml` | `application/xml` |
+| `.jpg`, `.jpeg` | `image/jpeg` |
+| `.png` | `image/png` |
+| `.gif` | `image/gif` |
+| `.svg` | `image/svg+xml` |
+| `.pdf` | `application/pdf` |
+| `.zip` | `application/zip` |
+| *(other)* | `application/octet-stream` |
+
+To override the auto-detected content-type, use `client-add-header`: `Content-Type`:
+
+```yaml
+routes:
+  /data/:
+    dest: FILE /path/to/file.txt
+    client-add-header:
+      Content-Type: application/json
+```
+
+### CLI
+
+```bash
+# Serve a file with default 200 code
+routemux --route /page/ --dest "FILE /path/to/index.html"
+
+# Serve with explicit status code
+routemux --route /maint/ --dest "FILE 503 /path/to/maintenance.html"
+
+# Combine with other routes
+routemux \
+  --route /api/  --dest http://localhost:3000/ \
+  --route /page/ --dest "FILE /var/www/index.html" \
+  --route /health/ --dest "STATUS 200 healthy"
+```
+
+### Notes
+
+- FILE is only valid as a single `dest` value. Mixing FILE with other upstreams in a list is an error.
+- The file is read on every request — no restart or reload needed when the file changes.
+- Auth (`global-auth`, per-route `auth`) still applies to FILE routes.
+- `client-add-header` and `client-del-header` work on FILE routes.
+
 
 ---
 

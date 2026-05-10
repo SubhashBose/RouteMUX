@@ -494,9 +494,10 @@ func parseDestField(dest string) (code int, text string, isStatus bool) {
 
 
 // parseFileField checks if a dest value is a FILE directive.
-// Format: "FILE <code> <path>  |  FILE <path>" (case-insensitive).
+// Format: "FILE [code] <path>" (case-insensitive).
+// The HTTP code defaults to 200 if omitted.
+// Content-type is always auto-detected from the file extension.
 // Returns (statusCode, filePath, isFile).
-// If content-type is omitted, it is auto-detected from the file extension.
 func parseFileField(dest string) (code int, filePath string, isFile bool) {
 	if !strings.HasPrefix(strings.ToUpper(dest), "FILE ") {
 		return 0, "", false
@@ -562,7 +563,7 @@ func parseUpstreamString(s string) (Upstream, error) {
 		return Upstream{}, fmt.Errorf("STATUS is not valid in a multi-dest list; use a single dest: STATUS <code> <text>")
 	}
 	if strings.HasPrefix(strings.ToUpper(s), "FILE") {
-		return Upstream{}, fmt.Errorf("FILE is not valid in a multi-dest list; use a single dest: FILE <code> <path> [content-type]")
+		return Upstream{}, fmt.Errorf("FILE is not valid in a multi-dest list; use a single dest: FILE [code] <path>")
 	}
 	// Split off optional weight= suffix
 	weight := 1
