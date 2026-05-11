@@ -140,14 +140,27 @@ func (s *server) buildMux(routes map[string]*RouteConfig, cfg *Config) (*http.Se
 			picker = newUpstreamPicker(rc.Upstreams, rc.LBMode)
 		}
 
-		handler, err := s.buildRouteHandler(path, picker, rc, cfg)
-		if err != nil {
-			return nil, err
-		}
 
 		pattern := path
+
 		if !strings.HasSuffix(pattern, "/") {
-			pattern += "/"
+			// In case the path has no trailing /, register it both with and without.
+			// First append pattern with "/" so ServeMux treats it as a subtree
+			// match (prefix) rather than an exact match.
+			handler, err := s.buildRouteHandler(pattern + "/", picker, rc, cfg)
+			if err != nil {
+				return nil, err
+			}
+			mux.Handle(pattern + "/", handler)
+		}
+
+		// Also register the exact path WITHOUT trailing slash (orihginal pattern).
+		// http.ServeMux automatically issues a 301 redirect from /api to /api/
+		// when only /api/ is registered. That redirect leaks to the client and
+		// adds a round-trip. Registering both /api and /api/ suppresses it.
+		handler, err := s.buildRouteHandler(pattern, picker, rc, cfg)
+		if err != nil {
+			return nil, err
 		}
 		mux.Handle(pattern, handler)
 		if rc.StaticFilePath != "" {
@@ -256,7 +269,7 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 			stripped := strings.TrimPrefix(req.URL.Path, routePath)
 			// Join dest base path + stripped remainder
 			destPath := destURL.Path
-			if !strings.HasSuffix(destPath, "/") {
+			if !strings.HasSuffix(destPath, "/") && stripped!="" {
 				destPath += "/"
 			}
 
