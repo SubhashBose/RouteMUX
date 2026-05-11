@@ -4276,3 +4276,80 @@ func TestFileRoute_CustomCode(t *testing.T) {
 		t.Errorf("status = %d, want 503", resp.StatusCode)
 	}
 }
+
+// upstreamPathCapture returns a test server that records the path of each request.
+func upstreamPathCapture(t *testing.T) (*httptest.Server, *string) {
+	t.Helper()
+	captured := new(string)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*captured = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+	}))
+	return srv, captured
+}
+func TestPathMapping_NoSlashRoute_NoSlashDest_SubtreeGetsSlash(t *testing.T) {
+	// /api → http://upstream/v1  (no slash on either)
+	// The subtree handler (/api/) should auto-add slash to dest path,
+	// so /api/users → upstream /v1/users (not /v1users)
+	upstream, got := upstreamPathCapture(t)
+	defer upstream.Close()
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/api": {Upstreams: []Upstream{mustUpstream(upstream.URL+"/v1", 1)}},
+	})
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	http.Get(ts.URL + "/api/users")
+	if *got != "/v1/users" {
+		t.Errorf("subtree: upstream got %q, want /v1/users", *got)
+	}
+
+	http.Get(ts.URL + "/api")
+	if *got != "/v1" {
+		t.Errorf("exact: upstream got %q, want /v1", *got)
+	}
+}
+
+func TestPathMapping_NoSlashRoute_DestAlreadyHasSlash(t *testing.T) {
+	// /api → http://upstream/v1/  (dest already has slash — should not double)
+	upstream, got := upstreamPathCapture(t)
+	defer upstream.Close()
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/api": {Upstreams: []Upstream{mustUpstream(upstream.URL+"/v1/", 1)}},
+	})
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	http.Get(ts.URL + "/api/users")
+	if *got != "/v1/users" {
+		t.Errorf("upstream got %q, want /v1/users (no double slash)", *got)
+	}
+	if strings.Contains(*got, "//") {
+		t.Errorf("double slash in path: %q", *got)
+	}
+}
+
+func TestPathMapping_NoSlashRoute_EmptyDestPath(t *testing.T) {
+	// /api → http://upstream  (no path on dest at all)
+	// subtree handler should inject "/" so /api/users → /users
+	upstream, got := upstreamPathCapture(t)
+	defer upstream.Close()
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/api": {Upstreams: []Upstream{mustUpstream(upstream.URL, 1)}},
+	})
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	http.Get(ts.URL + "/api/users")
+	if *got != "/users" {
+		t.Errorf("upstream got %q, want /users", *got)
+	}
+
+	http.Get(ts.URL + "/api")
+	if *got != "" && *got != "/" {
+		t.Errorf("exact: upstream got %q, want empty or /", *got)
+	}
+}

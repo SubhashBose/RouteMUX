@@ -386,10 +386,39 @@ routes:
 The route prefix is stripped and the upstream base path is prepended:
 
 ```
-Request:  GET /api/users/42
 Route:    /api/ → dest: http://localhost:3000/v1/
+Request:  GET /api/users/42
 Upstream: GET http://localhost:3000/v1/users/42
 ```
+
+It is ensured that for any combinations of route and dest a double `//` is not created in upstream call. Various edge cases are carefully dealt, which are shown in tables below. The routes and dests with and without trailing `/` are dealt differently. There are edge cases depending upon upstream server and app behavior when these configurations might be required.
+
+For the routes having trailing `/`:
+
+| Route | Dest | Request | Upstream gets |
+|---|---|---|---|
+| `/api/` | `http://localhost:3000/v1/` | `GET /api/users/42` | `GET http://localhost:3000/v1/users/42` |
+| | | `GET /api` | 301 Client redirect to `/api/` |
+| | | `GET /api/` | `GET http://localhost:3000/v1/` |
+| `/api/` | `http://localhost:3000/v1` | `GET /api/users/42` | `GET http://localhost:3000/v1/users/42` |
+| | | `GET /api` | 301 Client redirect to `/api/` |
+| | | `GET /api/` | `GET http://localhost:3000/v1` |
+
+
+In case the the route does not have trailing slash (`/api`), it is treated as a special case, then two handlers are created having both with and without trailing slash (`/api` and subtree `/api/`). In such case, when creating subtree handler (`/api/`) the upstream(s) path is also checked and if there is no trailing slash (`v1`), a slash is appended (`v1/`).
+
+Unless it has specific use case, it is generally recommended avoid routes with no trailing `/`, as two route handlers are created in such case, so memory consumption (albeit tiny) is doubled per such route. 
+
+The behavior for routes without trailing `/`':   
+
+| Route | Dest | Request | Upstream gets |
+|---|---|---|---|
+| `/api` | `http://localhost:3000/v1` | `GET /api/users/42` | `GET http://localhost:3000/v1/users/42` |
+| | | `GET /api` | `GET http://localhost:3000/v1` |
+| | | `GET /api/` | `GET http://localhost:3000/v1/` |
+| `/api` | `http://localhost:3000/v1/` | `GET /api/users/42` | `GET http://localhost:3000/v1/users/42` |
+| | | `GET /api` | `GET http://localhost:3000/v1/` |
+| | | `GET /api/` | `GET http://localhost:3000/v1/` |
 
 ---
 

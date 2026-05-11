@@ -144,20 +144,35 @@ func (s *server) buildMux(routes map[string]*RouteConfig, cfg *Config) (*http.Se
 		pattern := path
 
 		if !strings.HasSuffix(pattern, "/") {
-			// In case the path has no trailing /, register it both with and without.
-			// First append pattern with "/" so ServeMux treats it as a subtree
-			// match (prefix) rather than an exact match.
-			handler, err := s.buildRouteHandler(pattern + "/", picker, rc, cfg)
+			// No trailing slash in route: register a subtree handler (routePath="/api/")
+			// for /api/users etc., and a separate exact handler (routePath="/api") for
+			// /api itself. Each needs its own routePath for correct prefix stripping.
+			// first here we also add trailing slash to upstream path if not present already
+			subtreePicker := picker
+			if rc.StatusCode == 0 {
+				subtreeUpstreams := make([]Upstream, len(rc.Upstreams))
+				for i, u := range rc.Upstreams {
+					subtreeUpstreams[i] = u // copy scalar fields (URL, Weight)
+					cloned := *u.ParsedURL  // deep-copy the url.URL struct
+					if !strings.HasSuffix(cloned.Path, "/") {
+						cloned.Path += "/"
+						subtreeUpstreams[i].URL += "/"
+					}
+					subtreeUpstreams[i].ParsedURL = &cloned
+				}
+				subtreePicker = newUpstreamPicker(subtreeUpstreams, rc.LBMode)
+			}
+			subtreeHandler, err := s.buildRouteHandler(pattern+"/", subtreePicker, rc, cfg)
 			if err != nil {
 				return nil, err
 			}
-			mux.Handle(pattern + "/", handler)
+			mux.Handle(pattern+"/", subtreeHandler)
 		}
 
-		// Also register the exact path WITHOUT trailing slash (orihginal pattern).
-		// http.ServeMux automatically issues a 301 redirect from /api to /api/
-		// when only /api/ is registered. That redirect leaks to the client and
-		// adds a round-trip. Registering both /api and /api/ suppresses it.
+		// Trailing slash: single subtree handler covers all sub-paths.
+		// Ir original route has a trailing slash, no addition handler is registered
+		// without '/'. http.ServeMux automatically issues a 301 redirect from /api to
+		// /api/
 		handler, err := s.buildRouteHandler(pattern, picker, rc, cfg)
 		if err != nil {
 			return nil, err
@@ -267,7 +282,10 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 
 			// Strip the route prefix from the path, then prepend the dest path.
 			stripped := strings.TrimPrefix(req.URL.Path, routePath)
-			// Join dest base path + stripped remainder
+			// Join dest base path + stripped remainder.
+			// stripped never has a leading "/" here: sub-path requests are always
+			// handled by the subtree handler (routePath ends with "/"), so
+			// TrimPrefix leaves no leading slash.
 			destPath := destURL.Path
 			if !strings.HasSuffix(destPath, "/") && stripped!="" {
 				destPath += "/"
