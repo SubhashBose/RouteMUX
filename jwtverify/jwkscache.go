@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"log"
 )
 
 // jwksCacheEntry holds a fetched JWKS for one URL.
@@ -101,6 +102,7 @@ func (c *jwksCache) getKey(url, kid string) (interface{}, error) {
 //   - map[kid]→publicKey
 //   - TTL derived from Cache-Control: max-age (or defaultJWKSTTL as fallback)
 func fetchAndParseJWKS(url string) (map[string]interface{}, time.Duration, error) {
+	log.Printf("Fetching JWKS from %s", url)
 	resp, err := http.Get(url) //nolint:gosec
 	if err != nil {
 		return nil, 0, fmt.Errorf("fetching JWKS from %s: %w", url, err)
@@ -133,10 +135,12 @@ func fetchAndParseJWKS(url string) (map[string]interface{}, time.Duration, error
 
 // parseCacheControlMaxAge extracts max-age from a Cache-Control header value.
 // Returns defaultJWKSTTL when the header is absent, malformed, or has no max-age.
+// A value of 0 is valid and means "always re-fetch for missing kids".
 //
 // Examples handled:
 //
 //	"public, max-age=21478"   → 21478s
+//	"public, max-age=0"       → 0s  (re-fetch on every missing-kid miss)
 //	"no-cache"                → defaultJWKSTTL
 //	""                        → defaultJWKSTTL
 func parseCacheControlMaxAge(header string) time.Duration {
@@ -147,7 +151,7 @@ func parseCacheControlMaxAge(header string) time.Duration {
 		}
 		valStr := strings.TrimPrefix(strings.ToLower(part), "max-age=")
 		secs, err := strconv.ParseInt(strings.TrimSpace(valStr), 10, 64)
-		if err != nil || secs <= 0 {
+		if err != nil || secs < 0 {
 			break
 		}
 		return time.Duration(secs) * time.Second

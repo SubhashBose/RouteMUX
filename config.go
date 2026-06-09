@@ -79,6 +79,18 @@ func expandEnvVars(data []byte) []byte {
 	return result
 }
 
+
+// JWTAuth holds the global JWT authentication configuration.
+type JWTAuth struct {
+	HeaderKey        string `yaml:"header-key"`        // HTTP header to read token from (e.g. "Authorization")
+	CookieKey        string `yaml:"cookie-key"`        // Cookie name to read token from (fallback if header absent)
+	ClaimUserKey     string `yaml:"claim-user-key"`    // Claim key for username extraction (empty = no user check)
+	Secret           string `yaml:"secret"`            // HMAC secret or PEM public key (base64 or raw)
+	JWKURL           string `yaml:"jwk-url"`           // JWKS endpoint URL
+	AudID            string `yaml:"aud-id"`            // Expected audience value
+	DefaultAllowAll  bool   `yaml:"default-allow-all"` // If true, authenticated users may access routes with no auth-users list
+}
+
 // Config is the top-level runtime configuration structure.
 type Config struct {
 	Listen             string
@@ -90,6 +102,7 @@ type Config struct {
 	VHosts             []VHost    // ordered list; matched top-to-bottom per request
 	IPFilter           *IPFilter        // nil = no IP filtering
 	TrustedProxies     *TrustedProxies  // nil = use global TrustClientHeaders
+	JWTAuth            *JWTAuth         // nil = no JWT authentication
 
 	// Metadata for hot reload
 	ConfigPath   string   // Path to the config file being used (if any)
@@ -140,6 +153,7 @@ type RouteConfig struct {
 	NeedsTrustedXFF         bool              // true if any dest-add-header or client-add-header uses ${trusted_xff}
 	ClientDelHeaders        []string          // headers to remove from upstream response
 	ClientDelHasWildcard    bool              // true if any ClientDelHeaders entry contains '*'
+	AuthUsers          []string          // allowed JWT usernames for this route; nil = use DefaultAllowAll
 	destEntries        []string          // temporary: accumulates --dest CLI args before parsing
 }
 
@@ -187,6 +201,7 @@ type fileGlobal struct {
 	TrustClientHeaders  bool            `yaml:"trust-client-headers"`
 	IPFilterCfg          *IPFilterConfig    `yaml:"ip-filter"`
 	TrustedProxiesCfg    TrustedProxiesConfig `yaml:"trusted-proxies"`
+	JWTAuthCfg           *JWTAuth             `yaml:"jwt-authentication"`
 }
 
 type fileRoute struct {
@@ -199,6 +214,7 @@ type fileRoute struct {
 	DeleteHeaders []string        `yaml:"dest-del-header"`
 	ClientAddHeaders  map[string]string `yaml:"client-add-header"`
 	ClientDelHeaders  []string          `yaml:"client-del-header"`
+	AuthUsers         []string          `yaml:"auth-users"`
 
 	// authPresent records whether the "auth" key existed in the YAML at all.
 	authPresent bool
@@ -340,6 +356,20 @@ func (fg *fileGlobal) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
+// UnmarshalYAML for JWTAuth — detects unknown JWTAuth keys.
+func (fg *JWTAuth) UnmarshalYAML(value *yaml.Node) error {
+	if err := checkUnknownFields(value, reflect.TypeOf(JWTAuth{})); err != nil {
+		return err
+	}
+	type plain JWTAuth
+	var tmp plain
+	if err := value.Decode(&tmp); err != nil {
+		return err
+	}
+	*fg = JWTAuth(tmp)
+	return nil
+}
+
 // UnmarshalYAML for fileVHost — detects unknown vhost keys.
 func (fv *fileVHost) UnmarshalYAML(value *yaml.Node) error {
 	if err := checkUnknownFields(value, reflect.TypeOf(fileVHost{})); err != nil {
@@ -387,6 +417,8 @@ func loadConfigFile(path string) (*Config, error) {
 		}
 		cfg.IPFilter = f
 	}
+	cfg.JWTAuth = fc.Global.JWTAuthCfg
+
 	if len(fc.Global.TrustedProxiesCfg) > 0 {
 		tp, err := buildTrustedProxies(fc.Global.TrustedProxiesCfg)
 		if err != nil {
@@ -417,7 +449,7 @@ func loadConfigFile(path string) (*Config, error) {
 		return cfg, nil
 	}
 
-	// New vhosts: format.
+	//vhosts: format.
 	for i, fvh := range fc.VHosts {
 		if len(fvh.Domains) == 0 {
 			return nil, fmt.Errorf("vhosts[%d]: domains list must not be empty", i)
@@ -453,6 +485,7 @@ func parseFileVHost(fileRoutes map[string]fileRoute, domains []string) (VHost, e
 		rc.NeedsTrustedXFF = hasTrustedXFFVar(rc.ParsedAddHeaders) || hasTrustedXFFVar(rc.ParsedClientAddHeaders)
 		rc.ClientDelHeaders = fr.ClientDelHeaders
 		rc.ClientDelHasWildcard = hasWildcard(fr.ClientDelHeaders)
+		rc.AuthUsers = fr.AuthUsers
 		if err := applyDestEntries(rc, fr.Dest.entries, path); err != nil {
 			return VHost{}, err
 		}

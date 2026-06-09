@@ -25,6 +25,15 @@ global:
       - 127.0.0.1
       - ::1
       - https://www.cloudflare.com/ips-v4 cache=/tmp/cacheCFlist refresh=5h
+  jwt-authentication:
+    header-key: Cf-Access-Jwt-Assertion    # Get JWT from header
+    #cookie-key: CF_Authorization          # Get JWT from cookie
+    claim-user-key: email                  # Payload key to get claim user from JWT
+    #secret: hmac-secret-key               # Shared secret key
+    jwk-url: https://team.cloudflareaccess.com/cdn-cgi/access/certs  # JSON Web Key (JWK) URL
+    #aud-id: my-app-audience-id            # JWT Audience ID to match
+    #default-allow-all: true               # Allow all authenticated users by default for the
+                                           # routes without auth-users specified
 
 vhosts:
   - domains: ["example.com", "www.example.com"]
@@ -66,10 +75,11 @@ vhosts:
           - http://localhost:8002/ weight=1
         load-balancer-mode: round-robin  # default is 'random'
         timeout: 120s
+        auth-users: ["user1", "user2"]   # JWT authenticated users for this route
 
       /health/:
         dest: STATUS 200 Health is OK
-        auth: ""   # disable global auth
+        auth:   # empty or [] disable global auth
         client-add-header:
           Cache-Control: no-store
           X-Served-By: RouteMUX

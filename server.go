@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"routemux/jwtverify"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -193,6 +194,74 @@ func (s *server) buildMux(routes map[string]*RouteConfig, cfg *Config) (*http.Se
 	return mux, nil
 }
 
+
+// jwtMiddleware wraps h with JWT authentication. It reads the token from the
+// configured header or cookie, calls jwtverify.Verify, and enforces the
+// per-route auth-users list. Returns 401 on missing/invalid token and 403
+// on authorisation failure.
+func jwtMiddleware(h http.Handler, rc *RouteConfig, jwtCfg *JWTAuth) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Extract token: header takes precedence over cookie.
+		var tokenStr string
+		if jwtCfg.HeaderKey != "" {
+			hv := r.Header.Get(jwtCfg.HeaderKey)
+			// Strip "Bearer " prefix if present.
+			if strings.HasPrefix(hv, "Bearer ") {
+				hv = hv[7:]
+			}
+			tokenStr = strings.TrimSpace(hv)
+		}
+		if tokenStr == "" && jwtCfg.CookieKey != "" {
+			if ck, err := r.Cookie(jwtCfg.CookieKey); err == nil {
+				tokenStr = ck.Value
+			}
+		}
+		if tokenStr == "" {
+			http.Error(w, "Unauthorized: missing token", http.StatusUnauthorized)
+			return
+		}
+
+		// Verify token.
+		var keyBytes []byte
+		if jwtCfg.Secret != "" {
+			keyBytes = []byte(jwtCfg.Secret)
+		}
+		usernameVal, err := jwtverify.Verify(tokenStr, jwtCfg.ClaimUserKey, keyBytes, jwtCfg.JWKURL, jwtCfg.AudID)
+		if err != nil {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			log.Printf("JWT Unauthorized: %v", err)
+			return
+		}
+
+		// Authorisation: check username against per-route auth-users list.
+		if jwtCfg.ClaimUserKey != "" {
+			username, _ := usernameVal.(string)
+			if len(rc.AuthUsers) > 0 {
+				// Route has an explicit user list — check membership.
+				allowed := false
+				for _, u := range rc.AuthUsers {
+					if u == username {
+						allowed = true
+						break
+					}
+				}
+				if !allowed {
+					http.Error(w, "Forbidden: user not authorised for this route", http.StatusForbidden)
+					return
+				}
+			} else if !jwtCfg.DefaultAllowAll {
+				// No auth-users list and DefaultAllowAll is false → deny all.
+				http.Error(w, "Forbidden: route requires explicit user access", http.StatusForbidden)
+				return
+			}
+			// DefaultAllowAll=true and no auth-users list → allow any authenticated user.
+		}
+		// ClaimUserKeyword="" → authentication only, no user-level authorisation.
+
+		h.ServeHTTP(w, r)
+	})
+}
+
 // buildRouteHandler creates the http.Handler for one route.
 func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc *RouteConfig, cfg *Config) (http.Handler, error) {
 	// -- Static FILE response route --
@@ -224,7 +293,12 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 		if rc.AuthExplicit {
 			effectiveAuth = rc.Auth
 		}
-		return requireBasicAuth(effectiveAuth, h), nil
+		h = requireBasicAuth(effectiveAuth, h)
+		// Wrap with JWT auth if configured globally.
+		if cfg.JWTAuth != nil {
+			h = jwtMiddleware(h, rc, cfg.JWTAuth)
+		}
+		return h, nil
 	}
 
 	// -- Static STATUS response route --
@@ -241,7 +315,12 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 		if rc.AuthExplicit {
 			effectiveAuth = rc.Auth
 		}
-		return requireBasicAuth(effectiveAuth, h), nil
+		h = requireBasicAuth(effectiveAuth, h)
+		// Wrap with JWT auth if configured globally.
+		if cfg.JWTAuth != nil {
+			h = jwtMiddleware(h, rc, cfg.JWTAuth)
+		}
+		return h, nil
 	}
 
 	// -- TLS transport wrapped in a RoundTripper that fixes X-Forwarded-For --
@@ -451,6 +530,11 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 
 	// Wrap with basic auth if needed.
 	h = requireBasicAuth(effectiveAuth, h)
+
+	// Wrap with JWT auth if configured globally.
+	if cfg.JWTAuth != nil {
+		h = jwtMiddleware(h, rc, cfg.JWTAuth)
+	}
 
 	// Wrap: intercept WebSocket upgrades before auth/timeout middleware.
 	finalHandler := h

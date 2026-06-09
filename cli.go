@@ -11,7 +11,7 @@ import (
 	"github.com/SubhashBose/GoPkg-selfupdater"
 )
 
-var version = "0.4"
+var version = "0.5"
 var buildDate = ""
 
 // parseAll merges config file + CLI args into a final Config.
@@ -255,6 +255,40 @@ func applyCLI(cfg *Config, rawArgs []string) error {
 			}
 			cfg.TLSKey = args[i+1]
 			i += 2
+		case "--jwt-header":
+			if i+1 >= len(args) { return fmt.Errorf("--jwt-header requires a value") }
+			if cfg.JWTAuth == nil { cfg.JWTAuth = &JWTAuth{} }
+			cfg.JWTAuth.HeaderKey = args[i+1]
+			i += 2
+		case "--jwt-cookie":
+			if i+1 >= len(args) { return fmt.Errorf("--jwt-cookie requires a value") }
+			if cfg.JWTAuth == nil { cfg.JWTAuth = &JWTAuth{} }
+			cfg.JWTAuth.CookieKey = args[i+1]
+			i += 2
+		case "--jwt-claim-user":
+			if i+1 >= len(args) { return fmt.Errorf("--jwt-claim-user requires a value") }
+			if cfg.JWTAuth == nil { cfg.JWTAuth = &JWTAuth{} }
+			cfg.JWTAuth.ClaimUserKey = args[i+1]
+			i += 2
+		case "--jwt-secret":
+			if i+1 >= len(args) { return fmt.Errorf("--jwt-secret requires a value") }
+			if cfg.JWTAuth == nil { cfg.JWTAuth = &JWTAuth{} }
+			cfg.JWTAuth.Secret = args[i+1]
+			i += 2
+		case "--jwt-jwk-url":
+			if i+1 >= len(args) { return fmt.Errorf("--jwt-jwk-url requires a value") }
+			if cfg.JWTAuth == nil { cfg.JWTAuth = &JWTAuth{} }
+			cfg.JWTAuth.JWKURL = args[i+1]
+			i += 2
+		case "--jwt-aud":
+			if i+1 >= len(args) { return fmt.Errorf("--jwt-aud requires a value") }
+			if cfg.JWTAuth == nil { cfg.JWTAuth = &JWTAuth{} }
+			cfg.JWTAuth.AudID = args[i+1]
+			i += 2
+		case "--jwt-default-allow-all":
+			if cfg.JWTAuth == nil { cfg.JWTAuth = &JWTAuth{} }
+			cfg.JWTAuth.DefaultAllowAll = true
+			i++
 		case "--trust-client-headers":
 			cfg.TrustClientHeaders = true
 			i++
@@ -344,6 +378,20 @@ func applyCLI(cfg *Config, rawArgs []string) error {
 			}
 			curRoute.NoTLSVerify = true
 			i++
+		case "--auth-users":
+			if curRoute == nil {
+				return fmt.Errorf("--auth-users must follow --route")
+			}
+			if i+1 >= len(args) {
+				return fmt.Errorf("--auth-users requires a comma-separated user list")
+			}
+			for _, u := range strings.Split(args[i+1], ",") {
+				u = strings.TrimSpace(u)
+				if u != "" {
+					curRoute.AuthUsers = append(curRoute.AuthUsers, u)
+				}
+			}
+			i += 2
 		case "--auth":
 			if curRoute == nil {
 				return fmt.Errorf("--auth must follow --route")
@@ -575,6 +623,19 @@ Global options:
                              https://example.com/list refresh=12h cache=/path
   --global-auth U:P        HTTP Basic Auth applied to all routes (format: USER:PASSWORD)
 
+Global JWT options:
+  --jwt-header KEY         Header key to get JWT token
+  --jwt-cookie KEY         Cookie key to get JWT token (provide either --jwt-header or
+	                       --jwt-cookie. If both is provided then --jwt-header takes
+                           precedence and --jwt-cookie is fallback)
+  --jwt-claim-user KEY     JWT claim key to extract username
+  --jwt-secret SECRET      JWT HMAC secret (--jwt-secret taken precedence over --jwt-key)
+  --jwt-jwk-url URL        JWT keys URL in JSON Web Key Set (JWKS) format
+                           If neither --jwt-secret nor --jwt-jwk-url is provided, 
+  --jwt-aud ID             JWT audience ID to match
+  --jwt-default-allow-all  Allow all authenticated users to access all routes by default,
+                           unless set of users listed in --auth-users for that route.
+
 Vhost and Route:
   --vhost DOMAINS          Specify list of hostnames (e.g. "domain.com|www.domain.com") to
                            group routes under it (repeatable). Default is '*'
@@ -593,6 +654,7 @@ Route options (must follow --route PATH):
   --load-balancer-mode     Load balancer mode, "round-robin" or "random", (default: random) 
   --noTLSverify            Skip TLS verification for upstream(s)
   --auth U:P               Per-route Basic Auth (overrides global-auth; "" disables auth)
+  --auth-users USER,...    Comma-separated list of JWT usernames allowed on this route
   --timeout DURATION       Upstream timeout (e.g. 30s, 2m)
   --dest-add-header K:V    Add/overwrite a header on upstream request (repeatable)
                            Can be combination of variables and text
@@ -628,6 +690,8 @@ General flags:
   --validate               Validate configuration and exit without serving
 
 Sets of --route followed by route options can be repeated to define multiple routes.
+
+All command line options can be configured in config.yml file specified with --config.
 Options in command line and config.yml file are combined, where command line options takes precedence.
 To disable reading any config.yml file, use --config "". 
 
@@ -646,6 +710,14 @@ Config file (config.yml) example:
         - 10.0.0.0/8
       allowed:
         - 172.16.0.0/12
+    jwt-authentication:
+      header-key: JWT-Token
+      cookie-key: jwt_token
+      claim-user-key: username
+      secret: hmac-secret-key
+      jwk-url: https://example.com/.well-known/jwks.json
+      aud-id: my-app
+      default-allow-all: false
 
   vhosts:
     - domains: ["example.com", "www.example.com"]
