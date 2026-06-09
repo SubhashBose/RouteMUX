@@ -200,7 +200,8 @@ func (s *server) buildMux(routes map[string]*RouteConfig, cfg *Config) (*http.Se
 // per-route auth-users list. Returns 401 on missing/invalid token and 403
 // on authorisation failure.
 func jwtMiddleware(h http.Handler, rc *RouteConfig, jwtCfg *JWTAuth) http.Handler {
-	if rc.SkipJwtAuth {
+	// Check if JWT auth is enabled globally and not skipped for this route.
+	if jwtCfg == nil || rc.SkipJwtAuth {
 		return h
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -297,10 +298,9 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 			effectiveAuth = rc.Auth
 		}
 		h = requireBasicAuth(effectiveAuth, h)
-		// Wrap with JWT auth if configured globally.
-		if cfg.JWTAuth != nil {
-			h = jwtMiddleware(h, rc, cfg.JWTAuth)
-		}
+		// Wrap with JWT auth.
+		h = jwtMiddleware(h, rc, cfg.JWTAuth)
+		
 		return h, nil
 	}
 
@@ -319,10 +319,9 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 			effectiveAuth = rc.Auth
 		}
 		h = requireBasicAuth(effectiveAuth, h)
-		// Wrap with JWT auth if configured globally.
-		if cfg.JWTAuth != nil {
-			h = jwtMiddleware(h, rc, cfg.JWTAuth)
-		}
+		// Wrap with JWT auth.
+		h = jwtMiddleware(h, rc, cfg.JWTAuth)
+
 		return h, nil
 	}
 
@@ -534,10 +533,8 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 	// Wrap with basic auth if needed.
 	h = requireBasicAuth(effectiveAuth, h)
 
-	// Wrap with JWT auth if configured globally.
-	if cfg.JWTAuth != nil {
-		h = jwtMiddleware(h, rc, cfg.JWTAuth)
-	}
+	// Wrap with JWT auth.
+	h = jwtMiddleware(h, rc, cfg.JWTAuth)
 
 	// Wrap: intercept WebSocket upgrades before auth/timeout middleware.
 	finalHandler := h
