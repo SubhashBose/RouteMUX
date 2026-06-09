@@ -552,9 +552,7 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 				return
 			}
 			// Apply auth check for WebSocket too, then tunnel.
-			if effectiveAuth != nil && !checkBasicAuth(r, effectiveAuth) {
-				w.Header().Set("WWW-Authenticate", `Basic realm="routemux"`)
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			if effectiveAuth != nil && !checkBasicAuth(w, r, effectiveAuth) {
 				return
 			}
 			handleWS(w, r)
@@ -744,9 +742,7 @@ func requireBasicAuth(auth *Auth, h http.Handler) http.Handler {
 	}
 	inner := h
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !checkBasicAuth(r, auth) {
-			w.Header().Set("WWW-Authenticate", `Basic realm="routemux"`)
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		if !checkBasicAuth(w, r, auth) {
 			return
 		}
 		inner.ServeHTTP(w, r)
@@ -754,9 +750,15 @@ func requireBasicAuth(auth *Auth, h http.Handler) http.Handler {
 }
 
 // checkBasicAuth returns true if the request carries valid Basic Auth credentials.
-func checkBasicAuth(r *http.Request, auth *Auth) bool {
+// Otherwise, it returns false and writes unauthorized response with WWW-Authenticate header.
+func checkBasicAuth(w http.ResponseWriter, r *http.Request, auth *Auth) bool {
 	user, pass, ok := r.BasicAuth()
-	return ok && user == auth.User && pass == auth.Password
+	valid:= ok && user == auth.User && pass == auth.Password
+	if !valid {
+		w.Header().Set("WWW-Authenticate", `Basic realm="routemux"`)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+	}
+	return valid
 }
 // schemeOf returns the actual scheme of the incoming connection.
 // Used only for $scheme variable resolution in dest-dest-add-header values.
