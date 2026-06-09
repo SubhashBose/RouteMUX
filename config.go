@@ -154,6 +154,7 @@ type RouteConfig struct {
 	ClientDelHeaders        []string          // headers to remove from upstream response
 	ClientDelHasWildcard    bool              // true if any ClientDelHeaders entry contains '*'
 	AuthUsers          []string          // allowed JWT usernames for this route; nil = use DefaultAllowAll
+	SkipJwtAuth        bool              // true to skip JWT auth for this route
 	destEntries        []string          // temporary: accumulates --dest CLI args before parsing
 }
 
@@ -174,6 +175,11 @@ func (c *Config) validate() error {
 	}
 	if (c.TLSCert == "") != (c.TLSKey == "") {
 		return fmt.Errorf("both tls-cert and tls-key must be provided together")
+	}
+	if c.JWTAuth != nil {
+		if c.JWTAuth.HeaderKey == "" && c.JWTAuth.CookieKey == "" {
+			return fmt.Errorf("jwt-authentication requires at least one of header-key or cookie-key")
+		}
 	}
 	return nil
 }
@@ -215,6 +221,7 @@ type fileRoute struct {
 	ClientAddHeaders  map[string]string `yaml:"client-add-header"`
 	ClientDelHeaders  []string          `yaml:"client-del-header"`
 	AuthUsers         []string          `yaml:"auth-users"`
+	SkipJwtAuth       bool              `yaml:"skip-jwt-auth"`
 
 	// authPresent records whether the "auth" key existed in the YAML at all.
 	authPresent bool
@@ -486,6 +493,7 @@ func parseFileVHost(fileRoutes map[string]fileRoute, domains []string) (VHost, e
 		rc.ClientDelHeaders = fr.ClientDelHeaders
 		rc.ClientDelHasWildcard = hasWildcard(fr.ClientDelHeaders)
 		rc.AuthUsers = fr.AuthUsers
+		rc.SkipJwtAuth = fr.SkipJwtAuth
 		if err := applyDestEntries(rc, fr.Dest.entries, path); err != nil {
 			return VHost{}, err
 		}

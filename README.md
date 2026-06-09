@@ -172,6 +172,12 @@ vhosts:
         dest: STATUS 302 Redirection to new site
         client-add-header:
           Location: https://google.com
+      
+      # Serve static file with optional HTTP code and content-type
+      /file/:
+        dest: FILE 200 /var/www/index.html
+        # Optional content-type specified, otherwise detected from file extension
+        # dest: FILE 200 /var/www/data.json application/json
 
   - domains: ["*"]                      # All other hostnames to match
     routes:

@@ -392,6 +392,12 @@ func applyCLI(cfg *Config, rawArgs []string) error {
 				}
 			}
 			i += 2
+		case "--skip-jwt-auth":
+			if curRoute == nil {
+				return fmt.Errorf("--skip-jwt-auth must follow --route")
+			}
+			curRoute.SkipJwtAuth = true
+			i++
 		case "--auth":
 			if curRoute == nil {
 				return fmt.Errorf("--auth must follow --route")
@@ -628,11 +634,12 @@ Global JWT options:
   --jwt-cookie KEY         Cookie key to get JWT token (provide either --jwt-header or
 	                       --jwt-cookie. If both is provided then --jwt-header takes
                            precedence and --jwt-cookie is fallback)
-  --jwt-claim-user KEY     JWT claim key to extract username
+  --jwt-claim-user KEY     JWT claim key to obtain username
   --jwt-secret SECRET      JWT HMAC secret (--jwt-secret taken precedence over --jwt-key)
-  --jwt-jwk-url URL        JWT keys URL in JSON Web Key Set (JWKS) format
-                           If neither --jwt-secret nor --jwt-jwk-url is provided, 
-  --jwt-aud ID             JWT audience ID to match
+  --jwt-jwk-url URL        JWT keys URL in JSON Web Key Set (JWKS) format. If neither
+                           --jwt-secret nor --jwt-jwk-url is provided, then based on 'iss' 
+						   claim value it will try to get JWK URL for Cloudflare or Auth0
+  --jwt-aud APP_ID         JWT audience ID to match
   --jwt-default-allow-all  Allow all authenticated users to access all routes by default,
                            unless set of users listed in --auth-users for that route.
 
@@ -655,6 +662,7 @@ Route options (must follow --route PATH):
   --noTLSverify            Skip TLS verification for upstream(s)
   --auth U:P               Per-route Basic Auth (overrides global-auth; "" disables auth)
   --auth-users USER,...    Comma-separated list of JWT usernames allowed on this route
+  --skip-jwt-auth          Skip JWT auth for this route
   --timeout DURATION       Upstream timeout (e.g. 30s, 2m)
   --dest-add-header K:V    Add/overwrite a header on upstream request (repeatable)
                            Can be combination of variables and text
@@ -726,6 +734,7 @@ Config file (config.yml) example:
            dest: http://localhost:3000/
            noTLSverify: false
            auth: ["USER", "PASSWORD"]
+		   auth-users: ["USER1", "USER2"]
            timeout: 30s
            dest-add-header:
              User-Agent: RouteMUX
@@ -737,6 +746,7 @@ Config file (config.yml) example:
              Served-By: RouteMUX
            client-del-header:
              - Server
+		   skip-jwt-auth: true
 
         "/load-balancer/":
            dest:

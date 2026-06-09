@@ -4359,9 +4359,9 @@ func TestPathMapping_NoSlashRoute_EmptyDestPath(t *testing.T) {
 // Uses the test HMAC key from jwtverify.
 func makeJWTConfig(headerKw, claimUser string, defaultAllowAll bool) *JWTAuth {
 	return &JWTAuth{
-		HeaderKeyword:    headerKw,
-		ClaimUserKeyword: claimUser,
-		Key:              "test-secret",
+		HeaderKey:    headerKw,
+		ClaimUserKey: claimUser,
+		Secret:           "test-secret",
 		DefaultAllowAll:  defaultAllowAll,
 	}
 }
@@ -4424,9 +4424,9 @@ func TestJWT_DefaultAllowAll_False_NoUserList_Forbidden(t *testing.T) {
 		},
 	})
 	cfg.JWTAuth = &JWTAuth{
-		HeaderKeyword:    "Authorization",
-		ClaimUserKeyword: "sub",
-		Key:              "secret",
+		HeaderKey:    "Authorization",
+		ClaimUserKey: "sub",
+		Secret:           "secret",
 		DefaultAllowAll:  false,
 	}
 
@@ -4443,13 +4443,13 @@ func TestJWT_DefaultAllowAll_False_NoUserList_Forbidden(t *testing.T) {
 func TestJWT_CookieFallback_Config(t *testing.T) {
 	// Verify config: header takes precedence, cookie is fallback
 	cfg := &JWTAuth{
-		HeaderKeyword: "Authorization",
-		CookieKeyword: "jwt_token",
+		HeaderKey: "Authorization",
+		CookieKey: "jwt_token",
 	}
-	if cfg.HeaderKeyword != "Authorization" {
+	if cfg.HeaderKey != "Authorization" {
 		t.Error("header keyword not set")
 	}
-	if cfg.CookieKeyword != "jwt_token" {
+	if cfg.CookieKey != "jwt_token" {
 		t.Error("cookie keyword not set")
 	}
 }
@@ -4465,10 +4465,10 @@ func TestJWT_YAML_Config(t *testing.T) {
 global:
   port: 8080
   jwt-authentication:
-    header-keyword: Authorization
-    cookie-keyword: jwt_token
-    claim-user-keyword: sub
-    key: my-secret-key
+    header-key: Authorization
+    cookie-key: jwt_token
+    claim-user-key: sub
+    secret: my-secret-key
     aud-id: my-app
     default-allow-all: false
 routes:
@@ -4491,17 +4491,17 @@ routes:
 	if cfg.JWTAuth == nil {
 		t.Fatal("JWTAuth should be configured")
 	}
-	if cfg.JWTAuth.HeaderKeyword != "Authorization" {
-		t.Errorf("HeaderKeyword = %q", cfg.JWTAuth.HeaderKeyword)
+	if cfg.JWTAuth.HeaderKey != "Authorization" {
+		t.Errorf("HeaderKey = %q", cfg.JWTAuth.HeaderKey)
 	}
-	if cfg.JWTAuth.CookieKeyword != "jwt_token" {
-		t.Errorf("CookieKeyword = %q", cfg.JWTAuth.CookieKeyword)
+	if cfg.JWTAuth.CookieKey != "jwt_token" {
+		t.Errorf("CookieKey = %q", cfg.JWTAuth.CookieKey)
 	}
-	if cfg.JWTAuth.ClaimUserKeyword != "sub" {
-		t.Errorf("ClaimUserKeyword = %q", cfg.JWTAuth.ClaimUserKeyword)
+	if cfg.JWTAuth.ClaimUserKey != "sub" {
+		t.Errorf("ClaimUserKey = %q", cfg.JWTAuth.ClaimUserKey)
 	}
-	if cfg.JWTAuth.Key != "my-secret-key" {
-		t.Errorf("Key = %q", cfg.JWTAuth.Key)
+	if cfg.JWTAuth.Secret != "my-secret-key" {
+		t.Errorf("Secret = %q", cfg.JWTAuth.Secret)
 	}
 	if cfg.JWTAuth.AudID != "my-app" {
 		t.Errorf("AudID = %q", cfg.JWTAuth.AudID)
@@ -4530,7 +4530,7 @@ func TestCLI_JWTFlags(t *testing.T) {
 		"--jwt-header", "Authorization",
 		"--jwt-cookie", "jwt",
 		"--jwt-claim-user", "sub",
-		"--jwt-key", "secret",
+		"--jwt-secret", "secret",
 		"--jwt-aud", "myapp",
 		"--jwt-default-allow-all",
 		"--route", "/api/",
@@ -4543,8 +4543,8 @@ func TestCLI_JWTFlags(t *testing.T) {
 	if cfg.JWTAuth == nil {
 		t.Fatal("JWTAuth should be configured")
 	}
-	if cfg.JWTAuth.HeaderKeyword != "Authorization" {
-		t.Errorf("HeaderKeyword = %q", cfg.JWTAuth.HeaderKeyword)
+	if cfg.JWTAuth.HeaderKey != "Authorization" {
+		t.Errorf("HeaderKeyword = %q", cfg.JWTAuth.HeaderKey)
 	}
 	if !cfg.JWTAuth.DefaultAllowAll {
 		t.Error("DefaultAllowAll should be true")

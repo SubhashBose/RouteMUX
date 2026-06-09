@@ -200,6 +200,9 @@ func (s *server) buildMux(routes map[string]*RouteConfig, cfg *Config) (*http.Se
 // per-route auth-users list. Returns 401 on missing/invalid token and 403
 // on authorisation failure.
 func jwtMiddleware(h http.Handler, rc *RouteConfig, jwtCfg *JWTAuth) http.Handler {
+	if rc.SkipJwtAuth {
+		return h
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Extract token: header takes precedence over cookie.
 		var tokenStr string

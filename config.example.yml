@@ -28,9 +28,12 @@ global:
   jwt-authentication:
     header-key: Cf-Access-Jwt-Assertion    # Get JWT from header
     #cookie-key: CF_Authorization          # Get JWT from cookie
-    claim-user-key: email                  # Payload key to get claim user from JWT
-    #secret: hmac-secret-key               # Shared secret key
+    claim-user-key: email                  # JWT claim key to obtain the username
+    #secret: hmac-secret-key               # Shared secret signing key
     jwk-url: https://team.cloudflareaccess.com/cdn-cgi/access/certs  # JSON Web Key (JWK) URL
+                                           # If secret and jwk-url both not set, then it will
+                                           # try to get JWK URL for cloudflare or Auth0 based
+                                           # on 'iss' claim value
     #aud-id: my-app-audience-id            # JWT Audience ID to match
     #default-allow-all: true               # Allow all authenticated users by default for the
                                            # routes without auth-users specified
@@ -43,6 +46,8 @@ vhosts:
         timeout: 30s
         #noTLSverify: true
         auth: ["apiuser", "apipass"]   # overrides global-auth for this route
+        #auth-users: ["user1", "user2"]   # JWT authenticated users for this route
+        skip-jwt-auth: true            # skip JWT authentication for this route
         dest-add-header:                # add-header supersedes delete-header
           #Host: somesite.com      # Overwrite client HOST header
           x-Proxy-Server: RouteMUX
