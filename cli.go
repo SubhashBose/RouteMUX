@@ -638,7 +638,7 @@ Global JWT options:
   --jwt-secret SECRET      JWT HMAC secret (--jwt-secret taken precedence over --jwt-key)
   --jwt-jwk-url URL        JWT keys URL in JSON Web Key Set (JWKS) format. If neither
                            --jwt-secret nor --jwt-jwk-url is provided, then based on 'iss' 
-						   claim value it will try to get JWK URL for Cloudflare or Auth0
+                           claim value it will try to get JWK URL for Cloudflare or Auth0
   --jwt-aud APP_ID         JWT audience ID to match
   --jwt-default-allow-all  Allow all authenticated users to access all routes by default,
                            unless set of users listed in --auth-users for that route.

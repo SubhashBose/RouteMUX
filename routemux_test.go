@@ -3958,7 +3958,7 @@ routes:
 // ---- FILE static route tests ----
 
 func TestParseFileField_Basic(t *testing.T) {
-	code, path, ok := parseFileField("FILE 200 /tmp/index.html")
+	code, path, _, ok := parseFileField("FILE 200 /tmp/index.html")
 	if !ok { t.Fatal("should be FILE directive") }
 	if code != 200 { t.Errorf("code = %d, want 200", code) }
 	if path != "/tmp/index.html" { t.Errorf("path = %q", path) }
@@ -3967,19 +3967,19 @@ func TestParseFileField_Basic(t *testing.T) {
 // TestParseFileField_ExtraTokensIgnored verifies that extra tokens after the path are ignored gracefully.
 func TestParseFileField_ExtraTokensIgnored(t *testing.T) {
 	// Extra token after path is silently ignored (content-type was removed)
-	code, path, ok := parseFileField("FILE 200 /tmp/data.bin something-extra")
+	code, path, _, ok := parseFileField("FILE 200 /tmp/data.bin something-extra")
 	if !ok { t.Fatal("should be FILE directive") }
 	if code != 200 { t.Errorf("code = %d, want 200", code) }
 	if path != "/tmp/data.bin" { t.Errorf("path = %q, want /tmp/data.bin", path) }
 }
 
 func TestParseFileField_CaseInsensitive(t *testing.T) {
-	_, _, ok := parseFileField("file 200 /tmp/x.html")
+	_, _, _, ok := parseFileField("file 200 /tmp/x.html")
 	if !ok { t.Error("FILE directive should be case-insensitive") }
 }
 
 func TestParseFileField_NotAFileDirective(t *testing.T) {
-	_, _, ok := parseFileField("http://localhost:3000/")
+	_, _, _, ok := parseFileField("http://localhost:3000/")
 	if ok { t.Error("regular URL should not parse as FILE directive") }
 }
 
@@ -4544,17 +4544,438 @@ func TestCLI_JWTFlags(t *testing.T) {
 		t.Fatal("JWTAuth should be configured")
 	}
 	if cfg.JWTAuth.HeaderKey != "Authorization" {
-		t.Errorf("HeaderKeyword = %q", cfg.JWTAuth.HeaderKey)
+		t.Errorf("HeaderKey = %q", cfg.JWTAuth.HeaderKey)
 	}
 	if !cfg.JWTAuth.DefaultAllowAll {
 		t.Error("DefaultAllowAll should be true")
 	}
-
 	rc := cfg.VHosts[0].Routes["/api/"]
 	if rc == nil {
 		t.Fatal("route not found")
 	}
 	if len(rc.AuthUsers) != 2 || rc.AuthUsers[0] != "alice" || rc.AuthUsers[1] != "bob" {
 		t.Errorf("auth-users = %v, want [alice bob]", rc.AuthUsers)
+	}
+}
+
+func TestSkipJwtAuth_YAML(t *testing.T) {
+	f, _ := os.CreateTemp("", "routemux-*.yml")
+	f.WriteString(`
+global:
+  port: 8080
+  jwt-authentication:
+    header-key: Authorization
+    secret: test-secret
+    default-allow-all: true
+routes:
+  /api/:
+    dest: http://localhost:3000/
+  /health/:
+    dest: STATUS 200 ok
+    skip-jwt-auth: true
+`)
+	f.Close()
+	defer os.Remove(f.Name())
+
+	cfg, err := loadConfigFile(f.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	apiRoute := cfg.VHosts[0].Routes["/api/"]
+	if apiRoute == nil {
+		t.Fatal("/api/ route not found")
+	}
+	if apiRoute.SkipJwtAuth {
+		t.Error("/api/ should NOT skip JWT auth")
+	}
+
+	healthRoute := cfg.VHosts[0].Routes["/health/"]
+	if healthRoute == nil {
+		t.Fatal("/health/ route not found")
+	}
+	if !healthRoute.SkipJwtAuth {
+		t.Error("/health/ should skip JWT auth (skip-jwt-auth: true)")
+	}
+}
+
+func TestSkipJwtAuth_CLI(t *testing.T) {
+	cfg, err := parseAll([]string{
+		"--jwt-header", "Authorization",
+		"--jwt-secret", "secret",
+		"--route", "/api/", "--dest", "http://localhost:3000/",
+		"--route", "/health/", "--dest", "STATUS 200 ok", "--skip-jwt-auth",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	apiRoute := cfg.VHosts[0].Routes["/api/"]
+	if apiRoute == nil {
+		t.Fatal("/api/ not found")
+	}
+	if apiRoute.SkipJwtAuth {
+		t.Error("/api/ should not skip JWT auth")
+	}
+
+	healthRoute := cfg.VHosts[0].Routes["/health/"]
+	if healthRoute == nil {
+		t.Fatal("/health/ not found")
+	}
+	if !healthRoute.SkipJwtAuth {
+		t.Error("/health/ should skip JWT auth")
+	}
+}
+
+func TestSkipJwtAuth_BypassesMiddleware(t *testing.T) {
+	// With skip-jwt-auth: true, route is accessible without a JWT token
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/health/": {
+			StatusCode:  200,
+			StatusText:  "ok",
+			SkipJwtAuth: true,
+		},
+		"/api/": {
+			Upstreams: []Upstream{mustUpstream(backend.URL+"/", 1)},
+		},
+	})
+	cfg.JWTAuth = &JWTAuth{
+		HeaderKey:       "Authorization",
+		Secret:          "test-secret",
+		DefaultAllowAll: true,
+	}
+
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	// /health/ skips JWT — no token required → 200
+	resp, _ := http.Get(ts.URL + "/health/")
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("/health/ with skip-jwt-auth: status = %d, want 200", resp.StatusCode)
+	}
+
+	// /api/ does NOT skip JWT — no token → 401
+	resp2, _ := http.Get(ts.URL + "/api/")
+	if resp2.StatusCode != http.StatusUnauthorized {
+		t.Errorf("/api/ without token: status = %d, want 401", resp2.StatusCode)
+	}
+}
+
+func TestJWT_NoConfig_NoAuth(t *testing.T) {
+	// When JWTAuth is nil (not configured), jwtMiddleware is a no-op
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL+"/", 1)}},
+	})
+	// JWTAuth is nil — no authentication
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	resp, _ := http.Get(ts.URL + "/api/")
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("no JWT config: status = %d, want 200 (no auth required)", resp.StatusCode)
+	}
+}
+
+func TestJWT_Validation_RequiredFields(t *testing.T) {
+	// jwt-authentication without header-key or cookie-key should fail validation
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/api/": {Upstreams: []Upstream{mustUpstream("http://localhost:3000/", 1)}},
+	})
+	cfg.JWTAuth = &JWTAuth{
+		Secret: "test-secret",
+		// HeaderKey and CookieKey both empty — invalid
+	}
+	if err := cfg.validate(); err == nil {
+		t.Error("validate should fail when neither header-key nor cookie-key is set")
+	}
+}
+
+// ---- Directory file server tests ----
+
+func TestFileServer_ListingEnabled(t *testing.T) {
+	// dest: FILE-BROWSE /path/to/dir — directory listing enabled
+	dir, err := os.MkdirTemp("", "routemux-dir-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("hello"), 0644)
+	os.WriteFile(filepath.Join(dir, "world.txt"), []byte("world"), 0644)
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/static/": {StaticFilePath: dir, StaticDirListing: true},
+	})
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	// File request
+	resp, _ := http.Get(ts.URL + "/static/hello.txt")
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("file: status = %d, want 200", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "hello" {
+		t.Errorf("file content = %q, want hello", body)
+	}
+
+	// Directory listing
+	resp2, _ := http.Get(ts.URL + "/static/")
+	if resp2.StatusCode != http.StatusOK {
+		t.Errorf("dir listing: status = %d, want 200", resp2.StatusCode)
+	}
+	body2, _ := io.ReadAll(resp2.Body)
+	if !strings.Contains(string(body2), "hello.txt") {
+		t.Error("directory listing should contain hello.txt")
+	}
+}
+
+func TestFileServer_ListingDisabled_NoIndex(t *testing.T) {
+	// dest: FILE /path/to/dir — listing disabled, no index.html → 403
+	dir, err := os.MkdirTemp("", "routemux-dir-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	os.WriteFile(filepath.Join(dir, "app.js"), []byte("js"), 0644)
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/assets/": {StaticFilePath: dir, StaticDirListing: false},
+	})
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	// File still served correctly
+	resp, _ := http.Get(ts.URL + "/assets/app.js")
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("file: status = %d, want 200", resp.StatusCode)
+	}
+
+	// Directory request without index.html → 403
+	resp2, _ := http.Get(ts.URL + "/assets/")
+	if resp2.StatusCode != http.StatusForbidden {
+		t.Errorf("dir without listing: status = %d, want 403", resp2.StatusCode)
+	}
+}
+
+func TestFileServer_ListingDisabled_WithIndex(t *testing.T) {
+	// Listing disabled but index.html present → served transparently
+	dir, err := os.MkdirTemp("", "routemux-dir-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	os.WriteFile(filepath.Join(dir, "index.html"), []byte("<h1>Home</h1>"), 0644)
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/site/": {StaticFilePath: dir, StaticDirListing: false},
+	})
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	resp, _ := http.Get(ts.URL + "/site/")
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("index.html: status = %d, want 200", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "Home") {
+		t.Errorf("index.html body = %q", body)
+	}
+}
+
+func TestFileServer_ParseDestBrowse(t *testing.T) {
+	// dest: FILE-BROWSE /path → StaticDirListing=true
+	dir, _ := os.MkdirTemp("", "routemux-dir-*")
+	defer os.RemoveAll(dir)
+
+	f, _ := os.CreateTemp("", "routemux-*.yml")
+	f.WriteString(`
+global:
+  port: 8080
+routes:
+  /assets/:
+    dest: FILE-BROWSE ` + dir + `
+`)
+	f.Close()
+	defer os.Remove(f.Name())
+
+	cfg, err := loadConfigFile(f.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc := cfg.VHosts[0].Routes["/assets/"]
+	if rc == nil {
+		t.Fatal("route not found")
+	}
+	if rc.StaticFilePath != dir {
+		t.Errorf("StaticFilePath = %q, want %q (star stripped)", rc.StaticFilePath, dir)
+	}
+	if !rc.StaticDirListing {
+		t.Error("StaticDirListing should be true when path ends with *")
+	}
+}
+
+func TestFileServer_ParseDestNoStar(t *testing.T) {
+	// dest: FILE /path → StaticDirListing=false
+	dir, _ := os.MkdirTemp("", "routemux-dir-*")
+	defer os.RemoveAll(dir)
+
+	f, _ := os.CreateTemp("", "routemux-*.yml")
+	f.WriteString(`
+global:
+  port: 8080
+routes:
+  /assets/:
+    dest: FILE ` + dir + `
+`)
+	f.Close()
+	defer os.Remove(f.Name())
+
+	cfg, err := loadConfigFile(f.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc := cfg.VHosts[0].Routes["/assets/"]
+	if rc.StaticDirListing {
+		t.Error("StaticDirListing should be false without *")
+	}
+}
+
+func TestFileServer_StatusCodeWarning(t *testing.T) {
+	// Supplying a non-200 status code with a directory path should log a warning
+	// but not fail. The handler still works.
+	dir, _ := os.MkdirTemp("", "routemux-dir-*")
+	defer os.RemoveAll(dir)
+	os.WriteFile(filepath.Join(dir, "index.html"), []byte("ok"), 0644)
+
+	// StatusCode=404 with a directory — should warn but serve correctly
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/dir/": {
+			StatusCode:       404,
+			StaticFilePath:   dir,
+			StaticDirListing: false,
+		},
+	})
+	// newServer should succeed (warning is logged, not an error)
+	srv, err := newServer(cfg)
+	if err != nil {
+		t.Fatalf("newServer should not fail with status code + dir: %v", err)
+	}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	// Directory still served (status code from http.FileServer, not user-supplied 404)
+	resp, _ := http.Get(ts.URL + "/dir/")
+	if resp.StatusCode == 0 {
+		t.Error("expected a response, got none")
+	}
+}
+
+func TestFileServer_Subdirectory(t *testing.T) {
+	// Files in subdirectories are accessible
+	dir, _ := os.MkdirTemp("", "routemux-dir-*")
+	defer os.RemoveAll(dir)
+	subdir := filepath.Join(dir, "css")
+	os.MkdirAll(subdir, 0755)
+	os.WriteFile(filepath.Join(subdir, "main.css"), []byte("body{}"), 0644)
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/static/": {StaticFilePath: dir, StaticDirListing: true},
+	})
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	resp, _ := http.Get(ts.URL + "/static/css/main.css")
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("subdir file: status = %d, want 200", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "body{}" {
+		t.Errorf("body = %q, want body{}", body)
+	}
+}
+
+func TestFileServer_isDir(t *testing.T) {
+	dir, _ := os.MkdirTemp("", "routemux-dir-*")
+	defer os.RemoveAll(dir)
+
+	f, _ := os.CreateTemp("", "routemux-file-*")
+	f.Close()
+	defer os.Remove(f.Name())
+
+	if !isDir(dir) {
+		t.Errorf("isDir(%q) = false, want true", dir)
+	}
+	if isDir(f.Name()) {
+		t.Errorf("isDir(%q) = true for a file, want false", f.Name())
+	}
+	if isDir("/nonexistent/path") {
+		t.Error("isDir for nonexistent path should be false")
+	}
+}
+
+func TestParseFileField_Browse(t *testing.T) {
+	// FILE-BROWSE enables directory listing
+	code, path, browse, ok := parseFileField("FILE-BROWSE /var/www/static")
+	if !ok {
+		t.Fatal("FILE-BROWSE should be recognised")
+	}
+	if !browse {
+		t.Error("browse should be true for FILE-BROWSE")
+	}
+	if code != 200 {
+		t.Errorf("code = %d, want 200", code)
+	}
+	if path != "/var/www/static" {
+		t.Errorf("path = %q", path)
+	}
+}
+
+func TestParseFileField_BrowseWithCode(t *testing.T) {
+	code, path, browse, ok := parseFileField("FILE-BROWSE 200 /var/www/static")
+	if !ok {
+		t.Fatal("should parse")
+	}
+	if !browse {
+		t.Error("browse should be true")
+	}
+	if code != 200 || path != "/var/www/static" {
+		t.Errorf("code=%d path=%q", code, path)
+	}
+}
+
+func TestParseFileField_NoBrowse(t *testing.T) {
+	// Plain FILE does not enable browsing
+	_, _, browse, ok := parseFileField("FILE /var/www/index.html")
+	if !ok {
+		t.Fatal("FILE should be recognised")
+	}
+	if browse {
+		t.Error("browse should be false for plain FILE")
+	}
+}
+
+func TestParseFileField_BrowseCaseInsensitive(t *testing.T) {
+	_, _, browse, ok := parseFileField("file-browse /var/www")
+	if !ok {
+		t.Fatal("lowercase file-browse should be recognised")
+	}
+	if !browse {
+		t.Error("browse should be true")
 	}
 }

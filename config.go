@@ -136,7 +136,8 @@ type RouteConfig struct {
 	LBMode             string            // "random" (default) or "round-robin"
 	StatusCode         int               // non-zero: static response route
 	StatusText         string            // body text for static response
-	StaticFilePath     string            // non-empty: serve this file as the response
+	StaticFilePath     string            // non-empty: serve this file or directory
+	StaticDirListing   bool              // true: enable directory listing (path ends with *)
 	NoTLSVerify        bool              // skip TLS verification for all upstreams
 	Auth               *Auth             // nil = inherit global-auth; explicitly cleared = no auth
 	AuthExplicit       bool              // true when auth was set explicitly (even as empty)
@@ -534,28 +535,36 @@ func parseDestField(dest string) (code int, text string, isStatus bool) {
 }
 
 
-// parseFileField checks if a dest value is a FILE directive.
-// Format: "FILE [code] <path>" (case-insensitive).
+// parseFileField checks if a dest value is a FILE or FILE-BROWSE directive.
+// Format: "FILE [code] <path>"  or  "FILE-BROWSE [code] <path>" (case-insensitive).
+// FILE-BROWSE enables directory listing; FILE does not.
 // The HTTP code defaults to 200 if omitted.
 // Content-type is always auto-detected from the file extension.
-// Returns (statusCode, filePath, isFile).
-func parseFileField(dest string) (code int, filePath string, isFile bool) {
-	if !strings.HasPrefix(strings.ToUpper(dest), "FILE ") {
-		return 0, "", false
+// Returns (statusCode, filePath, browse, isFile).
+func parseFileField(dest string) (code int, filePath string, browse bool, isFile bool) {
+	upper := strings.ToUpper(dest)
+	var rest string
+	switch {
+	case strings.HasPrefix(upper, "FILE-BROWSE "):
+		browse = true
+		rest = dest[len("FILE-BROWSE "):]
+	case strings.HasPrefix(upper, "FILE "):
+		rest = dest[len("FILE "):]
+	default:
+		return 0, "", false, false
 	}
-	fields := strings.Fields(dest[5:]) // strip "FILE "
+	fields := strings.Fields(rest)
 	if len(fields) < 1 {
-		return 0, "", false
+		return 0, "", false, false
 	}
 	if len(fields) < 2 {
-		return 200, fields[0], true
+		return 200, fields[0], browse, true
 	}
 	var n int
 	if _, err := fmt.Sscanf(fields[0], "%d", &n); err != nil || n < 100 || n > 599 {
-		return 0, "", false
+		return 0, "", false, false
 	}
-	filePath = fields[1]
-	return n, filePath, true
+	return n, fields[1], browse, true
 }
 
 // guessContentType returns a basic content-type for the given filename based
@@ -604,7 +613,7 @@ func parseUpstreamString(s string) (Upstream, error) {
 		return Upstream{}, fmt.Errorf("STATUS is not valid in a multi-dest list; use a single dest: STATUS <code> <text>")
 	}
 	if strings.HasPrefix(strings.ToUpper(s), "FILE") {
-		return Upstream{}, fmt.Errorf("FILE is not valid in a multi-dest list; use a single dest: FILE [code] <path>")
+		return Upstream{}, fmt.Errorf("FILE/FILE-BROWSE is not valid in a multi-dest list; use a single dest: FILE [code] <path>")
 	}
 	// Split off optional weight= suffix
 	weight := 1
@@ -639,10 +648,11 @@ func applyDestEntries(rc *RouteConfig, entries []string, routePath string) error
 			rc.StatusText = text
 			return nil
 		}
-		code, filePath, isFile := parseFileField(entries[0])
+		code, filePath, browse, isFile := parseFileField(entries[0])
 		if isFile {
 			rc.StatusCode = code
 			rc.StaticFilePath = filePath
+			rc.StaticDirListing = browse
 			return nil
 		}
 		parsed, err := url.Parse(entries[0])

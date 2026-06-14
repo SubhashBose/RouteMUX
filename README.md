@@ -13,7 +13,9 @@ A lightweight, flexible, and easy configurable reverse proxy written in Go. Rout
 - **[Header manipulation](#upstream-request-header-manipulation)** — add, overwrite, or delete headers per route for client response or upstream request, with wildcard support (`CF-*`, `X-*`) and variable interpolation (`${remote_addr}`, `${header.User-Agent}`, etc.)
 - **[Load balancing](#load-balancing)** — weighted random or weighted round-robin across multiple upstream destinations
 - **[Static responses](#static-responses-status)** — return a fixed HTTP status code and body directly from RouteMUX, no upstream needed
-- **[Serve static file ](#serving-static-file-file)** — serve a static file directly from RouteMUX with auto-detected content-type, no upstream needed
+- **[Serve static file](#serving-static-file-file)** — serve a static file directly from RouteMUX with auto-detected content-type, no upstream needed
+- **[Serve a directory](#serving-a-directory-file-browse)** — serve a whole directory as a file server, with optional directory listing
+- **[JWT authentication](#jwt-authentication)** — validate JSON Web Tokens from a header or cookie, with per-route user authorisation
 - **[IP filter](#ip-filter)** — allow or block connections by IP address or CIDR range, loaded from inline values, local files, or remote URLs with optional periodic refresh
 - **[Trusted proxy support](#trusted-proxy-support)** — `trust-client-headers` global flag or per-IP `trusted-proxies` list (similar to IP filter) for selective proxy trust. A special header manipulation variable `${trusted_xff}` is available, that sets the real client IP after evaluating trusted proxies.
 - **[Environment variable support](#environment-variable-support)** - environment variable substitution is globally supported in `config.yml` file using `${env.VARIABLE}`.
@@ -227,6 +229,13 @@ routemux [global options] \
 | `--port PORT` | Port to listen on (default: `8080`) |
 | `--tls-cert FILE` | TLS certificate file — enables HTTPS |
 | `--tls-key FILE` | TLS key file — required when `--tls-cert` is set |
+| `--jwt-header KEYWORD` | HTTP header containing the JWT token |
+| `--jwt-cookie KEYWORD` | Cookie containing the JWT token (fallback) |
+| `--jwt-claim-user KEY` | JWT claim to extract username from |
+| `--jwt-secret SECRET` | HMAC secret or PEM public key for verification |
+| `--jwt-jwk-url URL` | JWKS endpoint URL |
+| `--jwt-aud AUDIENCE` | Expected audience claim |
+| `--jwt-default-allow-all` | Allow any authenticated user on routes with no `auth-users` |
 | `--global-auth USER:PASS` | HTTP Basic Auth for all routes |
 | `--trust-client-headers`  | Trust X-Forwarded-* headers from client (default: false) |
 | `--trusted-proxy ENTRY`   | Trust X-Forwarded-* headers from these IP/CIDR/file/URL list (repeatable) |
@@ -246,7 +255,7 @@ Following are the route options must follow `--route`. The `--route` + route opt
 
 | Flag | Description |
 |------|-------------|
-| `--dest URL` | Upstream destination (repeatable — multiple `--dest` flags with URL and optional weight=<N> create a load-balanced route). Use `STATUS <code> [text]` for a static response. Use `FILE [code] <path>` to serve a static file. |
+| `--dest URL` | Upstream destination (repeatable — multiple `--dest` flags with URL and optional weight=<N> create a load-balanced route). Use `STATUS <code> [text]` for a static response. Use `FILE [code] <path>` to serve a static file, or `FILE-BROWSE <dir>` to serve a directory. |
 | `--load-balancer-mode MODE` | Load balancer mode: `random` (default) or `round-robin` |
 | `--noTLSverify` | Skip TLS certificate verification for this upstream |
 | `--auth USER:PASS` | Per-route Basic Auth (overrides `--global-auth`) |
@@ -256,6 +265,8 @@ Following are the route options must follow `--route`. The `--route` + route opt
 | `--dest-del-header NAME` | Delete a header (repeatable, supports wildcards) |
 | `--client-add-header "Name: Value"` | Add or overwrite a response header sent to client (repeatable). Supports same variables as `--dest-add-header`; `${header.Name}` resolves from the upstream response headers |
 | `--client-del-header NAME` | Delete a header from the upstream response (repeatable, supports wildcards) |
+| `--auth-users USER,...` | Comma-separated JWT usernames allowed on this route |
+| `--skip-jwt-auth` | Skip JWT authentication for this route |
 
 ### Daemon commands
 
@@ -447,6 +458,82 @@ routes:
 ```
 
 When proxy auth is active on a route, the `Authorization` header is **automatically stripped** before forwarding to the upstream — the upstream never sees the proxy credentials. You can still set your own `Authorization` header to the upstream via `dest-add-header`.
+
+---
+
+## JWT Authentication
+
+RouteMUX can validate JSON Web Tokens (JWT) globally. When configured, every route requires a valid token unless it opts out with `skip-jwt-auth`.
+
+```yaml
+global:
+  jwt-authentication:
+    header-key: Authorization        # read token from this header (Bearer prefix is stripped if there)
+    cookie-key: jwt_token            # fallback: read token from this cookie
+    claim-user-key: sub              # claim to extract the username from (optional)
+    secret: my-shared-secret         # HMAC secret or PEM public key
+    jwk-url: https://issuer/.well-known/jwks.json   # JWKS endpoint (alternative to secret)
+    aud-id: my-app                   # expected audience claim
+    default-allow-all: false         # see authorisation rules below
+
+routes:
+  /admin/:
+    dest: http://localhost:3000/
+    auth-users: [alice, bob]         # only these JWT usernames may access this route
+
+  /app/:
+    dest: http://localhost:4000/     # any authenticated user (when default-allow-all: true)
+
+  /health/:
+    dest: STATUS 200 ok
+    skip-jwt-auth: true              # no token required for this route
+```
+
+### Token source
+
+At least one of `header-key` or `cookie-key` must be set. If both are set, the **header takes precedence**; the cookie is used only when the header is absent. A `Bearer ` prefix (if present) on the header value is stripped automatically.
+
+### Verification
+
+The token signature is verified using `secret` (HMAC or PEM public key) or `jwk-url` (a JWKS endpoint). If `aud-id` is set, the token's `aud` claim must also match.
+
+- `secret` accepts shared key for token verification
+- `jwk-url` accepts JWT keys URL in JSON Web Key Set (JWKS) format.
+- if both `secret` and `jwk-url` is set, then `secret` takes precedence over the `jwk-url`. 
+- If neither is set then based on 'iss' claim value RouteMUX will try to get JWK URL for Cloudflare or Auth0
+
+### Authorisation
+
+- If `claim-user-key` is **not set**, RouteMUX performs authentication only — any valid token is accepted on any route (that doesn't skip JWT).
+- If `claim-user-key` **is set**, the username is extracted from that claim using this key, and checked against the route's `auth-users` list:
+  - Username in `auth-users` → allowed.
+  - `auth-users` empty/unset and `default-allow-all: true` → any authenticated user allowed.
+  - `auth-users` empty/unset and `default-allow-all: false` → denied (code `403`).
+  - `auth-users` is set, and username in not in list → denied (code `403`), irrespective of `default-allow-all` value
+- If `skip-jwt-auth` is set for a route, then entire JWT verification and authorisation path is skipped for request coming to this route 
+
+### Responses
+
+- Missing or invalid token → `401 Unauthorized`.
+- Valid token but user not authorised for the route → `403 Forbidden`.
+
+### Combining with Basic Auth
+
+JWT and HTTP Basic Auth can be used together. When both are configured, a request must satisfy **both** — JWT is checked first, then Basic Auth.
+
+### CLI
+
+```bash
+routemux \
+  --jwt-header Authorization \
+  --jwt-cookie jwt_token \
+  --jwt-claim-user sub \
+  --jwt-secret my-shared-secret \
+  --jwt-aud my-app \
+  --jwt-default-allow-all \
+  --route /admin/ --dest http://localhost:3000/ --auth-users alice,bob \
+  --route /health/ --dest "STATUS 200 ok" --skip-jwt-auth
+```
 
 ---
 
@@ -727,6 +814,59 @@ routemux \
 - The file is read on every request — no restart or reload needed when the file changes.
 - Auth (`global-auth`, per-route `auth`) still applies to FILE routes.
 - `client-add-header` and `client-del-header` work on FILE routes.
+
+
+---
+
+## Serving a directory (`FILE` or `FILE-BROWSE`)
+
+A route can serve an entire directory as a file server. Use `FILE` for a directory to serve files without a directory listing, or `FILE-BROWSE` to enable directory listings.
+
+```yaml
+routes:
+  /static/:
+    dest: FILE-BROWSE /var/www/static   # directory listing enabled
+
+  /assets/:
+    dest: FILE /var/www/assets          # listing disabled (serves files + index.html only)
+```
+
+The route prefix is stripped and the remainder is mapped onto the directory:
+
+| Request | Served from |
+|---------|-------------|
+| `GET /static/` | directory listing (FILE-BROWSE) or `index.html` |
+| `GET /static/app.js` | `/var/www/static/app.js` |
+| `GET /static/css/main.css` | `/var/www/static/css/main.css` |
+
+### Listing behaviour
+
+- **`FILE-BROWSE <dir>`** — directory listing is shown when no `index.html` is present.
+- **`FILE <dir>`** — directory listing is disabled. A request for a directory returns `index.html` if present, otherwise `403 Forbidden`. Individual files are always served.
+
+### Features
+
+Directory serving uses Go's built-in file server, which provides:
+
+- Automatic `Content-Type` detection
+- `ETag` / `Last-Modified` headers and `304 Not Modified` responses for browser caching
+- HTTP range requests (resumable downloads, media streaming)
+
+### Notes
+
+- A status code supplied with a directory path (e.g. `FILE-BROWSE 404 /dir`) is **ignored** and a warning is logged — the file server sets the status itself.
+- `client-add-header`, `client-del-header`, and the `Via: RouteMUX` header apply to directory routes.
+- Auth (`global-auth`, per-route `auth`, JWT) applies to directory routes.
+
+### CLI
+
+```bash
+# Serve a directory with listing
+routemux --route /static/ --dest "FILE-BROWSE /var/www/static"
+
+# Serve a directory without listing
+routemux --route /assets/ --dest "FILE /var/www/assets"
+```
 
 
 ---

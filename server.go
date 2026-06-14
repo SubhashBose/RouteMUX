@@ -273,41 +273,96 @@ func jwtMiddleware(h http.Handler, rc *RouteConfig, jwtCfg *JWTAuth) http.Handle
 	})
 }
 
+
+// isDir reports whether path is an existing directory.
+func isDir(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
+// noListFS wraps http.FileSystem to optionally disable directory listings.
+// When listing is disabled, requests for a directory without an index.html
+// return 403 Forbidden instead of showing the directory contents.
+type noListFS struct {
+	base    http.FileSystem
+	listing bool
+}
+
+func (fs noListFS) Open(name string) (http.File, error) {
+	f, err := fs.base.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	if !fs.listing {
+		info, err := f.Stat()
+		if err != nil {
+			f.Close()
+			return nil, err
+		}
+		if info.IsDir() {
+			// Check for index.html — if present, FileServer will serve it.
+			index, err := fs.base.Open(name + "/index.html")
+			if err != nil {
+				f.Close()
+				return nil, os.ErrPermission // triggers 403
+			}
+			index.Close()
+		}
+	}
+	return f, nil
+}
+
 // buildRouteHandler creates the http.Handler for one route.
 func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc *RouteConfig, cfg *Config) (http.Handler, error) {
-	// -- Static FILE response route --
-	// File is read from disk on every request so updated content is served
-	// immediately without a reload. The OS page cache means repeated reads
-	// of the same file are served from RAM, not physical disk.
-	// If the file is not found at request time, a 404 is returned.
+	// -- Static FILE / directory route --
 	if rc.StaticFilePath != "" {
-		filePath := rc.StaticFilePath
-		statuscode := rc.StatusCode
-		contentType := guessContentType(filePath)
-		var h http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			fileBytes, err := os.ReadFile(filePath)
-			if err != nil {
-				if os.IsNotExist(err) {
-					http.Error(w, "Not Found", http.StatusNotFound)
-				} else {
-					http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-					log.Printf("file route %q: error reading %q: %v", filePath, filePath, err)
-				}
-				return
+		var h http.Handler
+
+		if rc.StaticDirListing || isDir(rc.StaticFilePath) {
+			// Directory serving via http.FileServer.
+			// Warn if the user supplied an explicit status code — it is ignored.
+			if rc.StatusCode != 0 && rc.StatusCode != 200 {
+				log.Printf("Warning: route %q specifies status code %d with a directory path — status code is ignored for directory routes", routePath, rc.StatusCode)
 			}
-			w.Header().Set("Content-Type", contentType)
-			manipulateClientHeaders(w.Header(), nil, r, rc)
-			w.WriteHeader(statuscode)
-			w.Write(fileBytes) //nolint:errcheck
-		})
+			dirPath := rc.StaticFilePath
+			showListing := rc.StaticDirListing
+			fs := http.FileServer(noListFS{http.Dir(dirPath), showListing})
+			// Strip the route prefix so the file server sees paths relative to dirPath.
+			stripped := http.StripPrefix(routePath, fs)
+			h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				manipulateClientHeaders(w.Header(), nil, r, rc)
+				stripped.ServeHTTP(w, r)
+			})
+		} else {
+			// Single file: read from disk on every request so updates are served
+			// immediately. OS page cache keeps hot files in RAM.
+			filePath := rc.StaticFilePath
+			statuscode := rc.StatusCode
+			contentType := guessContentType(filePath)
+			h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fileBytes, err := os.ReadFile(filePath)
+				if err != nil {
+					if os.IsNotExist(err) {
+						http.Error(w, "Not Found", http.StatusNotFound)
+					} else {
+						http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+						log.Printf("file route %q: error reading %q: %v", routePath, filePath, err)
+					}
+					return
+				}
+				w.Header().Set("Content-Type", contentType)
+				manipulateClientHeaders(w.Header(), nil, r, rc)
+				w.WriteHeader(statuscode)
+				w.Write(fileBytes) //nolint:errcheck
+			})
+		}
+
 		effectiveAuth := cfg.GlobalAuth
 		if rc.AuthExplicit {
 			effectiveAuth = rc.Auth
 		}
 		h = requireBasicAuth(effectiveAuth, h)
-		// Wrap with JWT auth.
 		h = jwtMiddleware(h, rc, cfg.JWTAuth)
-
 		return h, nil
 	}
 
@@ -753,7 +808,7 @@ func requireBasicAuth(auth *Auth, h http.Handler) http.Handler {
 // Otherwise, it returns false and writes unauthorized response with WWW-Authenticate header.
 func checkBasicAuth(w http.ResponseWriter, r *http.Request, auth *Auth) bool {
 	user, pass, ok := r.BasicAuth()
-	valid:= ok && user == auth.User && pass == auth.Password
+	valid := ok && user == auth.User && pass == auth.Password
 	if !valid {
 		w.Header().Set("WWW-Authenticate", `Basic realm="routemux"`)
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
