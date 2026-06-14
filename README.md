@@ -501,6 +501,7 @@ The token signature is verified using `secret` (HMAC or PEM public key) or `jwk-
 - `jwk-url` accepts JWT keys URL in JSON Web Key Set (JWKS) format.
 - if both `secret` and `jwk-url` is set, then `secret` takes precedence over the `jwk-url`. 
 - If neither is set then based on 'iss' claim value RouteMUX will try to get JWK URL for Cloudflare or Auth0
+  - If you do not set either of `secret` or `jwk-url`, and want RouteMUX to automatically get JWK URL from Cloudflare or Auth0, then it is highly recommended to set `aud-id`. This is important from security point of view, as without `aud-id` any configured app from Cloudflare or Auth0 will issue a valid token for yor setup.
 
 ### Authorisation
 
