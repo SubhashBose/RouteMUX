@@ -125,11 +125,13 @@ func TestHMAC_ExpiredToken(t *testing.T) {
 	}
 }
 
-func TestHMAC_NoExpClaim_DoesNotError(t *testing.T) {
+func TestHMAC_NoExpClaim_Rejected(t *testing.T) {
+	// A token without an exp claim is rejected — non-expiring tokens are a
+	// security risk, so exp is mandatory.
 	tok := makeHMAC(jwt.MapClaims{"sub": "user-42"}) // no exp
-	val, err := jwtverify.Verify(tok, "sub", testSecret, "", "")
-	if err != nil || val != "user-42" {
-		t.Fatalf("want val=user-42 err=nil; got val=%v err=%v", val, err)
+	_, err := jwtverify.Verify(tok, "sub", testSecret, "", "")
+	if !errors.Is(err, jwtverify.ErrTokenInvalid) {
+		t.Fatalf("want ErrTokenInvalid for missing exp; got %v", err)
 	}
 }
 
@@ -302,5 +304,75 @@ func TestIss_UnknownDomain_ReturnsErrMissingKey(t *testing.T) {
 		if !errors.Is(err, jwtverify.ErrMissingKey) {
 			t.Fatalf("iss=%s: want ErrMissingKey; got %v", iss, err)
 		}
+	}
+}
+// ── Security regression tests ────────────────────────────────────────────────
+
+// TestAlgConfusion_RSAPublicKeyAsHMAC verifies the RS256→HS256 confusion attack
+// is blocked. An attacker takes the RSA public key (public knowledge), forges an
+// HS256 token signing it with the public key PEM as the HMAC secret. The server,
+// configured with that same public key, must NOT accept it.
+func TestAlgConfusion_RSAPublicKeyAsHMAC(t *testing.T) {
+	priv, _ := rsa.GenerateKey(rand.Reader, 2048)
+	pubPEM, _ := rsaPubPEM(&priv.PublicKey)
+
+	// Attacker forges an HS256 token using the public key PEM as the HMAC secret.
+	forged := jwt.NewWithClaims(jwt.SigningMethodHS256, liveClaims(jwt.MapClaims{"sub": "attacker"}))
+	forgedStr, err := forged.SignedString(pubPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Server is configured with the RSA public key. It must reject the forged token.
+	_, err = jwtverify.Verify(forgedStr, "sub", pubPEM, "", "")
+	if err == nil {
+		t.Fatal("SECURITY: algorithm confusion attack succeeded — forged HS256 token accepted with RSA public key")
+	}
+	if !errors.Is(err, jwtverify.ErrUnexpectedSigningMethod) && !errors.Is(err, jwtverify.ErrTokenInvalid) {
+		t.Fatalf("want signing method rejection; got %v", err)
+	}
+}
+
+// TestNbf_FutureTokenRejected verifies a token with a future nbf is rejected.
+func TestNbf_FutureTokenRejected(t *testing.T) {
+	claims := liveClaims(jwt.MapClaims{
+		"sub": "user",
+		"nbf": time.Now().Add(time.Hour).Unix(), // valid only in 1 hour
+	})
+	tok := makeHMAC(claims)
+	_, err := jwtverify.Verify(tok, "sub", testSecret, "", "")
+	if !errors.Is(err, jwtverify.ErrTokenInvalid) {
+		t.Fatalf("want ErrTokenInvalid for future nbf; got %v", err)
+	}
+}
+
+// TestNbf_PastTokenAccepted verifies a token with a past nbf is accepted.
+func TestNbf_PastTokenAccepted(t *testing.T) {
+	claims := liveClaims(jwt.MapClaims{
+		"sub": "user",
+		"nbf": time.Now().Add(-time.Hour).Unix(),
+	})
+	tok := makeHMAC(claims)
+	val, err := jwtverify.Verify(tok, "sub", testSecret, "", "")
+	if err != nil || val != "user" {
+		t.Fatalf("want val=user err=nil; got val=%v err=%v", val, err)
+	}
+}
+
+// TestExp_InvalidType verifies a token with a non-numeric exp is rejected.
+func TestExp_InvalidType(t *testing.T) {
+	tok := makeHMAC(jwt.MapClaims{"sub": "user", "exp": "not-a-number"})
+	_, err := jwtverify.Verify(tok, "sub", testSecret, "", "")
+	if !errors.Is(err, jwtverify.ErrTokenInvalid) {
+		t.Fatalf("want ErrTokenInvalid for invalid exp type; got %v", err)
+	}
+}
+
+// TestExp_NegativeRejected verifies a token with exp <= 0 is rejected.
+func TestExp_ZeroRejected(t *testing.T) {
+	tok := makeHMAC(jwt.MapClaims{"sub": "user", "exp": 0})
+	_, err := jwtverify.Verify(tok, "sub", testSecret, "", "")
+	if !errors.Is(err, jwtverify.ErrTokenInvalid) {
+		t.Fatalf("want ErrTokenInvalid for exp=0; got %v", err)
 	}
 }

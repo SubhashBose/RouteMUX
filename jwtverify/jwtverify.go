@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -102,6 +104,11 @@ func Verify(tokenString string, ClaimUsername string, Key []byte, JwkURL string,
 		return nil, err
 	}
 
+	// ── nbf ──────────────────────────────────────────────────────────────────
+	if err := checkNbf(claims); err != nil {
+		return nil, err
+	}
+
 	// ── aud ──────────────────────────────────────────────────────────────────
 	if Audience != "" {
 		if err := checkAud(claims, Audience); err != nil {
@@ -168,38 +175,119 @@ func issuerKeyFunc(unverified *jwt.Token) (jwt.Keyfunc, error) {
 	return func(_ *jwt.Token) (interface{}, error) { return pubKey, nil }, nil
 }
 
-// jwksURLForIssuer maps a known issuer domain to its JWKS endpoint.
-// Returns ErrMissingKey for unrecognised issuers.
-func jwksURLForIssuer(iss string) (string, error) {
-	switch {
-	case strings.HasSuffix(iss, ".cloudflareaccess.com"):
-		return iss + "/cdn-cgi/access/certs", nil
-	case strings.HasSuffix(iss, ".auth0.com"):
-		return iss + "/.well-known/jwks.json", nil
-	default:
-		return "", ErrMissingKey
-	}
+// allowedIssuerHosts maps a trusted provider's domain suffix to the path of its
+// JWKS endpoint. The match is performed against the parsed URL HOST, not the raw
+// string, so attacker-crafted issuers like
+// "https://evil.com/.cloudflareaccess.com" cannot pass.
+var allowedIssuerHosts = []struct {
+	suffix   string
+	jwksPath string
+}{
+	{".cloudflareaccess.com", "/cdn-cgi/access/certs"},
+	{".auth0.com", "/.well-known/jwks.json"},
 }
 
-// staticKeyFunc returns a jwt.Keyfunc that uses a fixed []byte secret or PEM key,
-// accepting any algorithm declared in the token header.
+// jwksURLForIssuer maps a known issuer domain to its JWKS endpoint.
+// The issuer must be an https URL whose HOST ends with a trusted provider
+// suffix. The JWKS URL is reconstructed from the validated scheme+host, never
+// from the raw issuer string, to prevent SSRF via path/query/fragment tricks.
+// Returns ErrMissingKey for unrecognised or malformed issuers.
+func jwksURLForIssuer(iss string) (string, error) {
+	u, err := url.Parse(iss)
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		return "", ErrMissingKey
+	}
+	// Reject anything with userinfo, since that does not belong in an issuer.
+	if u.User != nil {
+		return "", ErrMissingKey
+	}
+	host := u.Hostname() // strips any port
+	for _, p := range allowedIssuerHosts {
+		if strings.HasSuffix(host, p.suffix) {
+			// Reconstruct from validated scheme+host only — discard any
+			// attacker-controlled path, query, or fragment from the issuer.
+			return "https://" + u.Host + p.jwksPath, nil
+		}
+	}
+	return "", ErrMissingKey
+}
+
+// keyKind classifies the configured key material so we can pin the acceptable
+// signing algorithms and prevent algorithm-confusion attacks (e.g. an attacker
+// forging an HS256 token signed with an RSA *public* key as the HMAC secret).
+type keyKind int
+
+const (
+	keyKindHMAC keyKind = iota // raw shared secret → HMAC algorithms only
+	keyKindRSA                 // PEM RSA public key → RSA algorithms only
+	keyKindEC                  // PEM EC public key  → ECDSA algorithms only
+)
+
+// classifiedKey is the cached result of parsing a configured key.
+type classifiedKey struct {
+	kind keyKind
+	key  interface{}
+}
+
+// keyClassCache memoizes classifyKey results so PEM/ASN.1 parsing happens once
+// per distinct key, not on every request. The configured key is stable, so the
+// cache is effectively populated once at first use. Keyed by the raw key bytes.
+var (
+	keyClassCache   = map[string]classifiedKey{}
+	keyClassCacheMu sync.RWMutex
+)
+
+// classifyKey inspects the key material. If it parses as a PEM public key it is
+// asymmetric (RSA or EC); otherwise it is treated as a raw HMAC secret.
+// Results are cached by key bytes to avoid re-parsing on every request.
+func classifyKey(raw []byte) (keyKind, interface{}, error) {
+	cacheKey := string(raw)
+	keyClassCacheMu.RLock()
+	if ck, ok := keyClassCache[cacheKey]; ok {
+		keyClassCacheMu.RUnlock()
+		return ck.kind, ck.key, nil
+	}
+	keyClassCacheMu.RUnlock()
+
+	var ck classifiedKey
+	if pub, err := jwt.ParseRSAPublicKeyFromPEM(raw); err == nil {
+		ck = classifiedKey{keyKindRSA, pub}
+	} else if pub, err := jwt.ParseECPublicKeyFromPEM(raw); err == nil {
+		ck = classifiedKey{keyKindEC, pub}
+	} else {
+		// Not a PEM public key → treat as an HMAC shared secret.
+		ck = classifiedKey{keyKindHMAC, raw}
+	}
+
+	keyClassCacheMu.Lock()
+	keyClassCache[cacheKey] = ck
+	keyClassCacheMu.Unlock()
+	return ck.kind, ck.key, nil
+}
+
+// staticKeyFunc returns a jwt.Keyfunc that pins the signing algorithm family to
+// the type of the configured key. This is critical: the algorithm is chosen by
+// the KEY, never by the token header, which closes the RS256→HS256 confusion
+// attack where a public key is abused as an HMAC secret.
 func staticKeyFunc(raw []byte) jwt.Keyfunc {
+	kind, key, _ := classifyKey(raw)
 	return func(token *jwt.Token) (interface{}, error) {
 		switch token.Method.(type) {
 		case *jwt.SigningMethodHMAC:
-			return raw, nil
+			if kind != keyKindHMAC {
+				return nil, fmt.Errorf("%w: token uses HMAC but configured key is asymmetric", ErrUnexpectedSigningMethod)
+			}
+			return key, nil
 		case *jwt.SigningMethodRSA, *jwt.SigningMethodRSAPSS:
-			pub, err := jwt.ParseRSAPublicKeyFromPEM(raw)
-			if err != nil {
-				return nil, fmt.Errorf("invalid RSA public key: %w", err)
+			if kind != keyKindRSA {
+				return nil, fmt.Errorf("%w: token uses RSA but configured key is not RSA", ErrUnexpectedSigningMethod)
 			}
-			return pub, nil
+			return key, nil
 		case *jwt.SigningMethodECDSA:
-			pub, err := jwt.ParseECPublicKeyFromPEM(raw)
-			if err != nil {
-				return nil, fmt.Errorf("invalid EC public key: %w", err)
+			if kind != keyKindEC {
+				return nil, fmt.Errorf("%w: token uses ECDSA but configured key is not EC", ErrUnexpectedSigningMethod)
 			}
-			return pub, nil
+			return key, nil
 		default:
 			return nil, fmt.Errorf("%w: %v", ErrUnexpectedSigningMethod, token.Header["alg"])
 		}
@@ -208,26 +296,67 @@ func staticKeyFunc(raw []byte) jwt.Keyfunc {
 
 // ── claim checks ─────────────────────────────────────────────────────────────
 
-// checkExp validates the "exp" claim when present.
+// checkExp validates the "exp" claim. A token without an exp claim is rejected:
+// non-expiring tokens are a security risk, so exp is mandatory.
 func checkExp(claims jwt.MapClaims) error {
 	expVal, exists := claims["exp"]
 	if !exists {
-		return nil
+		return fmt.Errorf("%w: token has no exp claim", ErrTokenInvalid)
 	}
-	var expUnix int64
-	switch v := expVal.(type) {
-	case float64:
-		expUnix = int64(v)
-	case json.Number:
-		expUnix, _ = v.Int64()
-	case int64:
-		expUnix = v
+	expUnix, ok := claimToUnix(expVal)
+	if !ok {
+		return fmt.Errorf("%w: exp claim has invalid type", ErrTokenInvalid)
 	}
-	if expUnix > 0 && time.Now().Unix() > expUnix {
+	if time.Now().Unix() > expUnix {
 		return fmt.Errorf("%w: expired at %s",
 			ErrTokenExpired, time.Unix(expUnix, 0).UTC().Format(time.RFC3339))
 	}
 	return nil
+}
+
+// checkNbf validates the "nbf" (not-before) claim when present. A token whose
+// nbf is in the future is not yet valid and is rejected.
+func checkNbf(claims jwt.MapClaims) error {
+	nbfVal, exists := claims["nbf"]
+	if !exists {
+		return nil // nbf is optional
+	}
+	nbfUnix, ok := claimToUnix(nbfVal)
+	if !ok {
+		return fmt.Errorf("%w: nbf claim has invalid type", ErrTokenInvalid)
+	}
+	// Allow a small clock-skew tolerance of 60 seconds.
+	if time.Now().Unix()+60 < nbfUnix {
+		return fmt.Errorf("%w: token not valid before %s",
+			ErrTokenInvalid, time.Unix(nbfUnix, 0).UTC().Format(time.RFC3339))
+	}
+	return nil
+}
+
+// claimToUnix converts a numeric JWT time claim to a Unix timestamp.
+// Returns ok=false for missing, zero, negative, or non-numeric values.
+func claimToUnix(v interface{}) (int64, bool) {
+	var n int64
+	switch t := v.(type) {
+	case float64:
+		n = int64(t)
+	case json.Number:
+		parsed, err := t.Int64()
+		if err != nil {
+			return 0, false
+		}
+		n = parsed
+	case int64:
+		n = t
+	case int:
+		n = int64(t)
+	default:
+		return 0, false
+	}
+	if n <= 0 {
+		return 0, false
+	}
+	return n, true
 }
 
 // checkAud validates that the "aud" claim contains the expected audience.

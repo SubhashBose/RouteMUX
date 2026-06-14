@@ -136,8 +136,10 @@ func (s *server) buildMux(routes map[string]*RouteConfig, cfg *Config) (*http.Se
 
 	for _, path := range paths {
 		rc := routes[path]
+		// A picker is only needed for proxy routes (those with upstreams).
+		// STATUS and FILE/FILE-BROWSE routes have no upstreams.
 		var picker *upstreamPicker
-		if rc.StatusCode == 0 {
+		if len(rc.Upstreams) > 0 {
 			picker = newUpstreamPicker(rc.Upstreams, rc.LBMode)
 		}
 
@@ -150,7 +152,7 @@ func (s *server) buildMux(routes map[string]*RouteConfig, cfg *Config) (*http.Se
 			// /api itself. Each needs its own routePath for correct prefix stripping.
 			// first here we also add trailing slash to upstream path if not present already
 			subtreePicker := picker
-			if rc.StatusCode == 0 {
+			if len(rc.Upstreams) > 0 {
 				subtreeUpstreams := make([]Upstream, len(rc.Upstreams))
 				for i, u := range rc.Upstreams {
 					subtreeUpstreams[i] = u // copy scalar fields (URL, Weight)

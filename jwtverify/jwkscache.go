@@ -101,17 +101,29 @@ func (c *jwksCache) getKey(url, kid string) (interface{}, error) {
 // fetchAndParseJWKS downloads a JWKS, parses all keys, and returns:
 //   - map[kid]→publicKey
 //   - TTL derived from Cache-Control: max-age (or defaultJWKSTTL as fallback)
+// jwksHTTPClient has a bounded timeout so a slow or malicious JWKS endpoint
+// cannot hang verification indefinitely.
+var jwksHTTPClient = &http.Client{Timeout: 10 * time.Second}
+
+// maxJWKSBodySize caps the JWKS response body to prevent memory exhaustion
+// from a malicious endpoint returning an enormous payload.
+const maxJWKSBodySize = 1 << 20 // 1 MiB
+
 func fetchAndParseJWKS(url string) (map[string]interface{}, time.Duration, error) {
 	log.Printf("Fetching JWKS from %s", url)
-	resp, err := http.Get(url) //nolint:gosec
+	resp, err := jwksHTTPClient.Get(url) //nolint:gosec
 	if err != nil {
 		return nil, 0, fmt.Errorf("fetching JWKS from %s: %w", url, err)
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		return nil, 0, fmt.Errorf("fetching JWKS from %s: unexpected status %d", url, resp.StatusCode)
+	}
+
 	ttl := parseCacheControlMaxAge(resp.Header.Get("Cache-Control"))
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxJWKSBodySize))
 	if err != nil {
 		return nil, 0, fmt.Errorf("reading JWKS response from %s: %w", url, err)
 	}
