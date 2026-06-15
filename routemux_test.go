@@ -4979,3 +4979,52 @@ func TestParseFileField_BrowseCaseInsensitive(t *testing.T) {
 		t.Error("browse should be true")
 	}
 }
+func TestJWT_Validation_IssuerFallbackRequiresAud(t *testing.T) {
+	// No secret, no jwk-url, no aud-id → must fail validation, because the
+	// issuer fallback would otherwise accept any provider tenant's token.
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/api/": {Upstreams: []Upstream{mustUpstream("http://localhost:3000/", 1)}},
+	})
+	cfg.JWTAuth = &JWTAuth{
+		HeaderKey: "Authorization",
+		// no Secret, no JWKURL, no AudID
+	}
+	if err := cfg.validate(); err == nil {
+		t.Error("validate should fail: issuer fallback without aud-id")
+	}
+
+	// Adding aud-id makes it valid.
+	cfg.JWTAuth.AudID = "my-app"
+	if err := cfg.validate(); err != nil {
+		t.Errorf("validate should pass with aud-id set: %v", err)
+	}
+}
+
+func TestJWT_Validation_SecretWithoutAud_OK(t *testing.T) {
+	// With a secret configured, aud-id is NOT required (key is pinned).
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/api/": {Upstreams: []Upstream{mustUpstream("http://localhost:3000/", 1)}},
+	})
+	cfg.JWTAuth = &JWTAuth{
+		HeaderKey: "Authorization",
+		Secret:    "my-secret",
+		// no AudID — allowed because the key is explicitly pinned
+	}
+	if err := cfg.validate(); err != nil {
+		t.Errorf("validate should pass with secret and no aud-id: %v", err)
+	}
+}
+
+func TestJWT_Validation_JWKURLWithoutAud_OK(t *testing.T) {
+	// With jwk-url configured, aud-id is NOT required (endpoint is pinned).
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/api/": {Upstreams: []Upstream{mustUpstream("http://localhost:3000/", 1)}},
+	})
+	cfg.JWTAuth = &JWTAuth{
+		HeaderKey: "Authorization",
+		JWKURL:    "https://myorg.auth0.com/.well-known/jwks.json",
+	}
+	if err := cfg.validate(); err != nil {
+		t.Errorf("validate should pass with jwk-url and no aud-id: %v", err)
+	}
+}

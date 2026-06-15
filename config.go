@@ -181,6 +181,14 @@ func (c *Config) validate() error {
 		if c.JWTAuth.HeaderKey == "" && c.JWTAuth.CookieKey == "" {
 			return fmt.Errorf("jwt-authentication requires at least one of header-key or cookie-key")
 		}
+		// When neither secret nor jwk-url is set, the verifier falls back to
+		// resolving keys from the token's own "iss" claim (Cloudflare Access /
+		// Auth0). That fallback trusts ANY tenant on those providers, so an
+		// aud-id is mandatory to scope acceptance to this application — without
+		// it, a correctly-signed token from any provider tenant would be accepted.
+		if c.JWTAuth.Secret == "" && c.JWTAuth.JWKURL == "" && c.JWTAuth.AudID == "" {
+			return fmt.Errorf("jwt-authentication requires aud-id when neither secret nor jwk-url is configured (issuer fallback accepts any provider tenant otherwise)")
+		}
 	}
 	return nil
 }
