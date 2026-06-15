@@ -15,28 +15,43 @@ func isWebSocketUpgrade(r *http.Request) bool {
 		strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade")
 }
 
-// dialUpstream opens a raw TCP (or TLS) connection to the upstream host.
-func dialUpstream(destURL *url.URL, noTLSVerify bool) (net.Conn, error) {
-	host := destURL.Host
-	// Ensure there is a port.
-	if _, _, err := net.SplitHostPort(host); err != nil {
-		switch destURL.Scheme {
-		case "wss", "https":
-			host = host + ":443"
-		default:
-			host = host + ":80"
+// dialUpstream opens a raw TCP, TLS, or Unix-socket connection to the upstream.
+// When socketPath is non-empty the connection targets that Unix socket instead
+// of a TCP host; the scheme still selects plain vs TLS transport.
+func dialUpstream(destURL *url.URL, noTLSVerify bool, socketPath string) (net.Conn, error) {
+	var host string
+	var connType string
+	if socketPath != "" {
+		// Unix-socket upstream. The destURL.Host is a synthetic label and is
+		// not used for dialing.
+		host = socketPath
+		connType = "unix"
+		// TLS over the socket. The synthetic host cannot match a cert SAN,
+		// so hostname verification is skipped — the socket is the trust
+		// boundary (mirrors the HTTP transport behaviour for unixs://).
+		noTLSVerify = true
+	} else {
+		host = destURL.Host
+		connType = "tcp"
+		// Ensure there is a port.
+		if _, _, err := net.SplitHostPort(host); err != nil {
+			switch destURL.Scheme {
+			case "wss", "https":
+				host = host + ":443"
+			default:
+				host = host + ":80"
+			}
 		}
 	}
 	switch destURL.Scheme {
 	case "wss", "https":
-		return tlsDial("tcp", host, tlsConfigForDial(noTLSVerify))
+		return tlsDial(connType, host, tlsConfigForDial(noTLSVerify))
 	default:
-		return net.Dial("tcp", host)
+		return net.Dial(connType, host)
 	}
 }
-
 // serveWebSocket tunnels a WebSocket upgrade request to the upstream.
-func serveWebSocket(w http.ResponseWriter, r *http.Request, destURL *url.URL, routePath string, rc *RouteConfig, effectiveAuth *Auth, cfg *Config) {
+func serveWebSocket(w http.ResponseWriter, r *http.Request, destURL *url.URL, socketPath string, routePath string, rc *RouteConfig, effectiveAuth *Auth, cfg *Config) {
 	// --- 1. Hijack the client connection ---
 	hj, ok := w.(http.Hijacker)
 	if !ok {
@@ -51,7 +66,7 @@ func serveWebSocket(w http.ResponseWriter, r *http.Request, destURL *url.URL, ro
 	defer clientConn.Close()
 
 	// --- 2. Dial upstream ---
-	upstreamConn, err := dialUpstream(destURL, rc.NoTLSVerify)
+	upstreamConn, err := dialUpstream(destURL, rc.NoTLSVerify, socketPath)
 	if err != nil {
 		fmt.Fprintf(clientConn, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
 		return
@@ -84,7 +99,12 @@ func serveWebSocket(w http.ResponseWriter, r *http.Request, destURL *url.URL, ro
 	outHost := r.Host
 	for _, name := range rc.DeleteHeaders {
 		if strings.EqualFold(name, "host") {
-			outHost = destURL.Host
+			if socketPath != "" {
+				// Synthetic unix host is meaningless to the backend; use localhost.
+				outHost = "localhost"
+			} else {
+				outHost = destURL.Host
+			}
 		}
 	}
 

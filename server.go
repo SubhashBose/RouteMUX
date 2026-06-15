@@ -624,7 +624,7 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 	// handleWS uses effectiveAuth which is declared above.
 	handleWS := func(w http.ResponseWriter, r *http.Request) {
 		upstream := picker.pick(lbMode)
-		serveWebSocket(w, r, upstream.ParsedURL, routePath, rc, effectiveAuth, cfg)
+		serveWebSocket(w, r, upstream.ParsedURL, upstream.UnixSocket, routePath, rc, effectiveAuth, cfg)
 	}
 
 	var h http.Handler = proxy

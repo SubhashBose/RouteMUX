@@ -5390,3 +5390,125 @@ func TestUnix_SubtreeNoSlashRoute(t *testing.T) {
 		t.Errorf("subtree path mapping wrong; backend saw paths %v, want /v1/users among them", paths)
 	}
 }
+
+func TestUnix_WebSocketUpstream(t *testing.T) {
+	// WebSocket upgrade tunneled to a backend listening on a Unix socket.
+	dir, _ := os.MkdirTemp("", "routemux-unixws-*")
+	defer os.RemoveAll(dir)
+	sockPath := filepath.Join(dir, "ws.sock")
+
+	gotPath := make(chan string, 1)
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	// Minimal WebSocket-accepting backend on the unix socket.
+	backend := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath <- r.URL.RequestURI()
+		hj := w.(http.Hijacker)
+		conn, _, _ := hj.Hijack()
+		conn.Write([]byte("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"))
+		conn.Close()
+	})}
+	go backend.Serve(ln)
+	defer backend.Close()
+
+	destURL, sock, _, _ := parseUnixUpstream("unix://" + sockPath + ":/ws/")
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/socket/": {Upstreams: []Upstream{{URL: "unix://" + sockPath + ":/ws/", ParsedURL: destURL, Weight: 1, UnixSocket: sock}}},
+	})
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	resp := wsUpgradeRequest(t, ts.URL+"/socket/chat", nil)
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Errorf("ws over unix: status = %d, want 101", resp.StatusCode)
+	}
+
+	select {
+	case p := <-gotPath:
+		if p != "/ws/chat" {
+			t.Errorf("backend got path %q, want /ws/chat", p)
+		}
+	default:
+		t.Error("backend did not receive the upgrade")
+	}
+}
+
+func TestUnix_HostHeaderManipulation(t *testing.T) {
+	// Verify default / dest-add-header:Host / dest-del-header:Host on a unix upstream.
+	dir, _ := os.MkdirTemp("", "routemux-unixhdr-*")
+	defer os.RemoveAll(dir)
+	sockPath := filepath.Join(dir, "backend.sock")
+
+	gotHost := make(chan string, 1)
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	backend := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHost <- r.Host
+		w.Write([]byte("ok"))
+	})}
+	go backend.Serve(ln)
+	defer backend.Close()
+
+	makeCfg := func(rc *RouteConfig) *httptest.Server {
+		destURL, sock, _, _ := parseUnixUpstream("unix://" + sockPath + ":/")
+		rc.Upstreams = []Upstream{{URL: "unix://" + sockPath, ParsedURL: destURL, Weight: 1, UnixSocket: sock}}
+		cfg := makeConfig(8080, map[string]*RouteConfig{"/": rc})
+		srv, _ := newServer(cfg)
+		return httptest.NewServer(srv.handler())
+	}
+
+	doReq := func(ts *httptest.Server) string {
+		req, _ := http.NewRequest("GET", ts.URL+"/", nil)
+		req.Host = "client.example.com"
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.ReadAll(resp.Body)
+		return <-gotHost
+	}
+
+	// 1. Default: client Host preserved
+	ts1 := makeCfg(&RouteConfig{})
+	if h := doReq(ts1); h != "client.example.com" {
+		t.Errorf("default: backend Host = %q, want client.example.com", h)
+	}
+	ts1.Close()
+
+	// 2. dest-del-header: Host → localhost (synthetic unix host suppressed)
+	ts2 := makeCfg(&RouteConfig{DeleteHeaders: []string{"Host"}})
+	if h := doReq(ts2); h != "localhost" {
+		t.Errorf("del-header: backend Host = %q, want localhost", h)
+	}
+	ts2.Close()
+
+	// 3. dest-add-header: Host → user value wins
+	ts3 := makeCfg(&RouteConfig{
+		ParsedAddHeaders: map[string]parsedHeaderValue{
+			"Host": compileHeaderValue("custom-backend.internal"),
+		},
+	})
+	if h := doReq(ts3); h != "custom-backend.internal" {
+		t.Errorf("add-header: backend Host = %q, want custom-backend.internal", h)
+	}
+	ts3.Close()
+
+	// 4. Both del + add → add wins
+	ts4 := makeCfg(&RouteConfig{
+		DeleteHeaders: []string{"Host"},
+		ParsedAddHeaders: map[string]parsedHeaderValue{
+			"Host": compileHeaderValue("wins.internal"),
+		},
+	})
+	if h := doReq(ts4); h != "wins.internal" {
+		t.Errorf("del+add: backend Host = %q, want wins.internal (add wins)", h)
+	}
+	ts4.Close()
+}
