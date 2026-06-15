@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha1"
+	"encoding/hex"
 	"bytes"
 	"fmt"
 	"log"
@@ -125,9 +127,10 @@ type Auth struct {
 
 // Upstream holds the destination URL and per-upstream options for a route.
 type Upstream struct {
-	URL       string
-	ParsedURL *url.URL // parsed once at startup, never nil for valid routes
-	Weight    int      // default 1; used for weighted load balancing (future)
+	URL        string
+	ParsedURL  *url.URL // parsed once at startup, never nil for valid routes
+	Weight     int      // default 1; used for weighted load balancing (future)
+	UnixSocket string   // non-empty: dial this Unix socket path instead of TCP
 }
 
 // RouteConfig describes a single reverse-proxy route.
@@ -612,6 +615,63 @@ func guessContentType(filename string) string {
 }
 
 
+// parseUnixUpstream recognises a Unix-socket upstream and returns a synthetic
+// HTTP(S) URL plus the socket path. Format:
+//
+//	unix:///path/to.sock:/httppath    → plain HTTP over the socket
+//	unixs:///path/to.sock:/httppath   → TLS  over the socket
+//
+// The socket path and the HTTP path are separated by the LAST colon (socket
+// paths do not normally contain colons). The returned url.URL uses a synthetic
+// host so net/http routing works; the real dial target is the socket path,
+// carried separately and used by the custom transport dialer.
+// Returns ok=false if s is not a unix upstream.
+func parseUnixUpstream(s string) (parsedURL *url.URL, socketPath string, ok bool, err error) {
+	var scheme, rest string
+	switch {
+	case strings.HasPrefix(s, "unixs://"):
+		scheme, rest = "https", s[len("unixs://"):]
+	case strings.HasPrefix(s, "unix://"):
+		scheme, rest = "http", s[len("unix://"):]
+	default:
+		return nil, "", false, nil
+	}
+	// rest is "<socketpath>:<httppath>" or just "<socketpath>".
+	httpPath := "/"
+	if idx := strings.LastIndex(rest, ":"); idx >= 0 {
+		socketPath = rest[:idx]
+		httpPath = rest[idx+1:]
+	} else {
+		socketPath = rest
+	}
+	if socketPath == "" {
+		return nil, "", false, fmt.Errorf("unix upstream %q: empty socket path", s)
+	}
+	if !strings.HasPrefix(socketPath, "/") {
+		socketPath = "/" + socketPath
+	}
+	if !strings.HasPrefix(httpPath, "/") {
+		httpPath = "/" + httpPath
+	}
+	// Synthetic host derived from the socket path so each distinct socket maps
+	// to a stable, unique Host. The transport's DialContext maps this host back
+	// to the socket path; net/http never actually resolves it via DNS.
+	u := &url.URL{
+		Scheme: scheme,
+		Host:   unixHostLabel(socketPath),
+		Path:   httpPath,
+	}
+	return u, socketPath, true, nil
+}
+
+// unixHostLabel returns a deterministic, DNS-safe synthetic host for a socket
+// path. Different socket paths yield different labels so they can be told apart
+// when a single route mixes multiple unix upstreams.
+func unixHostLabel(socketPath string) string {
+	sum := sha1.Sum([]byte(socketPath))
+	return "unix-" + hex.EncodeToString(sum[:8])
+}
+
 // parseUpstreamString parses a single upstream entry from a dest list.
 // Format: "URL [weight=N]"
 // Returns an error if the entry looks like a STATUS directive (not valid in a list).
@@ -663,6 +723,13 @@ func applyDestEntries(rc *RouteConfig, entries []string, routePath string) error
 			rc.StaticDirListing = browse
 			return nil
 		}
+		if u, sock, isUnix, uerr := parseUnixUpstream(entries[0]); isUnix {
+			if uerr != nil {
+				return fmt.Errorf("route %q: %w", routePath, uerr)
+			}
+			rc.Upstreams = []Upstream{{URL: entries[0], ParsedURL: u, Weight: 1, UnixSocket: sock}}
+			return nil
+		}
 		parsed, err := url.Parse(entries[0])
 		if err != nil {
 			return fmt.Errorf("route %q: invalid dest URL: %w", routePath, err)
@@ -676,6 +743,15 @@ func applyDestEntries(rc *RouteConfig, entries []string, routePath string) error
 		u, err := parseUpstreamString(entry)
 		if err != nil {
 			return fmt.Errorf("route %q: %w", routePath, err)
+		}
+		if pu, sock, isUnix, uerr := parseUnixUpstream(u.URL); isUnix {
+			if uerr != nil {
+				return fmt.Errorf("route %q: %w", routePath, uerr)
+			}
+			u.ParsedURL = pu
+			u.UnixSocket = sock
+			upstreams = append(upstreams, u)
+			continue
 		}
 		u.ParsedURL, err = url.Parse(u.URL)
 		if err != nil {

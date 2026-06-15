@@ -116,7 +116,7 @@ RouteMUX looks for `config.yml` in this order:
 
 ```yaml
 global:
-  listen:           # IP address or interface name (e.g. 192.168.1.10, eth0, lo). Empty = all interfaces.
+  listen:           # IP address, interface name (e.g. 192.168.1.10, eth0, lo), or unix:/path.sock. Empty = all interfaces.
   port: 8080        # Port to listen on (default: 8080)
   # tls-cert: /path/to/cert.pem
   # tls-key:  /path/to/key.pem
@@ -255,7 +255,7 @@ Following are the route options must follow `--route`. The `--route` + route opt
 
 | Flag | Description |
 |------|-------------|
-| `--dest URL` | Upstream destination (repeatable — multiple `--dest` flags with URL and optional weight=<N> create a load-balanced route). Use `STATUS <code> [text]` for a static response. Use `FILE [code] <path>` to serve a static file, or `FILE-BROWSE <dir>` to serve a directory. |
+| `--dest URL` | Upstream destination (repeatable — multiple `--dest` flags with URL and optional weight=<N> create a load-balanced route). Use `STATUS <code> [text]` for a static response. Use `FILE [code] <path>` to serve a static file, or `FILE-BROWSE <dir>` to serve a directory. Use `unix:///sock:/path` or `unixs:///sock:/path` for Unix-socket upstreams. |
 | `--load-balancer-mode MODE` | Load balancer mode: `random` (default) or `round-robin` |
 | `--noTLSverify` | Skip TLS certificate verification for this upstream |
 | `--auth USER:PASS` | Per-route Basic Auth (overrides `--global-auth`) |
@@ -869,6 +869,50 @@ routemux --route /static/ --dest "FILE-BROWSE /var/www/static"
 routemux --route /assets/ --dest "FILE /var/www/assets"
 ```
 
+
+---
+
+## Unix Domain Sockets
+
+RouteMUX can listen on a Unix socket and forward to upstreams over Unix sockets.
+
+### Listening on a Unix socket
+
+Set `listen` to a `unix:` address (the `port` is ignored):
+
+```yaml
+global:
+  listen: unix:/var/run/routemux.sock
+```
+
+Both `unix:/path.sock` and `unix:///path.sock` forms are accepted. A stale socket file from an unclean shutdown is removed automatically before binding.
+
+### Upstreams over a Unix socket
+
+Use a `unix://` (plain HTTP) or `unixs://` (TLS) dest. The socket path and the upstream HTTP path are separated by a colon:
+
+```yaml
+routes:
+  /api/:
+    dest: unix:///var/run/backend.sock:/v1/      # HTTP over the socket, upstream path /v1/
+
+  /secure/:
+    dest: unixs:///var/run/secure.sock:/api/     # TLS over the socket
+```
+
+The format is `unix://<socket-path>:<http-path>`; the HTTP path defaults to `/` if omitted. Unix-socket upstreams can be mixed with TCP upstreams and used in load-balanced routes.
+
+**Note on TLS (`unixs://`):** because the connection targets a socket file rather than a hostname, the upstream certificate's hostname cannot be verified — the socket itself is the trust boundary. RouteMUX therefore skips hostname verification for `unixs://` upstreams.
+
+### CLI
+
+```bash
+# Listen on a socket, forward to a TCP backend
+routemux --listen unix:/var/run/routemux.sock --route / --dest http://localhost:3000/
+
+# Listen on TCP, forward to a socket backend
+routemux --port 8080 --route /api/ --dest "unix:///var/run/backend.sock:/v1/"
+```
 
 ---
 

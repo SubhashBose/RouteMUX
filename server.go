@@ -93,6 +93,9 @@ func newServer(cfg *Config) (*server, error) {
 }
 
 func (s *server) listenAddr() string {
+	if isUnixListen(s.bindIP) {
+		return s.bindIP // unix: address passed through; resolved at Listen time
+	}
 	return fmt.Sprintf("%s:%d", s.bindIP, s.state.Load().cfg.Port)
 }
 
@@ -390,6 +393,18 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 	}
 
 	// -- TLS transport wrapped in a RoundTripper that fixes X-Forwarded-For --
+	// Build a map of synthetic-host → unix socket path for any unix upstreams on
+	// this route, so the dialer can route those hosts to their sockets.
+	var unixHosts map[string]string
+	for _, u := range rc.Upstreams {
+		if u.UnixSocket != "" {
+			if unixHosts == nil {
+				unixHosts = make(map[string]string)
+			}
+			unixHosts[u.ParsedURL.Host] = u.UnixSocket
+		}
+	}
+
 	// The Director always sets X-Forwarded-For, but Go's ReverseProxy appends
 	// the client IP again after the Director returns, causing duplication.
 	// The xffRoundTripper strips that extra append before the request hits the wire.
@@ -397,6 +412,24 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: rc.NoTLSVerify, //nolint:gosec
 		},
+	}
+	if unixHosts != nil {
+		// Custom dialer: if the target host is one of our synthetic unix hosts,
+		// dial the Unix socket instead of TCP. Other hosts dial normally.
+		stdDialer := &net.Dialer{}
+		baseTransport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			host, _, _ := net.SplitHostPort(addr)
+			if sock, ok := unixHosts[host]; ok {
+				return stdDialer.DialContext(ctx, "unix", sock)
+			}
+			return stdDialer.DialContext(ctx, network, addr)
+		}
+		// For TLS over a Unix socket (unixs://), the synthetic host can never
+		// match a certificate SAN, so standard hostname verification cannot
+		// succeed. The local socket is itself the trust boundary, so skip
+		// hostname verification for unix-TLS upstreams (unless the operator has
+		// already enabled NoTLSVerify globally for the route).
+		baseTransport.TLSClientConfig.InsecureSkipVerify = true //nolint:gosec
 	}
 	transport := &xffRoundTripper{base: baseTransport}
 	lbMode := rc.LBMode
@@ -424,6 +457,7 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 			// Pick an upstream for this request — ParsedURL computed once at startup.
 			upstream := picker.pick(lbMode)
 			destURL := upstream.ParsedURL
+			upstreamIsUnix := upstream.UnixSocket != ""
 
 			// Strip the route prefix from the path, then prepend the dest path.
 			stripped := strings.TrimPrefix(req.URL.Path, routePath)
@@ -529,7 +563,13 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 			// Host is special: Go ignores req.Header["Host"] — it reads req.Host.
 			for _, name := range rc.DeleteHeaders {
 				if strings.EqualFold(name, "host") {
-					req.Host = "" // fall back to req.URL.Host (upstream address)
+					if upstreamIsUnix {
+						// req.URL.Host is a synthetic "unix-<hash>" label that is
+						// meaningless to the backend; use localhost instead.
+						req.Host = "localhost"
+					} else {
+						req.Host = "" // fall back to req.URL.Host (upstream address)
+					}
 				}
 			}
 			applyDeleteHeaders(req.Header, rc.DeleteHeaders, rc.DeleteHasWildcard)
@@ -694,9 +734,21 @@ func (s *server) run() error {
 		}()
 	}
 
-	// Bind the TCP listener first so we can log only after the socket is
-	// actually ready to accept connections.
-	ln, err := net.Listen("tcp", addr)
+	// Bind the listener first so we can log only after the socket is actually
+	// ready to accept connections. Supports both TCP and Unix domain sockets.
+	var ln net.Listener
+	var err error
+	if isUnixListen(addr) {
+		sockPath := unixSocketPath(addr)
+		// Remove a stale socket file left behind by an unclean shutdown so the
+		// bind does not fail with "address already in use".
+		if fi, serr := os.Stat(sockPath); serr == nil && fi.Mode()&os.ModeSocket != 0 {
+			_ = os.Remove(sockPath)
+		}
+		ln, err = net.Listen("unix", sockPath)
+	} else {
+		ln, err = net.Listen("tcp", addr)
+	}
 	if err != nil {
 		return err
 	}

@@ -2,6 +2,8 @@ package main
 
 import (
 	"io"
+	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -5026,5 +5028,365 @@ func TestJWT_Validation_JWKURLWithoutAud_OK(t *testing.T) {
 	}
 	if err := cfg.validate(); err != nil {
 		t.Errorf("validate should pass with jwk-url and no aud-id: %v", err)
+	}
+}
+
+// ---- Unix socket support tests ----
+
+func TestUnix_ParseListenAddress(t *testing.T) {
+	cases := map[string]string{
+		"unix:/run/r.sock":    "/run/r.sock",
+		"unix:///run/r.sock":  "/run/r.sock",
+		"unix://run/r.sock":   "/run/r.sock",
+	}
+	for in, want := range cases {
+		if !isUnixListen(in) {
+			t.Errorf("isUnixListen(%q) = false, want true", in)
+		}
+		if got := unixSocketPath(in); got != want {
+			t.Errorf("unixSocketPath(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if isUnixListen("127.0.0.1") {
+		t.Error("isUnixListen should be false for an IP")
+	}
+}
+
+func TestUnix_ParseUpstream(t *testing.T) {
+	u, sock, ok, err := parseUnixUpstream("unix:///var/run/backend.sock:/api/")
+	if err != nil || !ok {
+		t.Fatalf("parse failed: ok=%v err=%v", ok, err)
+	}
+	if sock != "/var/run/backend.sock" {
+		t.Errorf("socket = %q, want /var/run/backend.sock", sock)
+	}
+	if u.Scheme != "http" {
+		t.Errorf("scheme = %q, want http", u.Scheme)
+	}
+	if u.Path != "/api/" {
+		t.Errorf("path = %q, want /api/", u.Path)
+	}
+}
+
+func TestUnix_ParseUpstreamTLS(t *testing.T) {
+	u, sock, ok, err := parseUnixUpstream("unixs:///var/run/backend.sock:/secure/")
+	if err != nil || !ok {
+		t.Fatalf("parse failed: ok=%v err=%v", ok, err)
+	}
+	if sock != "/var/run/backend.sock" {
+		t.Errorf("socket = %q", sock)
+	}
+	if u.Scheme != "https" {
+		t.Errorf("scheme = %q, want https", u.Scheme)
+	}
+}
+
+func TestUnix_ParseUpstreamNoHTTPPath(t *testing.T) {
+	u, sock, ok, _ := parseUnixUpstream("unix:///var/run/backend.sock")
+	if !ok {
+		t.Fatal("should parse")
+	}
+	if sock != "/var/run/backend.sock" {
+		t.Errorf("socket = %q", sock)
+	}
+	if u.Path != "/" {
+		t.Errorf("default path = %q, want /", u.Path)
+	}
+}
+
+func TestUnix_ParseUpstreamNotUnix(t *testing.T) {
+	_, _, ok, _ := parseUnixUpstream("http://localhost:3000/")
+	if ok {
+		t.Error("http URL should not parse as unix upstream")
+	}
+}
+
+func TestUnix_UpstreamProxy(t *testing.T) {
+	// End-to-end: backend listens on a Unix socket; RouteMUX proxies to it.
+	dir, err := os.MkdirTemp("", "routemux-unix-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	sockPath := filepath.Join(dir, "backend.sock")
+
+	// Start a backend HTTP server on the Unix socket.
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	backend := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("from-unix-backend:" + r.URL.Path))
+	})}
+	go backend.Serve(ln)
+	defer backend.Close()
+
+	// Configure RouteMUX with a unix upstream.
+	destURL, sock, _, _ := parseUnixUpstream("unix://" + sockPath + ":/")
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/api/": {Upstreams: []Upstream{{URL: "unix://" + sockPath, ParsedURL: destURL, Weight: 1, UnixSocket: sock}}},
+	})
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/api/hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "from-unix-backend") {
+		t.Errorf("body = %q, want from-unix-backend...", body)
+	}
+}
+
+func TestUnix_UpstreamYAML(t *testing.T) {
+	f, _ := os.CreateTemp("", "routemux-*.yml")
+	f.WriteString(`
+global:
+  port: 8080
+routes:
+  /api/:
+    dest: unix:///var/run/backend.sock:/v1/
+`)
+	f.Close()
+	defer os.Remove(f.Name())
+
+	cfg, err := loadConfigFile(f.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc := cfg.VHosts[0].Routes["/api/"]
+	if rc == nil || len(rc.Upstreams) != 1 {
+		t.Fatal("route/upstream missing")
+	}
+	if rc.Upstreams[0].UnixSocket != "/var/run/backend.sock" {
+		t.Errorf("UnixSocket = %q", rc.Upstreams[0].UnixSocket)
+	}
+	if rc.Upstreams[0].ParsedURL.Path != "/v1/" {
+		t.Errorf("path = %q", rc.Upstreams[0].ParsedURL.Path)
+	}
+}
+
+func TestUnix_ListenEndToEnd(t *testing.T) {
+	// RouteMUX listens on a Unix socket; a client connects to it via the socket.
+	dir, err := os.MkdirTemp("", "routemux-listen-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	sockPath := filepath.Join(dir, "routemux.sock")
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("ok"))
+	}))
+	defer backend.Close()
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/": {Upstreams: []Upstream{mustUpstream(backend.URL+"/", 1)}},
+	})
+	cfg.Listen = "unix:" + sockPath
+
+	srv, err := newServer(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// listenAddr should return the unix: form
+	if srv.listenAddr() != "unix:"+sockPath {
+		t.Errorf("listenAddr = %q, want unix:%s", srv.listenAddr(), sockPath)
+	}
+
+	// Bind the socket manually (mirrors run()'s logic) and serve.
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	httpSrv := &http.Server{Handler: srv.handler()}
+	go httpSrv.Serve(ln)
+	defer httpSrv.Close()
+
+	// Client dials the socket directly.
+	client := &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "unix", sockPath)
+			},
+		},
+	}
+	resp, err := client.Get("http://unix/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "ok" {
+		t.Errorf("body = %q, want ok", body)
+	}
+}
+
+func TestUnix_UpstreamHostHeader(t *testing.T) {
+	// Verify what Host header the unix backend actually receives.
+	dir, _ := os.MkdirTemp("", "routemux-unixhost-*")
+	defer os.RemoveAll(dir)
+	sockPath := filepath.Join(dir, "backend.sock")
+
+	gotHost := make(chan string, 1)
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	backend := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHost <- r.Host
+		w.Write([]byte("ok"))
+	})}
+	go backend.Serve(ln)
+	defer backend.Close()
+
+	destURL, sock, _, _ := parseUnixUpstream("unix://" + sockPath + ":/")
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/": {Upstreams: []Upstream{{URL: "unix://" + sockPath, ParsedURL: destURL, Weight: 1, UnixSocket: sock}}},
+	})
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	// Send a request with a specific client Host.
+	req, _ := http.NewRequest("GET", ts.URL+"/", nil)
+	req.Host = "client-supplied.example.com"
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.ReadAll(resp.Body)
+
+	select {
+	case h := <-gotHost:
+		// Default behaviour: client Host is preserved, NOT the synthetic unix host.
+		if strings.HasPrefix(h, "unix-") {
+			t.Errorf("backend got synthetic host %q; client Host should be preserved", h)
+		}
+		if h != "client-supplied.example.com" {
+			t.Errorf("backend Host = %q, want client-supplied.example.com", h)
+		}
+	default:
+		t.Error("backend did not receive request")
+	}
+}
+
+func TestUnix_HostDeleteFallsBackToLocalhost(t *testing.T) {
+	// dest-del-header: Host on a unix upstream should send "localhost", not the
+	// synthetic unix-<hash> label.
+	dir, _ := os.MkdirTemp("", "routemux-unixhost2-*")
+	defer os.RemoveAll(dir)
+	sockPath := filepath.Join(dir, "backend.sock")
+
+	gotHost := make(chan string, 1)
+	ln, _ := net.Listen("unix", sockPath)
+	defer ln.Close()
+	backend := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHost <- r.Host
+		w.Write([]byte("ok"))
+	})}
+	go backend.Serve(ln)
+	defer backend.Close()
+
+	destURL, sock, _, _ := parseUnixUpstream("unix://" + sockPath + ":/")
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/": {
+			Upstreams:     []Upstream{{URL: "unix://" + sockPath, ParsedURL: destURL, Weight: 1, UnixSocket: sock}},
+			DeleteHeaders: []string{"Host"},
+		},
+	})
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/", nil)
+	req.Host = "client.example.com"
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.ReadAll(resp.Body)
+
+	select {
+	case h := <-gotHost:
+		if h != "localhost" {
+			t.Errorf("backend Host = %q, want localhost (unix Host-delete fallback)", h)
+		}
+	default:
+		t.Error("backend did not receive request")
+	}
+}
+
+func TestUnix_SubtreeNoSlashRoute(t *testing.T) {
+	// A unix upstream on a no-trailing-slash route (/api) must still work for
+	// both /api and /api/sub — the subtree handler clones the upstream and
+	// appends "/" to the path, but UnixSocket and Host must survive intact.
+	dir, _ := os.MkdirTemp("", "routemux-unixsub-*")
+	defer os.RemoveAll(dir)
+	sockPath := filepath.Join(dir, "backend.sock")
+
+	gotPath := make(chan string, 4)
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	backend := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath <- r.URL.Path
+		w.Write([]byte("ok"))
+	})}
+	go backend.Serve(ln)
+	defer backend.Close()
+
+	// Route "/api" (NO trailing slash) → unix socket with http path "/v1"
+	destURL, sock, _, _ := parseUnixUpstream("unix://" + sockPath + ":/v1")
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/api": {Upstreams: []Upstream{{URL: "unix://" + sockPath + ":/v1", ParsedURL: destURL, Weight: 1, UnixSocket: sock}}},
+	})
+	srv, err := newServer(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	// Exact /api
+	resp, err := http.Get(ts.URL + "/api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "ok" {
+		t.Errorf("/api: body = %q, want ok (unix dial must work on exact route)", body)
+	}
+
+	// Subtree /api/users
+	resp2, err := http.Get(ts.URL + "/api/users")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body2, _ := io.ReadAll(resp2.Body)
+	if string(body2) != "ok" {
+		t.Errorf("/api/users: body = %q, want ok (unix dial must work on subtree)", body2)
+	}
+
+	// Check the subtree request reached the right upstream path
+	close(gotPath)
+	var paths []string
+	for p := range gotPath {
+		paths = append(paths, p)
+	}
+	foundSub := false
+	for _, p := range paths {
+		if p == "/v1/users" {
+			foundSub = true
+		}
+	}
+	if !foundSub {
+		t.Errorf("subtree path mapping wrong; backend saw paths %v, want /v1/users among them", paths)
 	}
 }

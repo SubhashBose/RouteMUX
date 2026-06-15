@@ -1,6 +1,7 @@
 global:
-  listen: lo         # IP or interface (e.g. 192.168.1.10, eth0, lo). Empty = all interfaces
-  port: ${env.HTTP_PORT:9090}  # Port value obtained from env variable, with optional default
+  listen: lo         # IP or interface (e.g. 192.168.1.10, eth0, lo) or unix socket path 
+                     # (unix:///run/routemux.sock). Empty = all interfaces
+  port: ${env.HTTP_PORT:9090}  # HTTP listen Port value obtained from env variable, with optional default
   #tls-cert: /path/to/cert.pem
   #tls-key:  /path/to/key.pem
   global-auth: ["admin", "s3cr3t"]   # HTTP Basic Auth for all routes
@@ -33,7 +34,7 @@ global:
     jwk-url: https://team.cloudflareaccess.com/cdn-cgi/access/certs  # JSON Web Key (JWK) URL
                                            # If secret and jwk-url both not set, then it will
                                            # try to get JWK URL for cloudflare or Auth0 based
-                                           # on 'iss' claim value
+                                           # on 'iss' claim value.
     #aud-id: my-app-audience-id            # JWT Audience ID to match
     #default-allow-all: true               # Allow all authenticated users by default for the
                                            # routes without auth-users specified
@@ -88,6 +89,11 @@ vhosts:
         client-add-header:
           Cache-Control: no-store
           X-Served-By: RouteMUX
+
+      # Public route — explicitly disables HTTP auth even when global-auth is set:
+      # /public/:
+      #   dest: http://localhost:9000/
+      #   auth: []
       
       # HTTP 302 redirection using static response and client header manipulation
       /redirect/:
@@ -95,15 +101,17 @@ vhosts:
         client-add-header:
           Location: https://google.com
 
-      /file/:
+      /static-file/:
         dest: FILE 200 /var/www/index.html
+        # If the path is a file, then it will be served as static file
         # Optional content type specified, otherwise detected from file extension
         # dest: FILE 200 /var/www/data.json application/json
-
-      # Public route — explicitly disables auth even when global-auth is set:
-      # /public/:
-      #   dest: http://localhost:9000/
-      #   auth: []
+      
+      /fileserver/:
+        dest: FILE /var/www/
+        # If the path is a directory, then it will be served as file server
+        # Directory listing is disabled by default. To enable directory listing,
+        # dest: FILE-BROWSE /var/www/
 
   - domains: ["*"]
     routes:

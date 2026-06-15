@@ -98,9 +98,32 @@ func findDefaultConfig() string {
 
 // resolveListenAddress turns an interface name or IP into a bind IP string.
 // Returns "" (all interfaces) for empty input.
+
+// isUnixListen reports whether a listen address denotes a Unix domain socket.
+// Accepted forms: "unix:/path/to.sock" and "unix:///path/to.sock".
+func isUnixListen(listen string) bool {
+	return strings.HasPrefix(listen, "unix:")
+}
+
+// unixSocketPath extracts the filesystem path from a unix: listen address.
+// "unix:/run/r.sock" → "/run/r.sock"; "unix:///run/r.sock" → "/run/r.sock".
+func unixSocketPath(listen string) string {
+	p := strings.TrimPrefix(listen, "unix:")
+	// Collapse the "//" authority form: "///run/x" → "/run/x".
+	p = strings.TrimPrefix(p, "//")
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	return p
+}
+
 func resolveListenAddress(listen string) (string, error) {
 	if listen == "" {
 		return "", nil
+	}
+	// Unix socket listen address — pass through unchanged.
+	if isUnixListen(listen) {
+		return listen, nil
 	}
 	// Is it already an IP?
 	if ip := net.ParseIP(listen); ip != nil {
