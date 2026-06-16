@@ -5913,3 +5913,178 @@ func TestDialTimeout_DefaultApplied(t *testing.T) {
 		t.Errorf("status = %d, want 200 (default dial timeout should not block a live upstream)", resp.StatusCode)
 	}
 }
+
+// ---- ${trusted_xff} in client-add-header (response header) ----
+
+func TestClientAddHeader_TrustedXFF_TrustAll(t *testing.T) {
+	// trust-client-headers: true → ${trusted_xff} in client-add-header should
+	// resolve to the leftmost IP and appear on the RESPONSE header.
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	ph := compileHeaderValue("${trusted_xff}")
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/api/": {
+			Upstreams:              []Upstream{mustUpstream(backend.URL+"/", 1)},
+			ParsedClientAddHeaders: map[string]parsedHeaderValue{"X-Real-Client": ph},
+			ClientAddHasVars:       true,
+			NeedsTrustedXFF:        true,
+		},
+	})
+	cfg.TrustClientHeaders = true
+
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
+	req.Header.Set("X-Forwarded-For", "5.6.7.8, 10.0.0.1")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := resp.Header.Get("X-Real-Client")
+	if got != "5.6.7.8" {
+		t.Errorf("client-add-header ${trusted_xff} = %q, want 5.6.7.8 (leftmost)", got)
+	}
+}
+
+func TestClientAddHeader_TrustedXFF_TrustedProxies(t *testing.T) {
+	// trusted-proxies mode → ${trusted_xff} walks right-to-left for first
+	// untrusted IP, surfaced on the response header.
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cl := &CIDRList{}
+	for _, cidr := range []string{"10.0.0.0/8", "127.0.0.0/8"} {
+		n := mustNet(cidr)
+		cl.sources = append(cl.sources, filterSource{kind: sourceCIDR, cidr: n})
+		cl.nets = append(cl.nets, n)
+	}
+
+	ph := compileHeaderValue("${trusted_xff}")
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/api/": {
+			Upstreams:              []Upstream{mustUpstream(backend.URL+"/", 1)},
+			ParsedClientAddHeaders: map[string]parsedHeaderValue{"X-Real-Client": ph},
+			ClientAddHasVars:       true,
+			NeedsTrustedXFF:        true,
+		},
+	})
+	cfg.TrustedProxies = &TrustedProxies{list: cl}
+
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
+	// Client chain: real client 5.6.7.8, then internal proxy 10.0.0.1.
+	req.Header.Set("X-Forwarded-For", "5.6.7.8, 10.0.0.1")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := resp.Header.Get("X-Real-Client")
+	if got != "5.6.7.8" {
+		t.Errorf("client-add-header ${trusted_xff} = %q, want 5.6.7.8 (first untrusted)", got)
+	}
+}
+
+func TestClientAddHeader_TrustedXFF_NoTrustConfig(t *testing.T) {
+	// No trust config → ${trusted_xff} falls back to the connecting client IP,
+	// NOT the literal "${trusted_xff}".
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	ph := compileHeaderValue("${trusted_xff}")
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/api/": {
+			Upstreams:              []Upstream{mustUpstream(backend.URL+"/", 1)},
+			ParsedClientAddHeaders: map[string]parsedHeaderValue{"X-Real-Client": ph},
+			ClientAddHasVars:       true,
+			NeedsTrustedXFF:        true,
+		},
+	})
+	// no TrustClientHeaders, no TrustedProxies
+
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/api/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := resp.Header.Get("X-Real-Client")
+	if got == "${trusted_xff}" {
+		t.Error("${trusted_xff} was not resolved (got the literal) — cfg not passed through")
+	}
+	if got == "" {
+		t.Error("X-Real-Client missing")
+	}
+}
+
+func TestClientAddHeader_TrustedXFF_StaticRouteReturnsLiteral(t *testing.T) {
+	// On STATIC/FILE routes the Director does not run, so ${trusted_xff} cannot
+	// be meaningfully resolved. It returns the literal "${trusted_xff}" to
+	// signal "not resolved here" rather than a misleading client IP.
+	ph := compileHeaderValue("${trusted_xff}")
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/status/": {
+			StatusCode:             200,
+			StatusText:             "ok",
+			ParsedClientAddHeaders: map[string]parsedHeaderValue{"X-Real-Client": ph},
+			ClientAddHasVars:       true,
+			NeedsTrustedXFF:        true,
+		},
+	})
+	cfg.TrustClientHeaders = true // even with trust config, static can't resolve it
+
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/status/", nil)
+	req.Header.Set("X-Forwarded-For", "5.6.7.8, 10.0.0.1")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := resp.Header.Get("X-Real-Client")
+	if got != "${trusted_xff}" {
+		t.Errorf("static route ${trusted_xff} = %q, want literal ${trusted_xff} (not resolved on static routes)", got)
+	}
+}
+
+func TestClientAddHeader_OtherVarsStillWorkOnStaticRoute(t *testing.T) {
+	// Passing cfg=nil for static routes must only disable ${trusted_xff};
+	// other variables (e.g. ${scheme}) must still resolve.
+	ph := compileHeaderValue("${scheme}")
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/status/": {
+			StatusCode:             200,
+			StatusText:             "ok",
+			ParsedClientAddHeaders: map[string]parsedHeaderValue{"X-Scheme": ph},
+			ClientAddHasVars:       true,
+		},
+	})
+
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/status/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := resp.Header.Get("X-Scheme")
+	if got != "http" {
+		t.Errorf("static route ${scheme} = %q, want http (other vars must still work)", got)
+	}
+}

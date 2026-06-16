@@ -584,7 +584,7 @@ Use `\${` to send a literal  sign (e.g. `\${remote_addr}` → `${remote_addr}`).
 
 > `${trusted_xff}` value evaluates the trusted remote IP by looking up on the `X-Forwarded-For` header IP chain, appended with the connecting IP. Each of the IPs from the chain, starting from most recent to oldest (right to left), is checked against the `trusted-proxies` list, and the first untrusted IP sets the value. If all IPs are in `trusted-proxies`, or `trust-client-headers: true` then, the left most valid IP sets `${trusted_xff}`. If neither `trusted-proxies` nor `trust-client-headers` is set, then no IP is trusted, client IP (`${remote_addr}`) sets the variable. 
 > 
-> The purpose of `${trusted_xff}` is to do all the validation of real client IP, and provide this to the upstream server, which it can use without doing any more IP trust verification. It is important to note the `${trusted_xff}` variable is only available for `dest-add-header`, and not for `client-add-header`.
+> The purpose of `${trusted_xff}` is to do all the validation of real client IP, and provide this to the upstream server, which it can use without doing any more IP trust verification. It is to be noted, the `${trusted_xff}` variable is not available for static routes, i.e., `STATUS` or `FILE` type `dest`s.
 
 ```yaml
 routes:

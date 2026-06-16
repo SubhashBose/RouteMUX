@@ -335,7 +335,9 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 			// Strip the route prefix so the file server sees paths relative to dirPath.
 			stripped := http.StripPrefix(routePath, fs)
 			h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				manipulateClientHeaders(w.Header(), nil, r, rc)
+				// cfg is nil here: STATIC/FILE routes do not run the Director, so
+			// ${trusted_xff} cannot be resolved and returns its literal form.
+			manipulateClientHeaders(w.Header(), nil, r, rc, nil, nil)
 				stripped.ServeHTTP(w, r)
 			})
 		} else {
@@ -356,7 +358,9 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 					return
 				}
 				w.Header().Set("Content-Type", contentType)
-				manipulateClientHeaders(w.Header(), nil, r, rc)
+				// cfg is nil here: STATIC/FILE routes do not run the Director, so
+			// ${trusted_xff} cannot be resolved and returns its literal form.
+			manipulateClientHeaders(w.Header(), nil, r, rc, nil, nil)
 				w.WriteHeader(statuscode)
 				w.Write(fileBytes) //nolint:errcheck
 			})
@@ -374,7 +378,9 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 	// -- Static STATUS response route --
 	if rc.StatusCode != 0 {
 		var h http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			manipulateClientHeaders(w.Header(), nil, r, rc)
+			// cfg is nil here: STATIC/FILE routes do not run the Director, so
+			// ${trusted_xff} cannot be resolved and returns its literal form.
+			manipulateClientHeaders(w.Header(), nil, r, rc, nil, nil)
 
 			w.WriteHeader(rc.StatusCode)
 			if rc.StatusText != "" {
@@ -618,11 +624,13 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 		ModifyResponse: func(resp *http.Response) error {
 			// Read per-request values stored by Director in the request context.
 			reqHost, _ := resp.Request.Context().Value(ctxKeyRequestHost{}).(string)
-			//var xffCopy []string
-			//if rc.NeedsTrustedXFF {
-			//	xffCopy, _ = resp.Request.Context().Value(ctxKeyXFFCopy{}).([]string)
-			//}
-			//_ = xffCopy // available for future client-add-header ${trusted_xff} support
+			// The Director snapshots the (post-rewrite) X-Forwarded-For chain into
+			// the context when ${trusted_xff} is used, so client-add-header can
+			// resolve it here against the same chain dest-add-header sees.
+			var xffCopy []string
+			if rc.NeedsTrustedXFF {
+				xffCopy, _ = resp.Request.Context().Value(ctxKeyXFFCopy{}).([]string)
+			}
 			// ${header.X} in client-add-header resolves from the upstream response headers.
 			// Snapshot before we modify so add-header can reference headers we're about to delete.
 			var originalRespHeaders http.Header
@@ -631,7 +639,7 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 			}
 			resp.Request.Host = reqHost
 
-			manipulateClientHeaders(resp.Header, originalRespHeaders, resp.Request, rc)
+			manipulateClientHeaders(resp.Header, originalRespHeaders, resp.Request, rc, xffCopy, cfg)
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
@@ -680,7 +688,7 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 //     pass nil for STATUS routes (no upstream response headers)
 //   - returns error to satisfy http.ReverseProxy.ModifyResponse signature;
 //     always returns nil
-func manipulateClientHeaders(respHeaders http.Header, originalHeaders http.Header, req *http.Request, rc *RouteConfig) {
+func manipulateClientHeaders(respHeaders http.Header, originalHeaders http.Header, req *http.Request, rc *RouteConfig, xffCopy []string, cfg *Config) {
 	respHeaders.Set("Via", "RouteMUX")
 	// Apply client-side response header manipulation.
 	// Delete first, then add (add always wins).
@@ -698,7 +706,7 @@ func manipulateClientHeaders(respHeaders http.Header, originalHeaders http.Heade
 			requestURI = req.RequestURI
 		}
 		for name, ph := range rc.ParsedClientAddHeaders {
-			respHeaders.Set(name, ph.eval(req.Host, clientIP, clientPort, scheme, requestURI, nil, nil, originalHeaders))
+			respHeaders.Set(name, ph.eval(req.Host, clientIP, clientPort, scheme, requestURI, xffCopy, cfg, originalHeaders))
 		}
 	}
 }
