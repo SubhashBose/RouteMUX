@@ -5931,6 +5931,7 @@ func TestClientAddHeader_TrustedXFF_TrustAll(t *testing.T) {
 			ParsedClientAddHeaders: map[string]parsedHeaderValue{"X-Real-Client": ph},
 			ClientAddHasVars:       true,
 			NeedsTrustedXFF:        true,
+			ClientNeedsTrustedXFF:  true,
 		},
 	})
 	cfg.TrustClientHeaders = true
@@ -5973,6 +5974,7 @@ func TestClientAddHeader_TrustedXFF_TrustedProxies(t *testing.T) {
 			ParsedClientAddHeaders: map[string]parsedHeaderValue{"X-Real-Client": ph},
 			ClientAddHasVars:       true,
 			NeedsTrustedXFF:        true,
+			ClientNeedsTrustedXFF:  true,
 		},
 	})
 	cfg.TrustedProxies = &TrustedProxies{list: cl}
@@ -6009,6 +6011,7 @@ func TestClientAddHeader_TrustedXFF_NoTrustConfig(t *testing.T) {
 			ParsedClientAddHeaders: map[string]parsedHeaderValue{"X-Real-Client": ph},
 			ClientAddHasVars:       true,
 			NeedsTrustedXFF:        true,
+			ClientNeedsTrustedXFF:  true,
 		},
 	})
 	// no TrustClientHeaders, no TrustedProxies
@@ -6042,6 +6045,7 @@ func TestClientAddHeader_TrustedXFF_StaticRouteReturnsLiteral(t *testing.T) {
 			ParsedClientAddHeaders: map[string]parsedHeaderValue{"X-Real-Client": ph},
 			ClientAddHasVars:       true,
 			NeedsTrustedXFF:        true,
+			ClientNeedsTrustedXFF:  true,
 		},
 	})
 	cfg.TrustClientHeaders = true // even with trust config, static can't resolve it
@@ -6086,5 +6090,50 @@ func TestClientAddHeader_OtherVarsStillWorkOnStaticRoute(t *testing.T) {
 	got := resp.Header.Get("X-Scheme")
 	if got != "http" {
 		t.Errorf("static route ${scheme} = %q, want http (other vars must still work)", got)
+	}
+}
+
+func TestClientNeedsTrustedXFF_FlagSplit(t *testing.T) {
+	// dest-add-header only → NeedsTrustedXFF true, ClientNeedsTrustedXFF false
+	// (no context store needed). client-add-header → both true.
+	mk := func(yaml string) *RouteConfig {
+		f, _ := os.CreateTemp("", "routemux-*.yml")
+		f.WriteString(yaml)
+		f.Close()
+		defer os.Remove(f.Name())
+		cfg, err := loadConfigFile(f.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cfg.VHosts[0].Routes["/api/"]
+	}
+
+	destOnly := mk(`
+global:
+  port: 8080
+routes:
+  /api/:
+    dest: http://localhost:3000/
+    dest-add-header:
+      X-Real: ${trusted_xff}
+`)
+	if !destOnly.NeedsTrustedXFF {
+		t.Error("dest-only: NeedsTrustedXFF should be true")
+	}
+	if destOnly.ClientNeedsTrustedXFF {
+		t.Error("dest-only: ClientNeedsTrustedXFF should be FALSE (no context store needed)")
+	}
+
+	clientSide := mk(`
+global:
+  port: 8080
+routes:
+  /api/:
+    dest: http://localhost:3000/
+    client-add-header:
+      X-Real: ${trusted_xff}
+`)
+	if !clientSide.NeedsTrustedXFF || !clientSide.ClientNeedsTrustedXFF {
+		t.Error("client-side: both NeedsTrustedXFF and ClientNeedsTrustedXFF should be true")
 	}
 }

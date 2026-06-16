@@ -156,6 +156,7 @@ type RouteConfig struct {
 	ClientNeedsRespHeaders  bool              // true if any client-add-header refs ${header.X}
 	ClientAddHasVars        bool              // true if any client-add-header has a variable
 	NeedsTrustedXFF         bool              // true if any dest-add-header or client-add-header uses ${trusted_xff}
+	ClientNeedsTrustedXFF   bool              // true if client-add-header uses ${trusted_xff} (requires context bridge to ModifyResponse)
 	ClientDelHeaders        []string          // headers to remove from upstream response
 	ClientDelHasWildcard    bool              // true if any ClientDelHeaders entry contains '*'
 	AuthUsers          []string          // allowed JWT usernames for this route; nil = use DefaultAllowAll
@@ -504,7 +505,8 @@ func parseFileVHost(fileRoutes map[string]fileRoute, domains []string) (VHost, e
 		rc.ParsedClientAddHeaders = compiledHeaders(fr.ClientAddHeaders)
 		rc.ClientAddHasVars = hasNonConstHeader(rc.ParsedClientAddHeaders)
 		rc.ClientNeedsRespHeaders = hasHeaderNameVar(rc.ParsedClientAddHeaders)
-		rc.NeedsTrustedXFF = hasTrustedXFFVar(rc.ParsedAddHeaders) || hasTrustedXFFVar(rc.ParsedClientAddHeaders)
+		rc.ClientNeedsTrustedXFF = hasTrustedXFFVar(rc.ParsedClientAddHeaders)
+		rc.NeedsTrustedXFF = hasTrustedXFFVar(rc.ParsedAddHeaders) || rc.ClientNeedsTrustedXFF
 		rc.ClientDelHeaders = fr.ClientDelHeaders
 		rc.ClientDelHasWildcard = hasWildcard(fr.ClientDelHeaders)
 		rc.AuthUsers = fr.AuthUsers

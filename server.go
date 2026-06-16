@@ -567,12 +567,19 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 				req.Header.Set("X-Forwarded-Proto", schemeOf(req))
 			}
 
-			// Snapshot XFF chain for ${trusted_xff} variable — only when needed.
+			// Snapshot XFF chain for ${trusted_xff} — only when a header uses it.
+			// The local copy serves dest-add-header (evaluated here in the
+			// Director). The context store is paid only when client-add-header
+			// needs it, because that is evaluated later in ModifyResponse and
+			// has no other way to reach this value. Routes that use ${trusted_xff}
+			// only in dest-add-header therefore avoid the context allocation.
 			var xffCopy []string
 			if rc.NeedsTrustedXFF {
 				xffCopy = req.Header["X-Forwarded-For"]
-				*req = *req.WithContext(
-					context.WithValue(req.Context(), ctxKeyXFFCopy{}, xffCopy))
+				if rc.ClientNeedsTrustedXFF {
+					*req = *req.WithContext(
+						context.WithValue(req.Context(), ctxKeyXFFCopy{}, xffCopy))
+				}
 			}
 
 			// If proxy auth is active, strip Authorization so the proxy credentials
@@ -628,7 +635,7 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 			// the context when ${trusted_xff} is used, so client-add-header can
 			// resolve it here against the same chain dest-add-header sees.
 			var xffCopy []string
-			if rc.NeedsTrustedXFF {
+			if rc.ClientNeedsTrustedXFF {
 				xffCopy, _ = resp.Request.Context().Value(ctxKeyXFFCopy{}).([]string)
 			}
 			// ${header.X} in client-add-header resolves from the upstream response headers.
