@@ -139,7 +139,8 @@ vhosts:
     routes:
       /api/:
         dest: http://localhost:3000/v1/   # Upstream destination URL
-        timeout: 30s                       # Optional upstream timeout (e.g. 30s, 2m)
+        timeout: 30s                       # Optional total request timeout (e.g. 30s, 2m; default: unbounded)
+        dial-timeout: 5s                   # Optional upstream connect timeout (e.g. 5s; default: 5s)
         # noTLSverify: true                # Skip TLS certificate verification for upstream
         # auth: ["user", "pass"]           # Per-route auth (overrides global-auth)
         # auth: []                         # Explicitly disable auth for this route
@@ -260,7 +261,8 @@ Following are the route options must follow `--route`. The `--route` + route opt
 | `--noTLSverify` | Skip TLS certificate verification for this upstream |
 | `--auth USER:PASS` | Per-route Basic Auth (overrides `--global-auth`) |
 | `--auth ""` | Explicitly disable auth for this route |
-| `--timeout DURATION` | Upstream request timeout (e.g. `30s`, `2m`) |
+| `--timeout DURATION` | Total request timeout (e.g. `30s`, `2m`; default: unbounded) |
+| `--dial-timeout DURATION` | Upstream connect timeout (e.g. `5s`; default: `5s`) |
 | `--dest-add-header "Name: Value"` | Add or overwrite a header (repeatable). Value can be plain text, supported variables or combination of both |
 | `--dest-del-header NAME` | Delete a header (repeatable, supports wildcards) |
 | `--client-add-header "Name: Value"` | Add or overwrite a response header sent to client (repeatable). Supports same variables as `--dest-add-header`; `${header.Name}` resolves from the upstream response headers |
@@ -1027,7 +1029,7 @@ routes:
 
 WebSocket connections are automatically detected and tunnelled — no special configuration needed. WebSocket routes support the same auth, header manipulation, and TLS options as HTTP routes.
 
-The `timeout` setting is intentionally **not** applied to WebSocket connections since they are long-lived by design.
+The `timeout` setting (total request timeout) is intentionally **not** applied to WebSocket connections since they are long-lived by design. The `dial-timeout`, however, **does** apply to WebSocket upstreams — it only bounds the initial connection, not the lifetime of the stream.
 
 ---
 

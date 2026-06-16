@@ -413,16 +413,30 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 			InsecureSkipVerify: rc.NoTLSVerify, //nolint:gosec
 		},
 	}
+
+	// -- Dial timeout --
+	// Bounds the upstream connect step so a dead/unreachable upstream fails fast
+	// instead of hanging on the OS default (~2 min). Applies to HTTP and
+	// WebSocket, TCP and Unix. Defaults to 5s when not configured.
+	dialTimeout := 5 * time.Second
+	if rc.DialTimeout != "" {
+		d, err := time.ParseDuration(rc.DialTimeout)
+		if err != nil {
+			return nil, fmt.Errorf("invalid dial-timeout %q for route %q: %w", rc.DialTimeout, routePath, err)
+		}
+		dialTimeout = d
+	}
+	dialer := &net.Dialer{Timeout: dialTimeout}
+
 	if unixHosts != nil {
 		// Custom dialer: if the target host is one of our synthetic unix hosts,
 		// dial the Unix socket instead of TCP. Other hosts dial normally.
-		stdDialer := &net.Dialer{}
 		baseTransport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 			host, _, _ := net.SplitHostPort(addr)
 			if sock, ok := unixHosts[host]; ok {
-				return stdDialer.DialContext(ctx, "unix", sock)
+				return dialer.DialContext(ctx, "unix", sock)
 			}
-			return stdDialer.DialContext(ctx, network, addr)
+			return dialer.DialContext(ctx, network, addr)
 		}
 		// For TLS over a Unix socket (unixs://), the synthetic host can never
 		// match a certificate SAN, so standard hostname verification cannot
@@ -430,6 +444,11 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 		// hostname verification for unix-TLS upstreams (unless the operator has
 		// already enabled NoTLSVerify globally for the route).
 		baseTransport.TLSClientConfig.InsecureSkipVerify = true //nolint:gosec
+	} else {
+		// Plain TCP upstreams: use the timeout-bounded dialer too. A bare
+		// http.Transport{} does not inherit DefaultTransport's dial timeout, so
+		// without this a dead upstream would hang on the OS default.
+		baseTransport.DialContext = dialer.DialContext
 	}
 	transport := &xffRoundTripper{base: baseTransport}
 	lbMode := rc.LBMode

@@ -5801,3 +5801,115 @@ func TestWebSocket_ClientInitiatedClose(t *testing.T) {
 		t.Error("client close did not propagate to upstream within 2s")
 	}
 }
+
+// ---- Dial timeout tests ----
+
+func TestDialTimeout_YAML(t *testing.T) {
+	f, _ := os.CreateTemp("", "routemux-*.yml")
+	f.WriteString(`
+global:
+  port: 8080
+routes:
+  /api/:
+    dest: http://localhost:3000/
+    dial-timeout: 2s
+`)
+	f.Close()
+	defer os.Remove(f.Name())
+
+	cfg, err := loadConfigFile(f.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc := cfg.VHosts[0].Routes["/api/"]
+	if rc.DialTimeout != "2s" {
+		t.Errorf("DialTimeout = %q, want 2s", rc.DialTimeout)
+	}
+}
+
+func TestDialTimeout_CLI(t *testing.T) {
+	cfg, err := parseAll([]string{
+		"--route", "/api/", "--dest", "http://localhost:3000/", "--dial-timeout", "3s",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc := cfg.VHosts[0].Routes["/api/"]
+	if rc.DialTimeout != "3s" {
+		t.Errorf("DialTimeout = %q, want 3s", rc.DialTimeout)
+	}
+}
+
+func TestDialTimeout_InvalidValue(t *testing.T) {
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/api/": {
+			Upstreams:   []Upstream{mustUpstream("http://localhost:3000/", 1)},
+			DialTimeout: "not-a-duration",
+		},
+	})
+	if _, err := newServer(cfg); err == nil {
+		t.Error("newServer should fail on invalid dial-timeout")
+	}
+}
+
+func TestDialTimeout_DeadUpstreamFailsFast(t *testing.T) {
+	// Dial to a non-routable address should fail within ~the dial timeout,
+	// well before the OS default (~2 min). 203.0.113.0/24 (TEST-NET-3) is
+	// reserved and non-routable, so the connect hangs until timeout.
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/api/": {
+			Upstreams:   []Upstream{mustUpstream("http://203.0.113.1:9/", 1)},
+			DialTimeout: "1s",
+		},
+	})
+	srv, err := newServer(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	start := time.Now()
+	resp, err := http.Get(ts.URL + "/api/test")
+	elapsed := time.Since(start)
+
+	if err == nil && resp != nil {
+		resp.Body.Close()
+		// Should be a 502 Bad Gateway from the failed dial.
+		if resp.StatusCode != http.StatusBadGateway {
+			t.Errorf("status = %d, want 502", resp.StatusCode)
+		}
+	}
+	// The key assertion: it failed fast (well under the OS default), bounded
+	// by the 1s dial timeout (allow generous margin for CI).
+	if elapsed > 10*time.Second {
+		t.Errorf("dial took %v; should have failed fast near the 1s dial timeout", elapsed)
+	}
+}
+
+func TestDialTimeout_DefaultApplied(t *testing.T) {
+	// With no dial-timeout configured, a default (5s) should still bound the
+	// dial — verify a route with no DialTimeout still builds and serves.
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL+"/", 1)}}, // no DialTimeout
+	})
+	srv, err := newServer(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/api/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200 (default dial timeout should not block a live upstream)", resp.StatusCode)
+	}
+}

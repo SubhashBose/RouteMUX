@@ -144,7 +144,8 @@ type RouteConfig struct {
 	NoTLSVerify        bool              // skip TLS verification for all upstreams
 	Auth               *Auth             // nil = inherit global-auth; explicitly cleared = no auth
 	AuthExplicit       bool              // true when auth was set explicitly (even as empty)
-	Timeout            string            // e.g. "30s", "2m"
+	Timeout            string            // e.g. "30s", "2m" (total request timeout; empty = unbounded)
+	DialTimeout        string            // e.g. "5s" (upstream connect timeout; empty = default 5s)
 	ParsedAddHeaders   map[string]parsedHeaderValue // compiled dest-dest-add-header values (parsed at startup)
 	NeedsOriginal      bool              // true if any header value references ${header.X}
 	AddHasVars         bool              // true if any header value contains a variable (non-const)
@@ -227,6 +228,7 @@ type fileRoute struct {
 	NoTLSVerify bool              `yaml:"noTLSverify"`
 	Auth        []string          `yaml:"auth"` // ["USER", "PASSWORD"] or absent
 	Timeout     string            `yaml:"timeout"`
+	DialTimeout string            `yaml:"dial-timeout"`
 	LBMode      string            `yaml:"load-balancer-mode"`
 	AddHeaders  map[string]string `yaml:"dest-add-header"`
 	DeleteHeaders []string        `yaml:"dest-del-header"`
@@ -490,6 +492,7 @@ func parseFileVHost(fileRoutes map[string]fileRoute, domains []string) (VHost, e
 		rc := &RouteConfig{
 			NoTLSVerify:       fr.NoTLSVerify,
 			Timeout:           fr.Timeout,
+			DialTimeout:        fr.DialTimeout,
 			LBMode:            normalizeLBMode(fr.LBMode),
 			AuthExplicit:      fr.authPresent,
 			ParsedAddHeaders:  compiledHeaders(fr.AddHeaders),

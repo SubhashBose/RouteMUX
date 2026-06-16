@@ -538,6 +538,15 @@ func applyCLI(cfg *Config, rawArgs []string) error {
 			}
 			curRoute.Timeout = args[i+1]
 			i += 2
+		case "--dial-timeout":
+			if curRoute == nil {
+				return fmt.Errorf("--dial-timeout must follow --route")
+			}
+			if i+1 >= len(args) {
+				return fmt.Errorf("--dial-timeout requires a value")
+			}
+			curRoute.DialTimeout = args[i+1]
+			i += 2
 		case "--upgrade":
 			runUpgrade()
 			os.Exit(0)
@@ -686,7 +695,8 @@ Route options (must follow --route PATH):
   --auth U:P               Per-route Basic Auth (overrides global-auth; "" disables auth)
   --auth-users USER,...    Comma-separated list of JWT usernames allowed on this route
   --skip-jwt-auth          Skip JWT auth for this route
-  --timeout DURATION       Upstream timeout (e.g. 30s, 2m)
+  --timeout DURATION       Total request timeout (e.g. 30s, 2m; default: unbounded)
+  --dial-timeout DURATION  Upstream connect timeout (e.g. 5s; default: 5s)
   --dest-add-header K:V    Add/overwrite a header on upstream request (repeatable)
                            Can be combination of variables and text
   --dest-del-header K      Delete a header from the upstream request (repeatable)
