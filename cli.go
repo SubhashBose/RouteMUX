@@ -11,7 +11,7 @@ import (
 	"github.com/SubhashBose/GoPkg-selfupdater"
 )
 
-var version = "0.5"
+var version = "0.6"
 var buildDate = ""
 
 // parseAll merges config file + CLI args into a final Config.

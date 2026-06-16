@@ -621,17 +621,26 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 		},
 	}
 
-	// handleWS uses effectiveAuth which is declared above.
-	handleWS := func(w http.ResponseWriter, r *http.Request) {
-		upstream := picker.pick(lbMode)
-		serveWebSocket(w, r, upstream.ParsedURL, upstream.UnixSocket, routePath, rc, effectiveAuth, cfg)
-	}
-
 	var h http.Handler = proxy
 
-	// Wrap with timeout if needed.
+	// Wrap with timeout if needed — but NOT for WebSocket/upgrade requests.
+	// http.TimeoutHandler wraps the ResponseWriter in one that does not
+	// implement http.Hijacker, which breaks the connection upgrade that Go's
+	// ReverseProxy performs for 101 responses. So upgrades bypass the timeout
+	// wrapper and hit the proxy directly; the proxy handles the upgrade tunnel
+	// natively (since Go 1.12), applying Director + ModifyResponse — including
+	// to the 101 response — so request and response header manipulation work
+	// identically to the regular HTTP path.
 	if clientTimeout > 0 {
-		h = http.TimeoutHandler(h, clientTimeout, "Gateway Timeout")
+		timeoutWrapped := http.TimeoutHandler(h, clientTimeout, "Gateway Timeout")
+		proxyNoTimeout := h // the bare proxy, for upgrades
+		h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if isWebSocketUpgrade(r) {
+				proxyNoTimeout.ServeHTTP(w, r)
+				return
+			}
+			timeoutWrapped.ServeHTTP(w, r)
+		})
 	}
 
 	// Wrap with basic auth if needed.
@@ -639,24 +648,6 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 
 	// Wrap with JWT auth.
 	h = jwtMiddleware(h, rc, cfg.JWTAuth)
-
-	// Wrap: intercept WebSocket upgrades before auth/timeout middleware.
-	finalHandler := h
-	h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if isWebSocketUpgrade(r) {
-			// Apply JWT validation for websockets.
-			if cfg.JWTAuth != nil && !rc.SkipJwtAuth && !jwtValidation(w, r, rc, cfg.JWTAuth) {
-				return
-			}
-			// Apply auth check for WebSocket too, then tunnel.
-			if effectiveAuth != nil && !checkBasicAuth(w, r, effectiveAuth) {
-				return
-			}
-			handleWS(w, r)
-			return
-		}
-		finalHandler.ServeHTTP(w, r)
-	})
 
 	return h, nil
 }

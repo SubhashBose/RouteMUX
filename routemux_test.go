@@ -2,6 +2,7 @@ package main
 
 import (
 	"io"
+	"bufio"
 	"context"
 	"net"
 	"net/http"
@@ -5511,4 +5512,292 @@ func TestUnix_HostHeaderManipulation(t *testing.T) {
 		t.Errorf("del+add: backend Host = %q, want wins.internal (add wins)", h)
 	}
 	ts4.Close()
+}
+// ---- WebSocket coverage additions (pre-refactor safety net) ----
+
+// wsEchoServer returns a server that completes the upgrade handshake and then
+// echoes every byte it receives back to the client (raw, post-upgrade).
+// It lets tests verify the bidirectional tunnel actually pipes data, not just
+// that the handshake completes.
+func wsEchoServer(t *testing.T, onHeaders func(path string, h http.Header), respHeaders string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if onHeaders != nil {
+			onHeaders(r.URL.RequestURI(), r.Header)
+		}
+		conn, buf, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		extra := respHeaders // caller may inject extra 101 response headers
+		conn.Write([]byte("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" + extra + "\r\n"))
+		// Echo loop: read what the client sends, write it back.
+		b := make([]byte, 1024)
+		for {
+			n, err := buf.Read(b)
+			if n > 0 {
+				conn.Write(b[:n])
+			}
+			if err != nil {
+				return
+			}
+		}
+	}))
+}
+
+// wsRawUpgrade dials url, performs the upgrade handshake over a raw connection,
+// and returns the live net.Conn plus the parsed 101 response so the caller can
+// exchange post-upgrade bytes and inspect handshake response headers.
+func wsRawUpgrade(t *testing.T, rawURL string, extra map[string]string) (net.Conn, *http.Response) {
+	t.Helper()
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := net.Dial("tcp", u.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, _ := http.NewRequest("GET", rawURL, nil)
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+	req.Header.Set("Sec-WebSocket-Version", "13")
+	for k, v := range extra {
+		if strings.EqualFold(k, "Host") {
+			req.Host = v // Go reads req.Host, not the header, when writing
+		} else {
+			req.Header.Set(k, v)
+		}
+	}
+	if err := req.Write(conn); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return conn, resp
+}
+
+func TestWebSocket_BidirectionalData(t *testing.T) {
+	// The critical test: after the handshake, data must flow both ways through
+	// the tunnel. Existing tests only check the handshake.
+	upstream := wsEchoServer(t, nil, "")
+	defer upstream.Close()
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/ws/": {Upstreams: []Upstream{mustUpstream(upstream.URL+"/", 1)}},
+	})
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	conn, resp := wsRawUpgrade(t, ts.URL+"/ws/", nil)
+	defer conn.Close()
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("handshake status = %d, want 101", resp.StatusCode)
+	}
+
+	// Send data through the tunnel; expect the echo back.
+	msg := []byte("hello-through-the-tunnel")
+	conn.SetDeadline(time.Now().Add(2 * time.Second))
+	if _, err := conn.Write(msg); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, len(msg))
+	if _, err := io.ReadFull(conn, got); err != nil {
+		t.Fatalf("reading echo: %v", err)
+	}
+	if string(got) != string(msg) {
+		t.Errorf("echo = %q, want %q", got, msg)
+	}
+}
+
+func TestWebSocket_ResponseHeaderManipulation(t *testing.T) {
+	// client-add-header and client-del-header should apply to the 101 response,
+	// and Via: RouteMUX should be present. This currently FAILS (documents the
+	// gap the refactor will fix).
+	upstream := wsEchoServer(t, nil, "X-Backend: secret\r\n")
+	defer upstream.Close()
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/ws/": {
+			Upstreams: []Upstream{mustUpstream(upstream.URL+"/", 1)},
+			ParsedClientAddHeaders: map[string]parsedHeaderValue{
+				"X-Served-By": compileHeaderValue("routemux"),
+			},
+			ClientDelHeaders: []string{"X-Backend"},
+		},
+	})
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	conn, resp := wsRawUpgrade(t, ts.URL+"/ws/", nil)
+	defer conn.Close()
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("status = %d, want 101", resp.StatusCode)
+	}
+	if resp.Header.Get("Via") != "RouteMUX" {
+		t.Errorf("Via = %q, want RouteMUX", resp.Header.Get("Via"))
+	}
+	if resp.Header.Get("X-Served-By") != "routemux" {
+		t.Errorf("X-Served-By = %q, want routemux (client-add-header)", resp.Header.Get("X-Served-By"))
+	}
+	if resp.Header.Get("X-Backend") != "" {
+		t.Errorf("X-Backend = %q, want empty (client-del-header)", resp.Header.Get("X-Backend"))
+	}
+}
+
+func TestWebSocket_HostDefault(t *testing.T) {
+	// Default: client Host is forwarded to the upstream.
+	var gotHost string
+	upstream := wsEchoServer(t, func(_ string, h http.Header) { gotHost = h.Get("Host") }, "")
+	defer upstream.Close()
+	// Note: Go's http server puts Host in r.Host, not r.Header; the echo server
+	// reads headers via r.Header so we capture Host differently below.
+	_ = gotHost
+
+	var capturedHost string
+	upstream2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedHost = r.Host
+		conn, _, _ := w.(http.Hijacker).Hijack()
+		conn.Write([]byte("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"))
+		conn.Close()
+	}))
+	defer upstream2.Close()
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/ws/": {Upstreams: []Upstream{mustUpstream(upstream2.URL+"/", 1)}},
+	})
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	conn, _ := wsRawUpgrade(t, ts.URL+"/ws/", map[string]string{"Host": "client.example.com"})
+	conn.Close()
+	if capturedHost != "client.example.com" {
+		t.Errorf("upstream Host = %q, want client.example.com", capturedHost)
+	}
+}
+
+func TestWebSocket_HostAddHeader(t *testing.T) {
+	var capturedHost string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedHost = r.Host
+		conn, _, _ := w.(http.Hijacker).Hijack()
+		conn.Write([]byte("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"))
+		conn.Close()
+	}))
+	defer upstream.Close()
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/ws/": {
+			Upstreams: []Upstream{mustUpstream(upstream.URL+"/", 1)},
+			ParsedAddHeaders: map[string]parsedHeaderValue{
+				"Host": compileHeaderValue("backend.internal"),
+			},
+		},
+	})
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	conn, _ := wsRawUpgrade(t, ts.URL+"/ws/", nil)
+	conn.Close()
+	if capturedHost != "backend.internal" {
+		t.Errorf("upstream Host = %q, want backend.internal (add-header)", capturedHost)
+	}
+}
+
+func TestWebSocket_JWTAuth(t *testing.T) {
+	upstream := wsEchoServer(t, nil, "")
+	defer upstream.Close()
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/ws/": {Upstreams: []Upstream{mustUpstream(upstream.URL+"/", 1)}},
+	})
+	cfg.JWTAuth = &JWTAuth{
+		HeaderKey:       "Authorization",
+		Secret:          "test-secret",
+		DefaultAllowAll: true,
+	}
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	// No token → 401
+	resp := wsUpgradeRequest(t, ts.URL+"/ws/", nil)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("no JWT: status = %d, want 401", resp.StatusCode)
+	}
+}
+
+func TestWebSocket_SkipJWTAuth(t *testing.T) {
+	upstream := wsEchoServer(t, nil, "")
+	defer upstream.Close()
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/ws/": {
+			Upstreams:   []Upstream{mustUpstream(upstream.URL+"/", 1)},
+			SkipJwtAuth: true,
+		},
+	})
+	cfg.JWTAuth = &JWTAuth{
+		HeaderKey:       "Authorization",
+		Secret:          "test-secret",
+		DefaultAllowAll: true,
+	}
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	// skip-jwt-auth → no token required → 101
+	conn, resp := wsRawUpgrade(t, ts.URL+"/ws/", nil)
+	defer conn.Close()
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Errorf("skip-jwt-auth: status = %d, want 101", resp.StatusCode)
+	}
+}
+
+func TestWebSocket_ClientInitiatedClose(t *testing.T) {
+	// When the client closes its side, the tunnel should tear down cleanly
+	// (upstream sees EOF) without hanging.
+	upstreamClosed := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, buf, _ := w.(http.Hijacker).Hijack()
+		defer conn.Close()
+		conn.Write([]byte("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"))
+		b := make([]byte, 256)
+		for {
+			_, err := buf.Read(b)
+			if err != nil {
+				close(upstreamClosed) // client close propagated as EOF
+				return
+			}
+		}
+	}))
+	defer upstream.Close()
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/ws/": {Upstreams: []Upstream{mustUpstream(upstream.URL+"/", 1)}},
+	})
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	conn, resp := wsRawUpgrade(t, ts.URL+"/ws/", nil)
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("status = %d, want 101", resp.StatusCode)
+	}
+	conn.Close() // client closes
+
+	select {
+	case <-upstreamClosed:
+		// good — close propagated
+	case <-time.After(2 * time.Second):
+		t.Error("client close did not propagate to upstream within 2s")
+	}
 }
