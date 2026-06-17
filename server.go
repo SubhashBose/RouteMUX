@@ -798,8 +798,8 @@ func (s *server) run() error {
 		// Install the global tls-cert (if any) as the SNI fallback BEFORE Start,
 		// so it takes precedence over the self-signed bootstrap fallback that
 		// Start installs when no fallback is present.
-		if state.cfg.TLSCert != "" {
-			cert, cerr := tls.LoadX509KeyPair(state.cfg.TLSCert, state.cfg.TLSKey)
+		if state.cfg.GlobalTLSCert != "" {
+			cert, cerr := tls.LoadX509KeyPair(state.cfg.GlobalTLSCert, state.cfg.GlobalTLSKey)
 			if cerr != nil {
 				ln.Close()
 				return fmt.Errorf("TLS: %w", cerr)
@@ -814,15 +814,15 @@ func (s *server) run() error {
 		ln = tls.NewListener(ln, tlsCfg)
 		log.Printf("TLS enabled (SNI / automatic certificates)")
 		log.Printf("RouteMUX listening on %s (TLS)", ln.Addr())
-	} else if state.cfg.TLSCert != "" {
+	} else if state.cfg.GlobalTLSCert != "" {
 		// Load the certificate and wrap the listener in TLS before logging,
 		// so the message appears only when TLS is also ready.
-		cert, cerr := tls.LoadX509KeyPair(state.cfg.TLSCert, state.cfg.TLSKey)
+		cert, cerr := tls.LoadX509KeyPair(state.cfg.GlobalTLSCert, state.cfg.GlobalTLSKey)
 		if cerr != nil {
 			ln.Close()
 			return fmt.Errorf("TLS: %w", cerr)
 		}
-		log.Printf("TLS enabled (cert: %s)", state.cfg.TLSCert)
+		log.Printf("TLS enabled (cert: %s)", state.cfg.GlobalTLSCert)
 		tlsCfg := &tls.Config{Certificates: []tls.Certificate{cert}}
 		ln = tls.NewListener(ln, tlsCfg)
 		log.Printf("RouteMUX listening on %s (TLS)", ln.Addr())
@@ -1088,10 +1088,10 @@ func (s *server) Reload(fileMod bool) {
 		newCfg.Port = oldState.cfg.Port
 		newCfg.Listen = oldState.cfg.Listen
 	}
-	if newCfg.TLSCert != oldState.cfg.TLSCert || newCfg.TLSKey != oldState.cfg.TLSKey {
+	if newCfg.GlobalTLSCert != oldState.cfg.GlobalTLSCert || newCfg.GlobalTLSKey != oldState.cfg.GlobalTLSKey {
 		log.Printf("Reload: TLS cert/key changes require a full restart. Reverting to current values.")
-		newCfg.TLSCert = oldState.cfg.TLSCert
-		newCfg.TLSKey = oldState.cfg.TLSKey
+		newCfg.GlobalTLSCert = oldState.cfg.GlobalTLSCert
+		newCfg.GlobalTLSKey = oldState.cfg.GlobalTLSKey
 	}
 
 	// 3. Compile new vhosts
