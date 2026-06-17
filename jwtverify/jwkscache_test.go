@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yourorg/jwtverify"
+	"routemux/jwtverify"
 	"github.com/golang-jwt/jwt/v5"
 )
 

@@ -105,10 +105,23 @@ type Config struct {
 	IPFilter           *IPFilter        // nil = no IP filtering
 	TrustedProxies     *TrustedProxies  // nil = use global TrustClientHeaders
 	JWTAuth            *JWTAuth         // nil = no JWT authentication
+	ACME               *ACMEConfig      // nil = no ACME / automatic TLS
 
 	// Metadata for hot reload
 	ConfigPath   string   // Path to the config file being used (if any)
 	OriginalArgs []string // Original CLI arguments (excluding the config flag itself)
+}
+
+// ACMEConfig holds the global ACME settings (global.acme block). Per-vhost TLS
+// settings live on each VHost as VHostTLS.
+type ACMEConfig struct {
+	Email         string
+	CacheDir      string
+	ChallengeMode string // "http" (default) or "https"
+	ServePort80   bool
+	DirectoryURL  string // optional override
+	CARootFile    string // trust this CA for the ACME endpoint (test servers)
+	Insecure      bool   // skip TLS verify for the ACME endpoint (TESTING ONLY)
 }
 
 // VHost groups a set of routes under one or more domain names.
@@ -117,6 +130,16 @@ type Config struct {
 type VHost struct {
 	Domains []string
 	Routes  map[string]*RouteConfig
+	TLS     *VHostTLS // nil = no per-vhost TLS (uses global tls-cert if any)
+}
+
+// VHostTLS holds a vhost's tls block: either a static cert/key pair, or ACME
+// auto-issuance (AcmeSource set), with cert/key paths then used as storage.
+type VHostTLS struct {
+	Cert        string
+	Key         string
+	AcmeSource  string // "" = static cert; otherwise CA name (letsencrypt, zerossl, ...)
+	RenewBefore string // e.g. "30d"; empty = default (1/3 lifetime)
 }
 
 // Auth holds HTTP Basic Auth credentials.
@@ -210,6 +233,15 @@ type fileConfig struct {
 type fileVHost struct {
 	Domains []string             `yaml:"domains"`
 	Routes  map[string]fileRoute `yaml:"routes"`
+	TLS     *fileVHostTLS        `yaml:"tls"`
+}
+
+// fileVHostTLS mirrors a vhost's tls block.
+type fileVHostTLS struct {
+	Cert        string `yaml:"cert"`
+	Key         string `yaml:"key"`
+	AcmeSource  string `yaml:"acme-source"`
+	RenewBefore string `yaml:"acme-renewal"`
 }
 
 type fileGlobal struct {
@@ -222,6 +254,18 @@ type fileGlobal struct {
 	IPFilterCfg          *IPFilterConfig    `yaml:"ip-filter"`
 	TrustedProxiesCfg    TrustedProxiesConfig `yaml:"trusted-proxies"`
 	JWTAuthCfg           *JWTAuth             `yaml:"jwt-authentication"`
+	ACMECfg              *fileACME            `yaml:"acme"`
+}
+
+// fileACME mirrors the global.acme YAML block.
+type fileACME struct {
+	Email         string `yaml:"email"`
+	CacheDir      string `yaml:"cache-dir"`
+	ChallengeMode string `yaml:"challenge-mode"`
+	ServePort80   bool   `yaml:"serve-port80"`
+	DirectoryURL  string `yaml:"directory-url"`
+	CARootFile    string `yaml:"ca-root-file"`
+	Insecure      bool   `yaml:"insecure-skip-verify"`
 }
 
 type fileRoute struct {
@@ -441,6 +485,18 @@ func loadConfigFile(path string) (*Config, error) {
 	}
 	cfg.JWTAuth = fc.Global.JWTAuthCfg
 
+	if fc.Global.ACMECfg != nil {
+		cfg.ACME = &ACMEConfig{
+			Email:         fc.Global.ACMECfg.Email,
+			CacheDir:      fc.Global.ACMECfg.CacheDir,
+			ChallengeMode: fc.Global.ACMECfg.ChallengeMode,
+			ServePort80:   fc.Global.ACMECfg.ServePort80,
+			DirectoryURL:  fc.Global.ACMECfg.DirectoryURL,
+			CARootFile:    fc.Global.ACMECfg.CARootFile,
+			Insecure:      fc.Global.ACMECfg.Insecure,
+		}
+	}
+
 	if len(fc.Global.TrustedProxiesCfg) > 0 {
 		tp, err := buildTrustedProxies(fc.Global.TrustedProxiesCfg)
 		if err != nil {
@@ -479,6 +535,14 @@ func loadConfigFile(path string) (*Config, error) {
 		vh, err := parseFileVHost(fvh.Routes, fvh.Domains)
 		if err != nil {
 			return nil, err
+		}
+		if fvh.TLS != nil {
+			vh.TLS = &VHostTLS{
+				Cert:        fvh.TLS.Cert,
+				Key:         fvh.TLS.Key,
+				AcmeSource:  fvh.TLS.AcmeSource,
+				RenewBefore: fvh.TLS.RenewBefore,
+			}
 		}
 		cfg.VHosts = append(cfg.VHosts, vh)
 	}

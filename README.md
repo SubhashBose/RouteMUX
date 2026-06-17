@@ -9,6 +9,7 @@ A lightweight, flexible, and easy configurable reverse proxy written in Go. Rout
 - **[Config file + CLI](#configuration-file)** — full configuration via `config.yml` as well as command-line flags, or combining both; CLI takes precedence.
 - **[HTTP & WebSocket](#websocket)** — transparently proxies both HTTP and WebSocket connections
 - **[TLS termination](#tls)** — serve HTTPS with your own certificate; connect to HTTPS upstreams with optional verification skip
+- **[Automatic TLS (ACME)](#automatic-tls-acme)** — automatically obtain and renew per-vhost certificates from Let's Encrypt, ZeroSSL, or any ACME CA, via HTTP-01 or TLS-ALPN-01; certificates stored as inspectable PEM files
 - **[HTTP Basic Auth](#authentication)** — global auth for all routes, per-route override, or explicit disable
 - **[Header manipulation](#upstream-request-header-manipulation)** — add, overwrite, or delete headers per route for client response or upstream request, with wildcard support (`CF-*`, `X-*`) and variable interpolation (`${remote_addr}`, `${header.User-Agent}`, etc.)
 - **[Load balancing](#load-balancing)** — weighted random or weighted round-robin across multiple upstream destinations
@@ -385,6 +386,101 @@ vhosts:
 
 `vhost:` can be omitted entirely, with `routes:` block starting at root level of the YAML file, in such case all the routes will
 be applied to default (`["*"]`) all hostnames, all incoming connections.
+
+---
+
+## Automatic TLS (ACME)
+
+RouteMUX can obtain and renew TLS certificates automatically from any ACME
+certificate authority (Let's Encrypt, ZeroSSL, or a private/test CA), on a
+per-vhost basis. Certificates are written as standard PEM files at paths you
+choose, so other tools can read them and you can inspect them directly.
+
+### Global settings
+
+```yaml
+global:
+  acme:
+    email: admin@example.com            # account contact (required for ACME vhosts)
+    cache-dir: /var/lib/routemux/acme    # account material + default cert location
+    challenge-mode: http                 # http = HTTP-01 (default), https = TLS-ALPN-01
+    serve-port80: true                   # open a temporary :80 listener during a challenge
+                                         # (only if RouteMUX isn't already serving on :80)
+```
+
+`cache-dir` defaults to `/var/lib/routemux/acme` when running as root, otherwise
+`$HOME/.local/share/routemux`. It always holds the per-CA account key, and is
+also where certificates are stored when a vhost doesn't set explicit paths.
+
+### Per-vhost certificates
+
+Add a `tls:` block to a vhost. With `acme-source`, a single SAN certificate
+covering all of the vhost's domains is issued and renewed automatically:
+
+```yaml
+vhosts:
+  - domains: [example.com, www.example.com]
+    tls:
+      acme-source: letsencrypt          # letsencrypt | letsencrypt-staging | zerossl
+      # cert: /etc/ssl/example.crt       # optional; default cache-dir/example.com.crt
+      # key:  /etc/ssl/example.key       # optional; default cache-dir/example.com.key
+      # acme-renewal: 30d                # optional; default renews at 1/3 lifetime remaining
+    routes:
+      /:
+        dest: http://localhost:3000/
+```
+
+The default certificate filename uses the **shortest** domain in the list
+(`example.com` above). A per-vhost `tls` block supersedes the global
+`tls-cert`/`tls-key`; if a global cert is also set, it serves as the fallback
+for SNI names that match no vhost.
+
+### Static certificates per vhost
+
+Omit `acme-source` to serve an existing certificate (no issuance). The same
+`cert`/`key` fields are then read as a static pair:
+
+```yaml
+  - domains: [internal.example.com]
+    tls:
+      cert: /etc/ssl/internal.crt
+      key:  /etc/ssl/internal.key
+```
+
+### Challenge modes
+
+- **HTTP-01** (`challenge-mode: http`, default): the CA fetches a token from
+  `http://<domain>/.well-known/acme-challenge/<token>` on **port 80**. RouteMUX
+  always serves this path on whatever port it listens on, so a downstream proxy
+  forwarding port 80 works out of the box. Set `serve-port80: true` to let
+  RouteMUX open a temporary port-80 listener itself during the challenge window
+  (used only if nothing else holds port 80).
+- **TLS-ALPN-01** (`challenge-mode: https`): the CA validates over **port 443**
+  using a special TLS handshake. No port-80 listener is needed. Requires
+  RouteMUX to be reachable on 443.
+
+### ZeroSSL
+
+`acme-source: zerossl` automatically obtains the required External Account
+Binding credentials from ZeroSSL using the configured `email` — no manual EAB
+setup needed.
+
+### Renewal
+
+A background task checks certificates periodically and renews them before
+expiry — by default when one third of the certificate's lifetime remains
+(about 30 days before expiry for a 90-day Let's Encrypt certificate). Override
+per vhost with `acme-renewal` (e.g. `15d`). Renewals continue across config
+reloads. **Adding or removing ACME vhosts requires a restart** (like any TLS
+listener change).
+
+### Testing
+
+To avoid Let's Encrypt rate limits, test against staging first with
+`acme-source: letsencrypt-staging`. The `directory-url`, `ca-root-file`, and
+`insecure-skip-verify` options under `global.acme` allow pointing at a private
+or local test CA (e.g. Pebble) — `insecure-skip-verify` is for testing only and
+must never be used against a real CA.
 
 ---
 

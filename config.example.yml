@@ -4,6 +4,17 @@ global:
   port: ${env.HTTP_PORT:9090}  # HTTP listen Port value obtained from env variable, with optional default
   #tls-cert: /path/to/cert.pem
   #tls-key:  /path/to/key.pem
+  #acme:                              # Automatic TLS certificates (ACME / Let's Encrypt, ZeroSSL, ...)
+  #  email: admin@example.com         # Account contact (required when any vhost uses acme-source)
+  #  cache-dir: /var/lib/routemux/acme # Account storage + default cert location
+  #                                    # (default: /var/lib/routemux/acme as root,
+  #                                    #  else $HOME/.local/share/routemux)
+  #  challenge-mode: http             # http = HTTP-01 (default), https = TLS-ALPN-01
+  #  serve-port80: true               # Open a temporary port-80 listener during a HTTP-01
+  #                                   # challenge window if RouteMUX isn't already on :80
+  #  directory-url: ...               # Optional: override the ACME directory (staging/private CA)
+  #  ca-root-file: /path/ca.pem       # Optional: trust this CA for the ACME endpoint (test servers)
+  #  insecure-skip-verify: false      # Optional: skip ACME endpoint TLS verify (TESTING ONLY)
   global-auth: ["admin", "s3cr3t"]   # HTTP Basic Auth for all routes
   #trust-client-headers: true    # Trust X-Forwarded-* headers for all connections
   trusted-proxies:               # Trust X-Forwarded-* headers only for these IPs/CIDRs
@@ -41,6 +52,15 @@ global:
 
 vhosts:
   - domains: ["example.com", "www.example.com"]
+    #tls:                             # Per-vhost TLS (supersedes global tls-cert/tls-key)
+    #  acme-source: letsencrypt       # Auto-issue via ACME: letsencrypt, letsencrypt-staging, or zerossl
+    #                                  #   (presence of acme-source enables automatic issuance)
+    #  cert: /path/example.crt        # Optional: where the issued cert is written
+    #                                  #   (default: cache-dir/<shortest-domain>.crt)
+    #  key:  /path/example.key        # Optional: matching key (default: cache-dir/<shortest-domain>.key)
+    #                                  # Without acme-source, cert/key are served as a static pair.
+    #  acme-renewal: 30d              # Optional: renew this many days before expiry
+    #                                  #   (default: when 1/3 of the cert lifetime remains)
     routes:
       /api/:
         dest: http://localhost:3000/v1/

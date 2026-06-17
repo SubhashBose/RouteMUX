@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"routemux/acme"
 	"routemux/jwtverify"
 	"crypto/tls"
 	"errors"
@@ -27,6 +28,8 @@ type ctxKeyXFFCopy struct{}
 type server struct {
 	state    atomic.Pointer[serverState]
 	bindIP   string // resolved from cfg.Listen (does not change on reload)
+
+	acmeMgr *acme.Manager // nil = no automatic/per-vhost TLS via SNI
 
 	// Hot reload coordination.
 	// reloadMu ensures only one Reload() runs at a time — concurrent triggers
@@ -89,6 +92,14 @@ func newServer(cfg *Config) (*server, error) {
 		}
 		cfg.TrustedProxies.StartRefresh()
 	}
+
+	// Build the ACME / per-vhost TLS manager (nil if no TLS vhosts configured).
+	mgr, err := buildACMEManager(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("acme: %w", err)
+	}
+	s.acmeMgr = mgr
+
 	return s, nil
 }
 
@@ -778,7 +789,32 @@ func (s *server) run() error {
 		return err
 	}
 
-	if state.cfg.TLSCert != "" {
+	// TLS listener selection:
+	//   - If an ACME/per-vhost TLS manager is present, use its SNI GetCertificate
+	//     (multi-cert). A global tls-cert, if also set, becomes the fallback for
+	//     unmatched SNI names.
+	//   - Otherwise, fall back to the legacy single global cert.
+	if s.acmeMgr != nil {
+		// Install the global tls-cert (if any) as the SNI fallback BEFORE Start,
+		// so it takes precedence over the self-signed bootstrap fallback that
+		// Start installs when no fallback is present.
+		if state.cfg.TLSCert != "" {
+			cert, cerr := tls.LoadX509KeyPair(state.cfg.TLSCert, state.cfg.TLSKey)
+			if cerr != nil {
+				ln.Close()
+				return fmt.Errorf("TLS: %w", cerr)
+			}
+			s.acmeMgr.SetFallback(&cert)
+		}
+		if err := s.acmeMgr.Start(); err != nil {
+			ln.Close()
+			return fmt.Errorf("acme: %w", err)
+		}
+		tlsCfg := s.acmeMgr.TLSConfig()
+		ln = tls.NewListener(ln, tlsCfg)
+		log.Printf("TLS enabled (SNI / automatic certificates)")
+		log.Printf("RouteMUX listening on %s (TLS)", ln.Addr())
+	} else if state.cfg.TLSCert != "" {
 		// Load the certificate and wrap the listener in TLS before logging,
 		// so the message appears only when TLS is also ready.
 		cert, cerr := tls.LoadX509KeyPair(state.cfg.TLSCert, state.cfg.TLSKey)
@@ -797,6 +833,9 @@ func (s *server) run() error {
 
 	// ErrServerClosed is the normal return after Shutdown() — not an error.
 	if errors.Is(err, http.ErrServerClosed) {
+		if s.acmeMgr != nil {
+			s.acmeMgr.Stop()
+		}
 		log.Printf("RouteMUX stopped.")
 		return nil
 	}
@@ -821,6 +860,16 @@ func isCatchAll(domains []string) bool {
 // IP filter and vhost dispatch are inlined — no closure allocation per request.
 func (s *server) handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// ACME HTTP-01 challenges must be served regardless of vhost, IP filter,
+		// or routing — the CA reaches /.well-known/acme-challenge/<token> on
+		// whatever port RouteMUX serves (directly or via a downstream proxy).
+		if s.acmeMgr != nil && acme.IsChallengeRequest(r) {
+			if h := s.acmeMgr.HTTPChallengeHandler(); h != nil {
+				h.ServeHTTP(w, r)
+				return
+			}
+		}
+
 		state := s.state.Load()
 
 		if state.cfg.IPFilter != nil && !state.cfg.IPFilter.Allow(r.RemoteAddr) {

@@ -4,12 +4,21 @@ import (
 	"io"
 	"bufio"
 	"context"
+	"crypto/tls"
+	"math/big"
+	"encoding/pem"
+	"crypto/x509"
+	"crypto/rand"
+	"crypto/elliptic"
+	"crypto/ecdsa"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"bytes"
+	"log"
 	"strings"
 	"testing"
 	"time"
@@ -6135,5 +6144,134 @@ routes:
 `)
 	if !clientSide.NeedsTrustedXFF || !clientSide.ClientNeedsTrustedXFF {
 		t.Error("client-side: both NeedsTrustedXFF and ClientNeedsTrustedXFF should be true")
+	}
+}
+// ---- ACME / per-vhost TLS (Phase 1: SNI cert serving) ----
+
+func TestVHostTLS_StaticCertServedViaSNI(t *testing.T) {
+	// A vhost with a static cert/key should be served for its SNI name through
+	// the ACME manager's multi-cert listener.
+	dir := t.TempDir()
+	// Generate a self-signed cert for example.test using the acme test helper
+	// pattern inline (ecdsa P256).
+	certPath, keyPath := writeSelfSignedCert(t, dir, "example.test")
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("ok"))
+	}))
+	defer backend.Close()
+
+	cfg := &Config{
+		Port: 0,
+		VHosts: []VHost{{
+			Domains: []string{"example.test"},
+			Routes: map[string]*RouteConfig{
+				"/": {Upstreams: []Upstream{mustUpstream(backend.URL+"/", 1)}},
+			},
+			TLS: &VHostTLS{Cert: certPath, Key: keyPath},
+		}},
+	}
+
+	srv, err := newServer(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if srv.acmeMgr == nil {
+		t.Fatal("expected acme manager to be built for per-vhost TLS")
+	}
+	if err := srv.acmeMgr.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	// The manager should now serve a cert for example.test via SNI.
+	cert, err := srv.acmeMgr.GetCertificate(&tls.ClientHelloInfo{ServerName: "example.test"})
+	if err != nil || cert == nil {
+		t.Fatalf("SNI cert for example.test: cert=%v err=%v", cert, err)
+	}
+}
+
+// writeSelfSignedCert creates a self-signed cert/key for the domain and returns
+// their file paths.
+func writeSelfSignedCert(t *testing.T, dir, domain string) (certPath, keyPath string) {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		DNSNames:     []string{domain},
+	}
+	der, _ := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
+	certPath = filepath.Join(dir, domain+".crt")
+	keyPath = filepath.Join(dir, domain+".key")
+	cf, _ := os.Create(certPath)
+	pem.Encode(cf, &pem.Block{Type: "CERTIFICATE", Bytes: der})
+	cf.Close()
+	kd, _ := x509.MarshalECPrivateKey(priv)
+	kf, _ := os.Create(keyPath)
+	pem.Encode(kf, &pem.Block{Type: "EC PRIVATE KEY", Bytes: kd})
+	kf.Close()
+	return certPath, keyPath
+}
+
+// ---- ACME port-80 misconfiguration warning ----
+
+func buildWithCapturedLog(t *testing.T, cfg *Config) string {
+	t.Helper()
+	var buf bytes.Buffer
+	old := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(old)
+	if _, err := buildACMEManager(cfg); err != nil {
+		t.Fatalf("buildACMEManager: %v", err)
+	}
+	return buf.String()
+}
+
+func TestWarn_Port80_HTTP01_ServePort80(t *testing.T) {
+	cfg := &Config{
+		Port: 80,
+		ACME: &ACMEConfig{Email: "a@b.com", ChallengeMode: "http", ServePort80: true},
+		VHosts: []VHost{{
+			Domains: []string{"example.com"},
+			TLS:     &VHostTLS{AcmeSource: "letsencrypt"},
+		}},
+	}
+	out := buildWithCapturedLog(t, cfg)
+	if !strings.Contains(out, "WARNING") || !strings.Contains(out, "TLS-ALPN-01") {
+		t.Errorf("expected port-80 misconfig warning, got: %q", out)
+	}
+}
+
+func TestWarn_Port80_HTTPS_NoWarning(t *testing.T) {
+	cfg := &Config{
+		Port: 80,
+		ACME: &ACMEConfig{Email: "a@b.com", ChallengeMode: "https"},
+		VHosts: []VHost{{
+			Domains: []string{"example.com"},
+			TLS:     &VHostTLS{AcmeSource: "letsencrypt"},
+		}},
+	}
+	out := buildWithCapturedLog(t, cfg)
+	if strings.Contains(out, "WARNING") {
+		t.Errorf("https mode on port 80 should NOT warn, got: %q", out)
+	}
+}
+
+func TestWarn_Port443_HTTP01_NoWarning(t *testing.T) {
+	cfg := &Config{
+		Port: 443,
+		ACME: &ACMEConfig{Email: "a@b.com", ChallengeMode: "http", ServePort80: true},
+		VHosts: []VHost{{
+			Domains: []string{"example.com"},
+			TLS:     &VHostTLS{AcmeSource: "letsencrypt"},
+		}},
+	}
+	out := buildWithCapturedLog(t, cfg)
+	if strings.Contains(out, "WARNING") {
+		t.Errorf("port 443 + http + serve-port80 should NOT warn, got: %q", out)
 	}
 }
