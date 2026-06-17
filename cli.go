@@ -16,6 +16,23 @@ var buildDate = ""
 
 // parseAll merges config file + CLI args into a final Config.
 // CLI args take precedence over config file.
+// ensureACME returns cfg.ACME, allocating it on first use so ACME CLI flags can
+// be applied incrementally regardless of order.
+func ensureACME(cfg *Config) *ACMEConfig {
+	if cfg.ACME == nil {
+		cfg.ACME = &ACMEConfig{}
+	}
+	return cfg.ACME
+}
+
+// ensureVHostTLS allocates the current vhost's TLS settings on first use.
+func ensureVHostTLS(p **VHostTLS) *VHostTLS {
+	if *p == nil {
+		*p = &VHostTLS{}
+	}
+	return *p
+}
+
 func parseAll(args []string) (*Config, error) {
 	// --- 1. Find config file path from args (first pass) ---
 	// Scan args once to find --config and detect --help early.
@@ -184,6 +201,8 @@ func applyCLI(cfg *Config, rawArgs []string) error {
 	// Current vhost being built. Routes without --vhost go into the implicit catch-all.
 	var curVHostDomains []string // nil = implicit catch-all (backward compat)
 	var curRoutes map[string]*RouteConfig
+	// Per-vhost TLS settings, attached to the current --vhost on flush.
+	var curVHostTLS *VHostTLS
 	getCurrentRoutes := func() map[string]*RouteConfig {
 		if curRoutes == nil {
 			curRoutes = map[string]*RouteConfig{}
@@ -214,6 +233,10 @@ func applyCLI(cfg *Config, rawArgs []string) error {
 		if flushErr != nil {
 			return
 		}
+		if curVHostTLS != nil && curVHostDomains == nil {
+			flushErr = fmt.Errorf("per-vhost TLS flags (--tls-cert/--tls-key/--tls-acme-source/--tls-acme-renewal) require a preceding --vhost")
+			return
+		}
 		if curRoutes == nil {
 			return
 		}
@@ -236,12 +259,13 @@ func applyCLI(cfg *Config, rawArgs []string) error {
 				}
 			}
 			// No existing catch-all — create one.
-			cfg.VHosts = append(cfg.VHosts, VHost{Domains: []string{"*"}, Routes: curRoutes})
+			cfg.VHosts = append(cfg.VHosts, VHost{Domains: []string{"*"}, Routes: curRoutes, TLS: curVHostTLS})
 		} else {
-			cfg.VHosts = append(cfg.VHosts, VHost{Domains: curVHostDomains, Routes: curRoutes})
+			cfg.VHosts = append(cfg.VHosts, VHost{Domains: curVHostDomains, Routes: curRoutes, TLS: curVHostTLS})
 		}
 		curRoutes = nil
 		curVHostDomains = nil
+		curVHostTLS = nil
 	}
 
 	i := 0
@@ -266,18 +290,55 @@ func applyCLI(cfg *Config, rawArgs []string) error {
 				return fmt.Errorf("invalid --port: %v", err)
 			}
 			i += 2
-		case "--tls-cert":
+		case "--global-tls-cert":
 			if i+1 >= len(args) {
-				return fmt.Errorf("--tls-cert requires a value")
+				return fmt.Errorf("--global-tls-cert requires a value")
 			}
-			cfg.TLSCert = args[i+1]
+			cfg.GlobalTLSCert = args[i+1]
 			i += 2
-		case "--tls-key":
+		case "--global-tls-key":
 			if i+1 >= len(args) {
-				return fmt.Errorf("--tls-key requires a value")
+				return fmt.Errorf("--global-tls-key requires a value")
 			}
-			cfg.TLSKey = args[i+1]
+			cfg.GlobalTLSKey = args[i+1]
 			i += 2
+		case "--acme-email":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--acme-email requires a value")
+			}
+			ensureACME(cfg).Email = args[i+1]
+			i += 2
+		case "--acme-cache-dir":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--acme-cache-dir requires a value")
+			}
+			ensureACME(cfg).CacheDir = args[i+1]
+			i += 2
+		case "--acme-challenge-mode":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--acme-challenge-mode requires a value")
+			}
+			ensureACME(cfg).ChallengeMode = args[i+1]
+			i += 2
+		case "--acme-serve-port80":
+			// Boolean flag: presence enables it.
+			ensureACME(cfg).ServePort80 = true
+			i++
+		case "--acme-directory-url":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--acme-directory-url requires a value")
+			}
+			ensureACME(cfg).DirectoryURL = args[i+1]
+			i += 2
+		case "--acme-ca-root-file":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--acme-ca-root-file requires a value")
+			}
+			ensureACME(cfg).CARootFile = args[i+1]
+			i += 2
+		case "--acme-insecure-skip-verify":
+			ensureACME(cfg).Insecure = true
+			i++
 		case "--jwt-header":
 			if i+1 >= len(args) { return fmt.Errorf("--jwt-header requires a value") }
 			if cfg.JWTAuth == nil { cfg.JWTAuth = &JWTAuth{} }
@@ -368,6 +429,30 @@ func applyCLI(cfg *Config, rawArgs []string) error {
 			for j, d := range curVHostDomains {
 				curVHostDomains[j] = strings.TrimSpace(d)
 			}
+			i += 2
+		case "--tls-acme-source":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--tls-acme-source requires a value")
+			}
+			ensureVHostTLS(&curVHostTLS).AcmeSource = args[i+1]
+			i += 2
+		case "--tls-cert":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--tls-cert requires a value")
+			}
+			ensureVHostTLS(&curVHostTLS).Cert = args[i+1]
+			i += 2
+		case "--tls-key":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--tls-key requires a value")
+			}
+			ensureVHostTLS(&curVHostTLS).Key = args[i+1]
+			i += 2
+		case "--tls-acme-renewal":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--tls-acme-renewal requires a value")
+			}
+			ensureVHostTLS(&curVHostTLS).RenewBefore = args[i+1]
 			i += 2
 		case "--route":
 			flushRoute() // save previous route
@@ -635,6 +720,8 @@ func printHelp() {
 
 	fmt.Print(`RouteMUX v` + version + ` — a flexible reverse proxy
 
+Can be be fully configured via CLI or a YAML config file, or combining both.
+
 Usage:
   routemux [global options] \
             --route PATH --dest URL [route options] \
@@ -645,8 +732,15 @@ Global options:
                            ./config.yml or ~/.config/routemux/config.yml)
   --listen ADDR            IP address or interface name to listen on (default: all interfaces)
   --port PORT              Port to listen on (default: 8080)
-  --tls-cert FILE          TLS certificate file (enables HTTPS)
-  --tls-key  FILE          TLS key file (enables HTTPS)
+  --global-tls-cert FILE   Global TLS certificate file (enables HTTPS; fallback for SNI)
+  --global-tls-key  FILE   Global TLS key file (enables HTTPS)
+  --acme-email EMAIL       ACME account email (required for automatic TLS)
+  --acme-cache-dir DIR     ACME cache directory (account + default cert storage)
+  --acme-challenge-mode M  ACME challenge: http (HTTP-01, default) or https (TLS-ALPN-01)
+  --acme-serve-port80      Open a temporary port-80 listener during HTTP-01 challenges
+  --acme-directory-url URL Override the ACME directory endpoint (staging/private CA)
+  --acme-ca-root-file FILE Trust this CA for the ACME endpoint (test servers)
+  --acme-insecure-skip-verify  Skip ACME endpoint TLS verification (TESTING ONLY)
   --trust-client-headers   Trust X-Forwarded-* headers from client (default: false)
   --trusted-proxy ENTRY    Trust X-Forwarded-* headers from specific proxy IPs (repeatable)
                            ENTRY: IP, CIDR, file path, or URL — same format as --ip-filter-allow
@@ -675,36 +769,49 @@ Global JWT options:
   --jwt-default-allow-all  Allow all authenticated users to access all routes by default,
                            unless set of users listed in --auth-users for that route.
 
-Vhost and Route:
+Vhosts (optional: this can be skipped if vhosts are not needed, can jump directly to routes):
   --vhost DOMAINS          Specify list of hostnames (e.g. "domain.com|www.domain.com") to
                            group routes under it (repeatable). Default is '*'
+
+    Vhost options (must follow --vhost DOMAINS):
+      --tls-acme-source SRC    Auto-issue TLS cert via letsencrypt|letsencrypt-staging|zerossl
+      --tls-cert FILE          TLS cert for this vhost (static cert, or ACME storage path)
+      --tls-key  FILE          TLS key for this vhost (static key, or ACME storage path)
+	  						   If --tls-acme-source is specfied, then --tls-cert/--tls-key
+							   becomes storage paths for ACME, otherwise static cert/key is
+							   served from these files.
+      --tls-acme-renewal DUR    renew this long before expiry (e.g. 30d)
+
+Routes:
   --route PATH             Define a route (e.g. /api/) (repeatable under a vhost)
                            If no preceding --vhost specified, then the routes are applied to 
-                           '*', i.e., all hosts
+                           '*', i.e., all hosts. 
+                           Sets of --route followed by route options can be repeated to define
+                           multiple routes.
 
-Route options (must follow --route PATH):
-  --dest URL               Upstream destination URL (repeatable).
-                           Repeated --dest <URL> [weight=<N>] per route forms load-balancer,
-                           where weight is optional, default is 1.
-         or STATUS_CODE    --dest STATUS <code> [text] is also supported, where a HTTP
-                           response code is returned with optional static text body.
-         or FILE           --dest FILE [code] <path> serves a static file. The HTTP response
-                           code is optional and defaults to 200 if omitted.
-  --load-balancer-mode     Load balancer mode, "round-robin" or "random", (default: random) 
-  --noTLSverify            Skip TLS verification for upstream(s)
-  --auth U:P               Per-route Basic Auth (overrides global-auth; "" disables auth)
-  --auth-users USER,...    Comma-separated list of JWT usernames allowed on this route
-  --skip-jwt-auth          Skip JWT auth for this route
-  --timeout DURATION       Total request timeout (e.g. 30s, 2m; default: unbounded)
-  --dial-timeout DURATION  Upstream connect timeout (e.g. 5s; default: 5s)
-  --dest-add-header K:V    Add/overwrite a header on upstream request (repeatable)
-                           Can be combination of variables and text
-  --dest-del-header K      Delete a header from the upstream request (repeatable)
-                           Can take wildcards (e.g. --dest-del-header *cookie*)
-  --client-add-header K:V  Add/overwrite a header on upstream response sent to client
-                           (repeatable) Can be combination of variables and text
-  --client-del-header K    Delete a header from the upstream response (repeatable)
-                           Can take wildcards (e.g. --client-del-header *cookie*)
+    Route options (must follow --route PATH):
+      --dest URL               Upstream destination URL (repeatable).
+                               Repeated --dest <URL> [weight=<N>] per route forms load-balancer,
+                               where weight is optional, default is 1.
+             or STATUS_CODE    --dest STATUS <code> [text] is also supported, where a HTTP
+                               response code is returned with optional static text body.
+             or FILE           --dest FILE [code] <path> serves a static file. The HTTP response
+                               code is optional and defaults to 200 if omitted.
+      --load-balancer-mode     Load balancer mode, "round-robin" or "random", (default: random) 
+      --noTLSverify            Skip TLS verification for upstream(s)
+      --auth U:P               Per-route Basic Auth (overrides global-auth; "" disables auth)
+      --auth-users USER,...    Comma-separated list of JWT usernames allowed on this route
+      --skip-jwt-auth          Skip JWT auth for this route
+      --timeout DURATION       Total request timeout (e.g. 30s, 2m; default: unbounded)
+      --dial-timeout DURATION  Upstream connect timeout (e.g. 5s; default: 5s)
+      --dest-add-header K:V    Add/overwrite a header on upstream request (repeatable)
+                               Can be combination of variables and text
+      --dest-del-header K      Delete a header from the upstream request (repeatable)
+                               Can take wildcards (e.g. --dest-del-header *cookie*)
+      --client-add-header K:V  Add/overwrite a header on upstream response sent to client
+                               (repeatable) Can be combination of variables and text
+      --client-del-header K    Delete a header from the upstream response (repeatable)
+                               Can take wildcards (e.g. --client-del-header *cookie*)
 `)
 if daemon.DAEMONIZE_SUPPORTED {
 	fmt.Print(`
@@ -730,18 +837,17 @@ General flags:
   --no-strict-yaml         Disable strict YAML parsing (allow unknown config keys)
   --validate               Validate configuration and exit without serving
 
-Sets of --route followed by route options can be repeated to define multiple routes.
 
 All command line options can be configured in config.yml file specified with --config.
 Options in command line and config.yml file are combined, where command line options takes precedence.
-To disable reading any config.yml file, use --config "". 
+To disable reading any auto-found config.yml file, use --config "". 
 
 Config file (config.yml) example:
   global:
     listen: ""
     port: 8080
-    tls-cert: ""
-    tls-key: ""
+    global-tls-cert: ""
+    global-tls-key: ""
     global-auth: ["USER", "PASSWORD"]
     trust-client-headers: false
     trusted-proxy:
@@ -759,9 +865,20 @@ Config file (config.yml) example:
       jwk-url: https://example.com/.well-known/jwks.json
       aud-id: my-app
       default-allow-all: false
+    acme:
+      email: admin@example.com
+      cache-dir: /var/cache/routemux
+      challenge-mode: http
+      serve-port80: false
 
   vhosts:
     - domains: ["example.com", "www.example.com"]
+      tls:
+        cert: /path/to/cert.pem
+        key: /path/to/key.pem
+        acme-source: letsencrypt
+        acme-renewal: ""
+        
       routes:
         "/api/":
            dest: http://localhost:3000/
@@ -781,6 +898,8 @@ Config file (config.yml) example:
              - Server
 		   skip-jwt-auth: true
 
+    - domains: ["*"]
+      routes:
         "/load-balancer/":
            dest:
              - http://localhost:3000/

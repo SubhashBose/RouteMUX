@@ -2,8 +2,8 @@ global:
   listen: lo         # IP or interface (e.g. 192.168.1.10, eth0, lo) or unix socket path 
                      # (unix:///run/routemux.sock). Empty = all interfaces
   port: ${env.HTTP_PORT:9090}  # HTTP listen Port value obtained from env variable, with optional default
-  #tls-cert: /path/to/cert.pem
-  #tls-key:  /path/to/key.pem
+  #global-tls-cert: /path/to/cert.pem
+  #global-tls-key:  /path/to/key.pem
   #acme:                              # Automatic TLS certificates (ACME / Let's Encrypt, ZeroSSL, ...)
   #  email: admin@example.com         # Account contact (required when any vhost uses acme-source)
   #  cache-dir: /var/lib/routemux/acme # Account storage + default cert location

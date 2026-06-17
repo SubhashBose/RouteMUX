@@ -97,8 +97,8 @@ type JWTAuth struct {
 type Config struct {
 	Listen             string
 	Port               int
-	TLSCert            string
-	TLSKey             string
+	GlobalTLSCert            string
+	GlobalTLSKey             string
 	GlobalAuth         *Auth
 	TrustClientHeaders bool
 	VHosts             []VHost    // ordered list; matched top-to-bottom per request
@@ -202,8 +202,8 @@ func (c *Config) validate() error {
 
 		}
 	}
-	if (c.TLSCert == "") != (c.TLSKey == "") {
-		return fmt.Errorf("both tls-cert and tls-key must be provided together")
+	if (c.GlobalTLSCert == "") != (c.GlobalTLSKey == "") {
+		return fmt.Errorf("both global-tls-cert and global-tls-key must be provided together")
 	}
 	if c.JWTAuth != nil {
 		if c.JWTAuth.HeaderKey == "" && c.JWTAuth.CookieKey == "" {
@@ -247,8 +247,8 @@ type fileVHostTLS struct {
 type fileGlobal struct {
 	Listen     string   `yaml:"listen"`
 	Port       int      `yaml:"port"`
-	TLSCert    string   `yaml:"tls-cert"`
-	TLSKey     string   `yaml:"tls-key"`
+	GlobalTLSCert    string   `yaml:"global-tls-cert"`
+	GlobalTLSKey     string   `yaml:"global-tls-key"`
 	GlobalAuth          []string `yaml:"global-auth"`   // ["USER", "PASSWORD"]
 	TrustClientHeaders  bool            `yaml:"trust-client-headers"`
 	IPFilterCfg          *IPFilterConfig    `yaml:"ip-filter"`
@@ -468,8 +468,8 @@ func loadConfigFile(path string) (*Config, error) {
 	cfg := &Config{
 		Listen:             fc.Global.Listen,
 		Port:               fc.Global.Port,
-		TLSCert:            fc.Global.TLSCert,
-		TLSKey:             fc.Global.TLSKey,
+		GlobalTLSCert:            fc.Global.GlobalTLSCert,
+		GlobalTLSKey:             fc.Global.GlobalTLSKey,
 		TrustClientHeaders: fc.Global.TrustClientHeaders,
 	}
 	if cfg.Port == 0 {

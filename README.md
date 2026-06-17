@@ -83,7 +83,7 @@ The binary can self update to the latest release version with the `--upgrade` fl
 ./routemux --route /api/ --dest http://localhost:3000/
 
 # HTTPS termination
-./routemux --tls-cert cert.pem --tls-key key.pem --route / --dest http://localhost:8080/
+./routemux --global-tls-cert cert.pem --global-tls-key key.pem --route / --dest http://localhost:8080/
 
 # With a config file
 ./routemux --config config.yml
@@ -119,8 +119,8 @@ RouteMUX looks for `config.yml` in this order:
 global:
   listen:           # IP address, interface name (e.g. 192.168.1.10, eth0, lo), or unix:/path.sock. Empty = all interfaces.
   port: 8080        # Port to listen on (default: 8080)
-  # tls-cert: /path/to/cert.pem
-  # tls-key:  /path/to/key.pem
+  # global-tls-cert: /path/to/cert.pem
+  # global-tls-key:  /path/to/key.pem
   global-auth: ["admin", "s3cr3t"]   # HTTP Basic Auth applied to all routes
   # trust-client-headers: true    # (default: false) Trust X-Forwarded-* from all connections
   trusted-proxies:              # Trust X-Forwarded-* from these IPs only

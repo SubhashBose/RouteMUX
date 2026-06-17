@@ -73,8 +73,8 @@ func TestLoadConfigFile_Full(t *testing.T) {
 global:
   listen: 127.0.0.1
   port: 9000
-  tls-cert: /tmp/cert.pem
-  tls-key: /tmp/key.pem
+  global-tls-cert: /tmp/cert.pem
+  global-tls-key: /tmp/key.pem
   global-auth: ["admin", "pass"]
 
 routes:
@@ -96,8 +96,8 @@ routes:
 	if cfg.Port != 9000 {
 		t.Errorf("port = %d", cfg.Port)
 	}
-	if cfg.TLSCert != "/tmp/cert.pem" {
-		t.Errorf("tls-cert = %q", cfg.TLSCert)
+	if cfg.GlobalTLSCert != "/tmp/cert.pem" {
+		t.Errorf("tls-cert = %q", cfg.GlobalTLSCert)
 	}
 	if cfg.GlobalAuth == nil || cfg.GlobalAuth.User != "admin" || cfg.GlobalAuth.Password != "pass" {
 		t.Errorf("global-auth = %+v", cfg.GlobalAuth)
@@ -196,8 +196,8 @@ func TestCLI_GlobalFlags(t *testing.T) {
 	err := applyCLI(cfg, []string{
 		"--listen", "127.0.0.1",
 		"--port", "9999",
-		"--tls-cert", "/c.pem",
-		"--tls-key", "/k.pem",
+		"--global-tls-cert", "/c.pem",
+		"--global-tls-key", "/k.pem",
 		"--global-auth", "admin:secret",
 		"--route", "/api/",
 		"--dest", "http://backend/",
@@ -211,8 +211,8 @@ func TestCLI_GlobalFlags(t *testing.T) {
 	if cfg.Port != 9999 {
 		t.Errorf("port = %d", cfg.Port)
 	}
-	if cfg.TLSCert != "/c.pem" || cfg.TLSKey != "/k.pem" {
-		t.Errorf("tls = %q %q", cfg.TLSCert, cfg.TLSKey)
+	if cfg.GlobalTLSCert != "/c.pem" || cfg.GlobalTLSKey != "/k.pem" {
+		t.Errorf("tls = %q %q", cfg.GlobalTLSCert, cfg.GlobalTLSKey)
 	}
 	if cfg.GlobalAuth == nil || cfg.GlobalAuth.User != "admin" || cfg.GlobalAuth.Password != "secret" {
 		t.Errorf("global-auth = %+v", cfg.GlobalAuth)
@@ -558,7 +558,7 @@ func TestValidate_MissingDest(t *testing.T) {
 func TestValidate_TLSPartial(t *testing.T) {
 	cfg := &Config{
 		Port:    8080,
-		TLSCert: "/c.pem",
+		GlobalTLSCert: "/c.pem",
 		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/x/": {Upstreams: []Upstream{mustUpstream("http://x/", 1)}}}}},
 	}
 	if err := cfg.validate(); err == nil {
@@ -6273,5 +6273,129 @@ func TestWarn_Port443_HTTP01_NoWarning(t *testing.T) {
 	out := buildWithCapturedLog(t, cfg)
 	if strings.Contains(out, "WARNING") {
 		t.Errorf("port 443 + http + serve-port80 should NOT warn, got: %q", out)
+	}
+}
+
+func TestACMEDomainValidation_RejectsBadDomains(t *testing.T) {
+	bad := [][]string{
+		{"*"},                          // catch-all
+		{"*.example.com"},              // wildcard
+		{"not a domain"},               // malformed
+	}
+	for _, domains := range bad {
+		cfg := &Config{
+			Port: 443,
+			ACME: &ACMEConfig{Email: "a@b.com"},
+			VHosts: []VHost{{
+				Domains: domains,
+				TLS:     &VHostTLS{AcmeSource: "letsencrypt"},
+			}},
+		}
+		if _, err := buildACMEManager(cfg); err == nil {
+			t.Errorf("buildACMEManager should reject ACME domains %v", domains)
+		}
+	}
+}
+
+func TestACMEDomainValidation_AllowsStaticCatchAll(t *testing.T) {
+	// A catch-all vhost with a STATIC cert (no acme-source) must NOT be rejected
+	// — validation only applies to ACME issuance.
+	cfg := &Config{
+		Port: 443,
+		VHosts: []VHost{{
+			Domains: []string{"*"},
+			TLS:     &VHostTLS{Cert: "/x.crt", Key: "/x.key"},
+		}},
+	}
+	if _, err := buildACMEManager(cfg); err != nil {
+		t.Errorf("static catch-all vhost should be allowed: %v", err)
+	}
+}
+
+// ---- ACME CLI flags ----
+
+func TestCLI_GlobalTLSRename(t *testing.T) {
+	cfg, err := parseAll([]string{
+		"--global-tls-cert", "/c.pem", "--global-tls-key", "/k.pem",
+		"--route", "/", "--dest", "http://localhost:3000/",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.GlobalTLSCert != "/c.pem" || cfg.GlobalTLSKey != "/k.pem" {
+		t.Errorf("global tls not parsed: cert=%q key=%q", cfg.GlobalTLSCert, cfg.GlobalTLSKey)
+	}
+}
+
+func TestCLI_OldTLSFlagRemoved(t *testing.T) {
+	// The old --tls-cert at the global level should now be treated as a per-vhost
+	// flag (and error without a --vhost), NOT set the global cert.
+	_, err := parseAll([]string{"--tls-cert", "/c.pem", "--route", "/", "--dest", "http://x/"})
+	if err == nil {
+		t.Error("--tls-cert without --vhost should error (it's now per-vhost)")
+	}
+}
+
+func TestCLI_GlobalACMEFlags(t *testing.T) {
+	cfg, err := parseAll([]string{
+		"--acme-email", "a@b.com",
+		"--acme-cache-dir", "/var/acme",
+		"--acme-challenge-mode", "https",
+		"--acme-serve-port80",
+		"--acme-directory-url", "https://dir/",
+		"--route", "/", "--dest", "http://localhost:3000/",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ACME == nil {
+		t.Fatal("ACME config not created")
+	}
+	if cfg.ACME.Email != "a@b.com" || cfg.ACME.CacheDir != "/var/acme" {
+		t.Errorf("acme email/cache wrong: %+v", cfg.ACME)
+	}
+	if cfg.ACME.ChallengeMode != "https" || !cfg.ACME.ServePort80 {
+		t.Errorf("acme challenge/serve80 wrong: %+v", cfg.ACME)
+	}
+	if cfg.ACME.DirectoryURL != "https://dir/" {
+		t.Errorf("acme directory wrong: %q", cfg.ACME.DirectoryURL)
+	}
+}
+
+func TestCLI_PerVHostTLSFlags(t *testing.T) {
+	cfg, err := parseAll([]string{
+		"--acme-email", "a@b.com",
+		"--vhost", "example.com|www.example.com",
+		"--tls-acme-source", "letsencrypt",
+		"--tls-acme-renewal", "15d",
+		"--route", "/", "--dest", "http://localhost:3000/",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Find the example.com vhost.
+	var vh *VHost
+	for i := range cfg.VHosts {
+		for _, d := range cfg.VHosts[i].Domains {
+			if d == "example.com" {
+				vh = &cfg.VHosts[i]
+			}
+		}
+	}
+	if vh == nil || vh.TLS == nil {
+		t.Fatal("per-vhost TLS not attached")
+	}
+	if vh.TLS.AcmeSource != "letsencrypt" || vh.TLS.RenewBefore != "15d" {
+		t.Errorf("per-vhost TLS wrong: %+v", vh.TLS)
+	}
+}
+
+func TestCLI_PerVHostTLSRequiresVHost(t *testing.T) {
+	_, err := parseAll([]string{
+		"--tls-acme-source", "letsencrypt",
+		"--route", "/", "--dest", "http://localhost:3000/",
+	})
+	if err == nil {
+		t.Error("per-vhost TLS flags without --vhost should error")
 	}
 }
