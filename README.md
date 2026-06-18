@@ -26,19 +26,19 @@ A lightweight, flexible, and easy configurable reverse proxy written in Go. Rout
 
 ## Design philosophy
 
-RouteMUX is designed to handle heavy concurrent connections efficiently, while minimizing race conditions, memory usage, and latency.
-It offers several complex features (e.g., header manipulation, ip filter, trusted proxy) that inevitably introduce some additional overhead — ranging from tens of nanoseconds to a few milliseconds in latency, and a few tens of bytes of memory per connection. However, the core design philosophy ensures that a particular channel of process is not activated unless the related feature is enabled for the given route. For example, if there are multiple routes declared, and a particular route needs header values for `add-header` manipulation, then only connections for that route will keep a copy of header variables that can be reused for header manipulation, while connections for all other routes take the shortest path with minimum overhead. 
+RouteMUX is designed to handle heavy concurrent connections efficiently, while eliminating race conditions, memory usage, and latency.
+It offers several complex features (e.g., header manipulation, ip filter, trusted proxy) that inevitably introduce some additional overhead — ranging from tens of nanoseconds to a few milliseconds in latency, and a few tens of bytes of memory per connection. However, the core design philosophy ensures that a particular channel of process is not activated unless the related feature is enabled for the given route. For example, if there are multiple routes declared, and a particular route needs header values for `add-header` manipulation, then only connections for that route will keep a copy of original header variables that can be reused for header manipulation, while connections for all other routes take the shortest path with minimum overhead. 
 
 Therefore, RouteMUX pre-determines on startup for each route what process is necessary. As a result, having a feature available in RouteMUX will have no (negligible) overhead per connection if that route does not use the feature. For a most basic configuration like `routemux --route / --dest http://localhost:8080`, the connection throughput is most optimized and is as efficient as possible.
 
 Some examples are:
 - Headers manipulations syntax is parsed and stored in simple structure at the startup only
 - Copy of header is only made if Header variables and header values are in use
-- `trusted_xff` variable is evaluated using trusted proxy ip list only if it is being used
+- `trusted_xff` variable is evaluated using trusted proxy ip list only if it is being used. Also different path is taken depending on `trusted_xff` is used in client or dest side header manipulation to minimize load and latency.
 - Load balancing channel is activated only if multiple `dest` is declared for a route
 - Environment variables are replaced only at the startup while parsing the config file.
 
-Another design philosophy is to maintain 100% interoperability of configurations through CLI as well as config file. No matter how complex a config file looks like, it can be fully implemented through CLI, and vice-versa. However, this is not guarantee for all features to be added in future, although full effort will be made to maintain it like this. 
+Another aspect of design philosophy is to maintain 100% interoperability of configurations through CLI as well as config file. No matter how complex a config file looks like, it can be fully implemented through CLI, and vice-versa.
 
 ---
 
@@ -229,8 +229,8 @@ routemux [global options] \
 | `--config PATH` | Config file path. Pass `""` to disable config file loading. |
 | `--listen ADDR` | IP address or interface name to listen on (default: all interfaces) |
 | `--port PORT` | Port to listen on (default: `8080`) |
-| `--tls-cert FILE` | TLS certificate file — enables HTTPS |
-| `--tls-key FILE` | TLS key file — required when `--tls-cert` is set |
+| `--global-tls-cert FILE` | TLS certificate file — enables HTTPS |
+| `--globl-tls-key FILE` | TLS key file — required when `--tls-cert` is set |
 | `--jwt-header KEYWORD` | HTTP header containing the JWT token |
 | `--jwt-cookie KEYWORD` | Cookie containing the JWT token (fallback) |
 | `--jwt-claim-user KEY` | JWT claim to extract username from |
@@ -335,8 +335,8 @@ routemux \
 
 # HTTPS termination
 routemux \
-  --tls-cert /etc/ssl/cert.pem \
-  --tls-key  /etc/ssl/key.pem \
+  --global-tls-cert /etc/ssl/cert.pem \
+  --global-tls-key  /etc/ssl/key.pem \
   --port 443 \
   --route / --dest http://localhost:8080/
 
@@ -431,8 +431,8 @@ vhosts:
 ```
 
 The default certificate filename uses the **shortest** domain in the list
-(`example.com` above). A per-vhost `tls` block supersedes the global
-`tls-cert`/`tls-key`; if a global cert is also set, it serves as the fallback
+(`example.com` above). A per-vhost `tls` block supersedes the
+`global-tls-cert`/`global-tls-key`; if a global cert is also set, it serves as the fallback
 for SNI names that match no vhost.
 
 ### Static certificates per vhost
@@ -458,6 +458,8 @@ Omit `acme-source` to serve an existing certificate (no issuance). The same
 - **TLS-ALPN-01** (`challenge-mode: https`): the CA validates over **port 443**
   using a special TLS handshake. No port-80 listener is needed. Requires
   RouteMUX to be reachable on 443.
+
+If RouteMUX is running behind Cloudflare proxy, it is still possible to pass ACME challenge using `HTTP` mode challenge (do not enable `serve-port80`). In this case, RouteMUX on first run will start TLS listener with self-signed certificate, which will be replaced by ACME certificate when obtained. So, on first run, configure Cloudflare proxy with `Automatic SSL` or `Full SSL` (not strict) or in case of Cloudflare tunnels use HTTPS with disabled TLS verification. After the first ACME certificate is issued to RouteMUX, you can enable TLS verification or strict-SSL in Cloudflare, RouteMUX will continue to renew certificates.
 
 ### ZeroSSL
 
@@ -1101,12 +1103,12 @@ When a connection is blocked by the IP filter, RouteMUX closes the TCP connectio
 
 ```yaml
 global:
-  tls-cert: /path/to/cert.pem
-  tls-key:  /path/to/key.pem
+  global-tls-cert: /path/to/cert.pem
+  global-tls-key:  /path/to/key.pem
   port: 443
 ```
 
-Both `tls-cert` and `tls-key` must be set together.
+Both `global-tls-cert` and `global-tls-key` must be set together.
 
 ### Upstream TLS
 

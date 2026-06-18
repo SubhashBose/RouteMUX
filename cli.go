@@ -720,9 +720,9 @@ func printHelp() {
 
 	fmt.Print(`RouteMUX v` + version + ` — a flexible reverse proxy
 
-Can be be fully configured via CLI or a YAML config file, or combining both.
+Can be be fully configured via CLI options, or a YAML config file, or combining both.
 
-Usage:
+Command lineUsage:
   routemux [global options] \
             --route PATH --dest URL [route options] \
            [--route PATH2 --dest URL [route options]] ...
@@ -758,7 +758,7 @@ Global options:
 Global JWT options:
   --jwt-header KEY         Header key to get JWT token
   --jwt-cookie KEY         Cookie key to get JWT token (provide either --jwt-header or
-	                       --jwt-cookie. If both is provided then --jwt-header takes
+                           --jwt-cookie. If both is provided then --jwt-header takes
                            precedence and --jwt-cookie is fallback)
   --jwt-claim-user KEY     JWT claim key to obtain username
   --jwt-secret SECRET      JWT HMAC secret (--jwt-secret taken precedence over --jwt-key)
@@ -777,10 +777,10 @@ Vhosts (optional: this can be skipped if vhosts are not needed, can jump directl
       --tls-acme-source SRC    Auto-issue TLS cert via letsencrypt|letsencrypt-staging|zerossl
       --tls-cert FILE          TLS cert for this vhost (static cert, or ACME storage path)
       --tls-key  FILE          TLS key for this vhost (static key, or ACME storage path)
-	  						   If --tls-acme-source is specfied, then --tls-cert/--tls-key
-							   becomes storage paths for ACME, otherwise static cert/key is
-							   served from these files.
-      --tls-acme-renewal DUR    renew this long before expiry (e.g. 30d)
+                               If --tls-acme-source is specified, then --tls-cert/--tls-key
+                               becomes storage paths for ACME, otherwise static cert/key is
+                               served from these files.
+      --tls-acme-renewal DUR   renew this long before expiry (e.g. 30d)
 
 Routes:
   --route PATH             Define a route (e.g. /api/) (repeatable under a vhost)
@@ -884,7 +884,7 @@ Config file (config.yml) example:
            dest: http://localhost:3000/
            noTLSverify: false
            auth: ["USER", "PASSWORD"]
-		   auth-users: ["USER1", "USER2"]
+           auth-users: ["USER1", "USER2"]
            timeout: 30s
            dest-add-header:
              User-Agent: RouteMUX
@@ -896,7 +896,7 @@ Config file (config.yml) example:
              Served-By: RouteMUX
            client-del-header:
              - Server
-		   skip-jwt-auth: true
+           skip-jwt-auth: true
 
     - domains: ["*"]
       routes:
@@ -912,9 +912,9 @@ Config file (config.yml) example:
         "/file/":
            dest: FILE 200 ./static/file.txt
 
-The 'domains' and set of 'route' under it is repeatable for different hosts.
-The 'vhost' and 'domains' can be omitted if there is no host/domain configuration needed. 
-All routes are applied to all incoming requests, i.e., ['*'] domains.
+The 'vhost' with set of 'route' under it is repeatable for different hosts.
+If host/domain configuration is not needed, the parent block 'vhost' can be omitted, while directly starting with
+'routes' block. In that case, all routes are applied to all incoming requests, i.e., ['*'] domains.
 
 Config file can have environment variables substitution globally as ${env.VARIABLE:default}
 
