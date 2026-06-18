@@ -1,6 +1,6 @@
 module routemux
 
-go 1.22
+go 1.25
 
 require (
 	github.com/SubhashBose/GoPkg-selfupdater v1.0.0

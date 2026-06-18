@@ -812,7 +812,34 @@ func (s *server) run() error {
 		}
 		tlsCfg := s.acmeMgr.TLSConfig()
 		ln = tls.NewListener(ln, tlsCfg)
-		log.Printf("TLS enabled (SNI / automatic certificates)")
+		if s.acmeMgr.UsesACME() {
+			log.Printf("TLS enabled (SNI; automatic certificates via ACME)")
+		} else {
+			log.Printf("TLS enabled (SNI; per-vhost certificates)")
+		}
+		// Warn about routed vhosts that have no certificate of their own: with
+		// TLS enabled server-wide, they will be served the SNI fallback (the
+		// global cert if set, otherwise the self-signed bootstrap cert), so the
+		// presented certificate will not match their hostname.
+		managed := s.acmeMgr.ManagedDomains()
+		var fallbackVHosts []string
+		for _, vh := range state.cfg.VHosts {
+			for _, d := range vh.Domains {
+				if d == "*" || d == "" {
+					continue // catch-all isn't a real SNI name
+				}
+				if !managed[strings.ToLower(d)] {
+					fallbackVHosts = append(fallbackVHosts, d)
+				}
+			}
+		}
+		if len(fallbackVHosts) > 0 {
+			fallbackKind := "self-signed bootstrap"
+			if state.cfg.GlobalTLSCert != "" {
+				fallbackKind = "global-tls-cert"
+			}
+			log.Printf("TLS: vhost(s) %v have no certificate of their own and will be served the %s fallback certificate (name will not match)", fallbackVHosts, fallbackKind)
+		}
 		log.Printf("RouteMUX listening on %s (TLS)", ln.Addr())
 	} else if state.cfg.GlobalTLSCert != "" {
 		// Load the certificate and wrap the listener in TLS before logging,
@@ -1092,6 +1119,19 @@ func (s *server) Reload(fileMod bool) {
 		log.Printf("Reload: TLS cert/key changes require a full restart. Reverting to current values.")
 		newCfg.GlobalTLSCert = oldState.cfg.GlobalTLSCert
 		newCfg.GlobalTLSKey = oldState.cfg.GlobalTLSKey
+	}
+	// ACME / per-vhost TLS settings are fixed at server start (the ACME manager
+	// is built once and persists across reloads so renewals keep running).
+	// Detect changes, warn, and revert them so routing doesn't update while the
+	// certificate behaviour silently stays on the old config.
+	if acmeConfigChanged(oldState.cfg, newCfg) {
+		log.Printf("Reload: ACME / per-vhost TLS changes require a full restart to take effect " +
+			"(adding/removing ACME vhosts, changing acme-source, cert/key paths, challenge-mode, " +
+			"or the global acme block). Reverting these to the running configuration; restart RouteMUX " +
+			"to apply them.")
+		newCfg.ACME = oldState.cfg.ACME
+		// Revert each vhost's TLS block to the old config's (matched by domain set).
+		revertVHostTLS(oldState.cfg.VHosts, newCfg.VHosts)
 	}
 
 	// 3. Compile new vhosts

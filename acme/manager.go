@@ -3,6 +3,7 @@ package acme
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"log"
@@ -94,6 +95,30 @@ func (m *Manager) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, 
 
 // TLSConfig returns a *tls.Config wired to this Manager, including the ALPN
 // protocol required for TLS-ALPN-01 challenges when that mode is selected.
+// ManagedDomains returns the set of domains that have a certificate of their
+// own configured (static or ACME) — i.e. that will NOT be served by the SNI
+// fallback. Used by the server to warn about vhosts relying on the fallback.
+func (m *Manager) ManagedDomains() map[string]bool {
+	set := make(map[string]bool)
+	for i := range m.vhosts {
+		for _, d := range m.vhosts[i].Domains {
+			set[strings.ToLower(d)] = true
+		}
+	}
+	return set
+}
+
+// UsesACME reports whether any managed vhost uses automatic (ACME) issuance, as
+// opposed to only static per-vhost certificates.
+func (m *Manager) UsesACME() bool {
+	for i := range m.vhosts {
+		if m.vhosts[i].UsesACME() {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *Manager) TLSConfig() *tls.Config {
 	cfg := &tls.Config{
 		GetCertificate: m.GetCertificate,
@@ -134,11 +159,22 @@ func (m *Manager) Start() error {
 		cert, err := loadCertPair(certPath, keyPath)
 		if err == nil {
 			m.store.setCert(v.Domains, cert)
-			log.Printf("acme: loaded certificate for %v from %s", v.Domains, certPath)
+			kind := "static"
+			if v.UsesACME() {
+				kind = "ACME"
+			}
+			// The leaf is already in memory from the load — parse it once to
+			// surface expiry and issuer in the startup log (works for both
+			// static and ACME certs).
+			if detail := certDetail(cert); detail != "" {
+				log.Printf("tls: loaded %s certificate for %v from %s (%s)", kind, v.Domains, certPath, detail)
+			} else {
+				log.Printf("tls: loaded %s certificate for %v from %s", kind, v.Domains, certPath)
+			}
 			continue
 		}
 		if !v.UsesACME() {
-			log.Printf("acme: failed to load static certificate for %v: %v", v.Domains, err)
+			log.Printf("tls: failed to load static certificate for %v: %v", v.Domains, err)
 			continue
 		}
 		needIssue = append(needIssue, v)
@@ -356,6 +392,36 @@ func loadCertPair(certPath, keyPath string) (*tls.Certificate, error) {
 		return nil, err
 	}
 	return &cert, nil
+}
+
+// certDetail parses the leaf certificate (already in memory from loading) and
+// returns a short human-readable summary of its issuer and expiry for logging.
+// Returns "" if the leaf cannot be parsed.
+func certDetail(cert *tls.Certificate) string {
+	if cert == nil || len(cert.Certificate) == 0 {
+		return ""
+	}
+	leaf, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		return ""
+	}
+	// Prefer the issuer Organization (e.g. "Let's Encrypt", "ZeroSSL") — it is
+	// human-recognizable and stable, whereas the CN is the specific intermediate
+	// (e.g. "R10", "R11") which is cryptic and rotates between renewals. Fall
+	// back to CN if no Organization is set (some private/test CAs only set CN).
+	issuer := ""
+	if len(leaf.Issuer.Organization) > 0 {
+		issuer = leaf.Issuer.Organization[0]
+	}
+	if issuer == "" {
+		issuer = leaf.Issuer.CommonName
+	}
+	expiry := leaf.NotAfter.UTC().Format("2006-01-02")
+	if time.Now().After(leaf.NotAfter) {
+		return fmt.Sprintf("issuer %q, EXPIRED %s", issuer, expiry)
+	}
+	daysLeft := int(time.Until(leaf.NotAfter).Hours() / 24)
+	return fmt.Sprintf("issuer %q, expires %s, %dd left", issuer, expiry, daysLeft)
 }
 
 // cacheDir returns the resolved cache directory (for account storage etc.).

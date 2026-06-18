@@ -6399,3 +6399,172 @@ func TestCLI_PerVHostTLSRequiresVHost(t *testing.T) {
 		t.Error("per-vhost TLS flags without --vhost should error")
 	}
 }
+
+// ---- ACME reload-change detection ----
+
+func TestACMEConfigChanged_GlobalBlock(t *testing.T) {
+	a := &Config{ACME: &ACMEConfig{Email: "a@b.com", ChallengeMode: "http"}}
+	b := &Config{ACME: &ACMEConfig{Email: "a@b.com", ChallengeMode: "http"}}
+	if acmeConfigChanged(a, b) {
+		t.Error("identical ACME global blocks should not be flagged as changed")
+	}
+	c := &Config{ACME: &ACMEConfig{Email: "a@b.com", ChallengeMode: "https"}}
+	if !acmeConfigChanged(a, c) {
+		t.Error("changed challenge-mode should be detected")
+	}
+	// nil vs non-nil.
+	if !acmeConfigChanged(&Config{}, a) {
+		t.Error("adding an ACME block should be detected")
+	}
+}
+
+func TestACMEConfigChanged_VHostTLS(t *testing.T) {
+	base := &Config{VHosts: []VHost{{
+		Domains: []string{"example.com"},
+		TLS:     &VHostTLS{AcmeSource: "letsencrypt"},
+	}}}
+	same := &Config{VHosts: []VHost{{
+		Domains: []string{"example.com"},
+		TLS:     &VHostTLS{AcmeSource: "letsencrypt"},
+	}}}
+	if acmeConfigChanged(base, same) {
+		t.Error("identical vhost TLS should not be flagged")
+	}
+
+	// Changed acme-source.
+	changedSrc := &Config{VHosts: []VHost{{
+		Domains: []string{"example.com"},
+		TLS:     &VHostTLS{AcmeSource: "zerossl"},
+	}}}
+	if !acmeConfigChanged(base, changedSrc) {
+		t.Error("changed acme-source should be detected")
+	}
+
+	// Added a new ACME vhost.
+	added := &Config{VHosts: []VHost{
+		{Domains: []string{"example.com"}, TLS: &VHostTLS{AcmeSource: "letsencrypt"}},
+		{Domains: []string{"new.com"}, TLS: &VHostTLS{AcmeSource: "letsencrypt"}},
+	}}
+	if !acmeConfigChanged(base, added) {
+		t.Error("adding an ACME vhost should be detected")
+	}
+
+	// Removed the TLS block.
+	removed := &Config{VHosts: []VHost{{Domains: []string{"example.com"}}}}
+	if !acmeConfigChanged(base, removed) {
+		t.Error("removing a vhost TLS block should be detected")
+	}
+}
+
+func TestRevertVHostTLS(t *testing.T) {
+	oldV := []VHost{{
+		Domains: []string{"example.com"},
+		TLS:     &VHostTLS{AcmeSource: "letsencrypt"},
+	}}
+	newV := []VHost{{
+		Domains: []string{"example.com"},
+		TLS:     &VHostTLS{AcmeSource: "zerossl"}, // user tried to change it
+	}}
+	revertVHostTLS(oldV, newV)
+	if newV[0].TLS == nil || newV[0].TLS.AcmeSource != "letsencrypt" {
+		t.Errorf("TLS should be reverted to old (letsencrypt), got %+v", newV[0].TLS)
+	}
+}
+
+func TestACME_GlobalBlockAloneDoesNotEnableTLS(t *testing.T) {
+	// A global acme block with an email, but NO vhost using acme-source and NO
+	// per-vhost tls — must NOT build a manager (no TLS).
+	cfg := &Config{
+		Port: 8080,
+		ACME: &ACMEConfig{Email: "me@example.com"},
+		VHosts: []VHost{{
+			Domains: []string{"example.com"},
+			Routes:  map[string]*RouteConfig{"/": {}},
+		}},
+	}
+	mgr, err := buildACMEManager(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mgr != nil {
+		t.Error("global acme block alone (no vhost tls) must not build a manager / enable TLS")
+	}
+}
+
+func TestACME_EmptyTLSBlockDoesNotEnableTLS(t *testing.T) {
+	// A tls block with neither cert/key nor acme-source is inert.
+	cfg := &Config{
+		Port: 8080,
+		VHosts: []VHost{{
+			Domains: []string{"example.com"},
+			TLS:     &VHostTLS{}, // empty
+			Routes:  map[string]*RouteConfig{"/": {}},
+		}},
+	}
+	mgr, err := buildACMEManager(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mgr != nil {
+		t.Error("empty tls block must not enable TLS")
+	}
+}
+
+func TestACME_TLSBlockOnlyRenewalDoesNotEnableTLS(t *testing.T) {
+	// acme-renewal alone (no acme-source, no cert/key) is inert.
+	cfg := &Config{
+		Port: 8080,
+		VHosts: []VHost{{
+			Domains: []string{"example.com"},
+			TLS:     &VHostTLS{RenewBefore: "30d"},
+			Routes:  map[string]*RouteConfig{"/": {}},
+		}},
+	}
+	mgr, err := buildACMEManager(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mgr != nil {
+		t.Error("tls block with only acme-renewal must not enable TLS")
+	}
+}
+
+func TestACME_VHostACMESourceWithGlobalSettings(t *testing.T) {
+	// The valid pattern: global acme settings + a vhost opting in via acme-source.
+	cfg := &Config{
+		Port: 443,
+		ACME: &ACMEConfig{Email: "me@example.com"},
+		VHosts: []VHost{{
+			Domains: []string{"example.com"},
+			TLS:     &VHostTLS{AcmeSource: "letsencrypt"},
+			Routes:  map[string]*RouteConfig{"/": {}},
+		}},
+	}
+	mgr, err := buildACMEManager(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mgr == nil {
+		t.Error("a vhost with acme-source should build a manager")
+	}
+}
+
+func TestACME_StaticVHostTLSBuildsManager(t *testing.T) {
+	// A per-vhost static cert (no acme-source, no global acme) still needs the
+	// SNI manager.
+	cfg := &Config{
+		Port: 443,
+		VHosts: []VHost{{
+			Domains: []string{"example.com"},
+			TLS:     &VHostTLS{Cert: "/c", Key: "/k"},
+			Routes:  map[string]*RouteConfig{"/": {}},
+		}},
+	}
+	mgr, err := buildACMEManager(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mgr == nil {
+		t.Error("a static per-vhost tls cert should build the SNI manager")
+	}
+}
