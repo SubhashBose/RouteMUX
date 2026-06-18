@@ -382,6 +382,33 @@ func discardAccount(dir string) error {
 	return nil
 }
 
+// ReloadCerts re-reads each vhost's certificate file from disk and updates the
+// in-memory SNI store if the file loaded successfully. This lets an operator
+// drop in updated certificate files (renewed out-of-band, or replaced) and have
+// them picked up on a config reload without restarting. It never triggers ACME
+// issuance and never removes an existing in-memory cert because of a transient
+// read error — a cert that fails to load now simply keeps the previously served
+// one. Returns the list of domains whose certificate was refreshed.
+func (m *Manager) ReloadCerts() []string {
+	var refreshed []string
+	for i := range m.vhosts {
+		v := &m.vhosts[i]
+		certPath, keyPath := v.resolveCertPaths(m.global.CacheDir)
+		cert, err := loadCertPair(certPath, keyPath)
+		if err != nil {
+			continue // keep the currently served cert
+		}
+		m.store.setCert(v.Domains, cert)
+		refreshed = append(refreshed, v.Domains...)
+		if detail := certDetail(cert); detail != "" {
+			log.Printf("tls: reloaded certificate for %v from %s (%s)", v.Domains, certPath, detail)
+		} else {
+			log.Printf("tls: reloaded certificate for %v from %s", v.Domains, certPath)
+		}
+	}
+	return refreshed
+}
+
 // loadCertPair loads a PEM certificate and key from the given paths.
 func loadCertPair(certPath, keyPath string) (*tls.Certificate, error) {
 	if certPath == "" || keyPath == "" {

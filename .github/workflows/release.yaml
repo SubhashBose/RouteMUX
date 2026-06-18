@@ -89,6 +89,7 @@ jobs:
           goarch: ${{ matrix.goarch }}
           goversion: "1.24"
           ldflags: '-w -s -buildid= -X main.version=${{ needs.create-release.outputs.version }} -X "main.buildDate=${{ needs.create-release.outputs.builddate }}"'
+          #build_flags: '-trimpath'
           md5sum: false
           release_tag: ${{ needs.create-release.outputs.tagname }}
           asset_name: "routemux-${{ matrix.goos }}-${{ matrix.goarch }}"

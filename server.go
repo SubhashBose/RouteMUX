@@ -31,6 +31,12 @@ type server struct {
 
 	acmeMgr *acme.Manager // nil = no automatic/per-vhost TLS via SNI
 
+	// globalCert holds the global TLS certificate for the legacy single-cert
+	// path (no SNI manager). It is served via a GetCertificate callback so it
+	// can be swapped on reload when the cert file is updated. nil when the
+	// manager is in use or no global cert is configured.
+	globalCert atomic.Pointer[tls.Certificate]
+
 	// Hot reload coordination.
 	// reloadMu ensures only one Reload() runs at a time — concurrent triggers
 	// (simultaneous SIGHUP + file change) are dropped rather than queued.
@@ -850,7 +856,14 @@ func (s *server) run() error {
 			return fmt.Errorf("TLS: %w", cerr)
 		}
 		log.Printf("TLS enabled (cert: %s)", state.cfg.GlobalTLSCert)
-		tlsCfg := &tls.Config{Certificates: []tls.Certificate{cert}}
+		// Serve via a GetCertificate callback backed by an atomic holder, so the
+		// cert can be swapped on reload when the file is updated.
+		s.globalCert.Store(&cert)
+		tlsCfg := &tls.Config{
+			GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+				return s.globalCert.Load(), nil
+			},
+		}
 		ln = tls.NewListener(ln, tlsCfg)
 		log.Printf("RouteMUX listening on %s (TLS)", ln.Addr())
 	} else {
@@ -1176,6 +1189,32 @@ func (s *server) Reload(fileMod bool) {
 	}
 	if newCfg.TrustedProxies != nil {
 		newCfg.TrustedProxies.StartRefresh()
+	}
+
+	// 7. Re-read certificate files from disk so externally-updated certs (renewed
+	// out-of-band or replaced) are picked up without a restart. Paths themselves
+	// can't change on reload (that needs a restart, handled above), but the file
+	// contents at those paths can.
+	if s.acmeMgr != nil {
+		// Per-vhost static/ACME certs in the SNI store.
+		s.acmeMgr.ReloadCerts()
+		// The global cert serves as the SNI fallback when the manager is present.
+		if newCfg.GlobalTLSCert != "" {
+			if cert, cerr := tls.LoadX509KeyPair(newCfg.GlobalTLSCert, newCfg.GlobalTLSKey); cerr == nil {
+				s.acmeMgr.SetFallback(&cert)
+				log.Printf("tls: reloaded global fallback certificate from %s", newCfg.GlobalTLSCert)
+			} else {
+				log.Printf("tls: reload of global cert %s failed: %v (keeping current)", newCfg.GlobalTLSCert, cerr)
+			}
+		}
+	} else if newCfg.GlobalTLSCert != "" && s.globalCert.Load() != nil {
+		// Legacy single-cert path: swap the atomically-held global cert.
+		if cert, cerr := tls.LoadX509KeyPair(newCfg.GlobalTLSCert, newCfg.GlobalTLSKey); cerr == nil {
+			s.globalCert.Store(&cert)
+			log.Printf("tls: reloaded global certificate from %s", newCfg.GlobalTLSCert)
+		} else {
+			log.Printf("tls: reload of global cert %s failed: %v (keeping current)", newCfg.GlobalTLSCert, cerr)
+		}
 	}
 
 	log.Printf("Reload successful.")
