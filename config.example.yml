@@ -76,6 +76,7 @@ vhosts:
           X-Client-IP:     ${remote_addr}        # client/connecting IP
           X-Original-IP:   ${trusted_xff}        # Real IP after evaluating trusted-proxies on X-Forwarded-For chain
           X-Original-UA: ${header.User-Agent}  # copy from original client headers
+          #X-Auth-User:   ${jwt_user}           # JWT user claim (claim-user-key) after validation; blank if unavailable
           x-rebuilt-url: ${scheme}://${header.host}${request_uri}
         
         dest-del-header: 

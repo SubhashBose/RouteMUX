@@ -612,6 +612,7 @@ The token signature is verified using `secret` (HMAC or PEM public key) or `jwk-
   - `auth-users` empty/unset and `default-allow-all: false` → denied (code `403`).
   - `auth-users` is set, and username in not in list → denied (code `403`), irrespective of `default-allow-all` value
 - If `skip-jwt-auth` is set for a route, then entire JWT verification and authorisation path is skipped for request coming to this route 
+- The extracted username is also available to header manipulation as the `${jwt_user}` variable (e.g. `dest-add-header: X-Auth-User: ${jwt_user}`), letting the upstream receive the authenticated identity without validating the token itself — see [Variables in `dest-add-header`](#variables-in-dest-add-header).
 
 ### Responses
 
@@ -677,12 +678,15 @@ Header values can reference request properties using `${variable}` syntax, and m
 | `${trusted_xff}` | The remote IP after evaluating `trusted-proxies` and `trust-client-headers` on the `X-Forwarded-For` chain along with connecting IP  |
 | `${header.Name}` | Value of any client request header by name |
 | `${header.Host}` | Original client `Host` header |
+| `${jwt_user}` | The validated JWT's user claim (the claim named by `claim-user-key`); empty when unavailable |
 
 Use `\${` to send a literal  sign (e.g. `\${remote_addr}` → `${remote_addr}`). Non-existent variable or unclosed `${` will be treated as plain string.
 
 > `${trusted_xff}` value evaluates the trusted remote IP by looking up on the `X-Forwarded-For` header IP chain, appended with the connecting IP. Each of the IPs from the chain, starting from most recent to oldest (right to left), is checked against the `trusted-proxies` list, and the first untrusted IP sets the value. If all IPs are in `trusted-proxies`, or `trust-client-headers: true` then, the left most valid IP sets `${trusted_xff}`. If neither `trusted-proxies` nor `trust-client-headers` is set, then no IP is trusted, client IP (`${remote_addr}`) sets the variable. 
 > 
 > The purpose of `${trusted_xff}` is to do all the validation of real client IP, and provide this to the upstream server, which it can use without doing any more IP trust verification. It is to be noted, the `${trusted_xff}` variable is not available for static routes, i.e., `STATUS` or `FILE` type `dest`s.
+
+> `${jwt_user}` carries the authenticated identity to the upstream (e.g. `X-Auth-User: ${jwt_user}`), so the backend can trust it without validating the token again. It resolves to the value of the JWT claim named by `claim-user-key` (CLI: `--jwt-claim-user`), taken from the token **after** signature verification and authorisation succeed. It is empty when JWT authentication is not configured, the route uses `skip-jwt-auth`, no `jwt-claim-user` is set, or the claim is not a string. The claim value is sanitised (CR/LF stripped) before being placed in a header, so a hostile-but-validly-signed token cannot inject headers. Like all variables, it can be combined with text (`user=${jwt_user}`), works in both `dest-add-header` and `client-add-header`, and costs nothing on routes that don't use it.
 
 ```yaml
 routes:
@@ -696,6 +700,7 @@ routes:
       X-Request-URI:   ${request_uri}          # full URI with query string
       X-Original-Host: ${header.Host}          # original Host header
       X-Original-UA:   ${header.User-Agent}    # copy any client header
+      X-Auth-User:     ${jwt_user}             # JWT user claim after validation
       X-Literal:       \${remote_addr}         # literal "$remote_addr"
       X-Built-URL:     ${scheme}://${header.host}${request_uri}  # combining variable and strings
       X-Text:          Plain text content

@@ -110,6 +110,8 @@ func (t *xffRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 //   ${scheme}         http or https
 //   ${request_uri}    full URI including query string
 //   ${header.Name}    value of Name from original client headers
+//   ${jwt_user}       the validated JWT's user claim (jwt-claim-user); empty
+//                     when JWT auth is off, skipped, or no claim configured
 //
 // Unknown ${variables} pass through as the literal text "${variable}".
 // Unmatched ${ (no closing }) is treated as literal text.
@@ -125,6 +127,7 @@ const (
 	segRequestURI         // ${request_uri}
 	segTrustedXFF         // ${trusted_xff}
 	segHeaderName         // ${header.Name} — carries the header name in seg.value
+	segJWTUser            // ${jwt_user}
 )
 
 type segment struct {
@@ -214,6 +217,8 @@ func resolveVarName(name string) segment {
 		return segment{kind: segRequestURI}
 	case "trusted_xff":
 		return segment{kind: segTrustedXFF}
+	case "jwt_user":
+		return segment{kind: segJWTUser}
 	}
 	if strings.HasPrefix(name, "header.") {
 		return segment{kind: segHeaderName, value: name[len("header."):]}
@@ -270,7 +275,7 @@ func evalTrustedXFF(xff []string, cfg *Config, clientIP string) string {
 // eval resolves a parsedHeaderValue against the current request context.
 // For constant values (isConst == true) this is a single field read — no
 // allocation, no iteration.
-func (ph parsedHeaderValue) eval(host, clientIP, clientPort, scheme, requestURI string, XFFcopy []string, cfg *Config, original http.Header) string {
+func (ph parsedHeaderValue) eval(host, clientIP, clientPort, scheme, requestURI string, XFFcopy []string, cfg *Config, original http.Header, jwtUser string) string {
 	if ph.isConst {
 		return ph.segments[0].value
 	}
@@ -293,6 +298,8 @@ func (ph parsedHeaderValue) eval(host, clientIP, clientPort, scheme, requestURI 
 			b.WriteString(evalTrustedXFF(XFFcopy, cfg, clientIP))
 		case segHeaderName:
 			b.WriteString(original.Get(seg.value))
+		case segJWTUser:
+			b.WriteString(jwtUser)
 		}
 	}
 	return b.String()
@@ -309,6 +316,18 @@ func compiledHeaders(raw map[string]string) map[string]parsedHeaderValue {
 		out[k] = compileHeaderValue(v)
 	}
 	return out
+}
+
+// hasJWTUserVar returns true if any header value contains a ${jwt_user} segment.
+func hasJWTUserVar(headers map[string]parsedHeaderValue) bool {
+	for _, ph := range headers {
+		for _, seg := range ph.segments {
+			if seg.kind == segJWTUser {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // hasTrustedXFFVar returns true if any header value contains a ${trusted_xff} segment.

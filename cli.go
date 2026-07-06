@@ -583,6 +583,9 @@ func applyCLI(cfg *Config, rawArgs []string) error {
 				if seg.kind == segTrustedXFF {
 					curRoute.NeedsTrustedXFF = true
 				}
+				if seg.kind == segJWTUser {
+					curRoute.NeedsJWTUser = true
+				}
 			}
 			i += 2
 		case "--dest-del-header":
@@ -621,7 +624,16 @@ func applyCLI(cfg *Config, rawArgs []string) error {
 					curRoute.ClientNeedsRespHeaders = true
 				}
 				if seg.kind == segTrustedXFF {
+					// Client-side ${trusted_xff} needs BOTH flags: NeedsTrustedXFF
+					// makes the Director snapshot the XFF chain, and
+					// ClientNeedsTrustedXFF makes it bridge the snapshot through
+					// the request context to ModifyResponse where client headers
+					// are evaluated. (Fixes CLI parity with the YAML path.)
 					curRoute.NeedsTrustedXFF = true
+					curRoute.ClientNeedsTrustedXFF = true
+				}
+				if seg.kind == segJWTUser {
+					curRoute.NeedsJWTUser = true
 				}
 			}
 			i += 2
@@ -952,14 +964,15 @@ If host/domain configuration is not needed, the parent block 'vhost' can be omit
 Config file can have environment variables substitution globally as ${env.VARIABLE:default}
 
 The 'dest-add-header' or 'client-add-header' values can be a combination of text and following supported variables:
-  ${host}: client host header
+  ${host}:        client host header
   ${remote_addr}: client IP (no port)
   ${remote_port}: client port
   ${scheme}:      "http" or "https" client scheme
   ${request_uri}: full request URI including query string
-  ${trusted_xff}: Remote IP after evaluating trusted proxies on the 'X-Forwarded-For' chained with connecting IP
+  ${trusted_xff}: remote IP after evaluating trusted proxies on the 'X-Forwarded-For' chained with connecting IP
   ${header.Name}: value of 'Name' header from the original client headers (in case of 'dest-add-header')
                   or upstream response headers (in case of 'client-add-header')
+  ${jwt_user}:    the validated JWT's user claim (jwt-claim-user); empty when no JWT auth or claim configured
 
 Full documentation: https://github.com/SubhashBose/RouteMUX
 `)

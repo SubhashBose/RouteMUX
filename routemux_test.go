@@ -22,6 +22,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	gojwt "github.com/golang-jwt/jwt/v5"
 )
 
 // evalConst returns the constant value of a parsedHeaderValue for testing.
@@ -1121,7 +1123,7 @@ func TestHasWildcard(t *testing.T) {
 
 func evalHeader(raw, clientIP, clientPort, scheme, requestURI string, orig http.Header) string {
 	ph := compileHeaderValue(raw)
-	return ph.eval("example.com", clientIP, clientPort, scheme, requestURI, nil, nil, orig)
+	return ph.eval("example.com", clientIP, clientPort, scheme, requestURI, nil, nil, orig, "")
 }
 
 func TestCompile_PlainValue(t *testing.T) {
@@ -6748,5 +6750,223 @@ func TestResolveListen_UnixsRejectedWithHint(t *testing.T) {
 	got, err := resolveListenAddress("unix:/run/r.sock")
 	if err != nil || got != "unix:/run/r.sock" {
 		t.Errorf("unix: listen = %q, %v", got, err)
+	}
+}
+
+// ---- ${jwt_user} header variable ----
+
+// signTestJWT creates a real HS256 token with the given claims, signed with
+// the shared test secret.
+func signTestJWT(t *testing.T, secret string, claims map[string]interface{}) string {
+	t.Helper()
+	mc := gojwt.MapClaims{"exp": time.Now().Add(time.Hour).Unix()}
+	for k, v := range claims {
+		mc[k] = v
+	}
+	tok := gojwt.NewWithClaims(gojwt.SigningMethodHS256, mc)
+	s, err := tok.SignedString([]byte(secret))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+func TestJWTUser_DestHeader(t *testing.T) {
+	var gotAuthUser string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuthUser = r.Header.Get("X-Auth-User")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/api/": {
+			Upstreams:        []Upstream{mustUpstream(backend.URL+"/", 1)},
+			ParsedAddHeaders: map[string]parsedHeaderValue{"X-Auth-User": compileHeaderValue("${jwt_user}")},
+			AddHasVars:       true,
+			NeedsJWTUser:     true,
+		},
+	})
+	cfg.JWTAuth = makeJWTConfig("Authorization", "email", true)
+
+	srv, err := newServer(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	token := signTestJWT(t, "test-secret", map[string]interface{}{"email": "alice@example.com"})
+	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if gotAuthUser != "alice@example.com" {
+		t.Errorf("X-Auth-User = %q, want alice@example.com", gotAuthUser)
+	}
+}
+
+func TestJWTUser_BlankWhenNoClaimConfigured(t *testing.T) {
+	var gotAuthUser string
+	var hadHeader bool
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuthUser = r.Header.Get("X-Auth-User")
+		_, hadHeader = r.Header["X-Auth-User"]
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/api/": {
+			Upstreams:        []Upstream{mustUpstream(backend.URL+"/", 1)},
+			ParsedAddHeaders: map[string]parsedHeaderValue{"X-Auth-User": compileHeaderValue("${jwt_user}")},
+			AddHasVars:       true,
+			NeedsJWTUser:     true,
+		},
+	})
+	// ClaimUserKey empty → authentication only, no user claim extracted.
+	cfg.JWTAuth = makeJWTConfig("Authorization", "", true)
+
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	token := signTestJWT(t, "test-secret", map[string]interface{}{"email": "alice@example.com"})
+	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if !hadHeader || gotAuthUser != "" {
+		t.Errorf("X-Auth-User should be present but blank, got present=%v value=%q", hadHeader, gotAuthUser)
+	}
+}
+
+func TestJWTUser_ClientHeader(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/api/": {
+			Upstreams:              []Upstream{mustUpstream(backend.URL+"/", 1)},
+			ParsedClientAddHeaders: map[string]parsedHeaderValue{"X-Verified-User": compileHeaderValue("${jwt_user}")},
+			ClientAddHasVars:       true,
+			NeedsJWTUser:           true,
+		},
+	})
+	cfg.JWTAuth = makeJWTConfig("Authorization", "sub", true)
+
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	token := signTestJWT(t, "test-secret", map[string]interface{}{"sub": "bob"})
+	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if got := resp.Header.Get("X-Verified-User"); got != "bob" {
+		t.Errorf("X-Verified-User = %q, want bob", got)
+	}
+}
+
+func TestJWTUser_CRLFSanitized(t *testing.T) {
+	var gotAuthUser string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuthUser = r.Header.Get("X-Auth-User")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/api/": {
+			Upstreams:        []Upstream{mustUpstream(backend.URL+"/", 1)},
+			ParsedAddHeaders: map[string]parsedHeaderValue{"X-Auth-User": compileHeaderValue("${jwt_user}")},
+			AddHasVars:       true,
+			NeedsJWTUser:     true,
+		},
+	})
+	cfg.JWTAuth = makeJWTConfig("Authorization", "email", true)
+
+	srv, _ := newServer(cfg)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	// A signed-but-hostile claim value attempting header injection.
+	token := signTestJWT(t, "test-secret", map[string]interface{}{"email": "evil\r\nX-Injected: 1"})
+	req, _ := http.NewRequest("GET", ts.URL+"/api/", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if strings.ContainsAny(gotAuthUser, "\r\n") {
+		t.Errorf("CR/LF must be stripped from ${jwt_user}, got %q", gotAuthUser)
+	}
+	if gotAuthUser != "evilX-Injected: 1" {
+		t.Errorf("sanitized value = %q", gotAuthUser)
+	}
+}
+
+func TestCLI_JWTUserAndClientTrustedXFFFlags(t *testing.T) {
+	cfg, err := parseAll([]string{
+		"--route", "/a/", "--dest", "http://x/",
+		"--dest-add-header", "X-U: ${jwt_user}",
+		"--route", "/b/", "--dest", "http://x/",
+		"--client-add-header", "X-C: ${jwt_user}",
+		"--route", "/c/", "--dest", "http://x/",
+		"--client-add-header", "X-F: ${trusted_xff}",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes := cfg.VHosts[0].Routes
+	if !routes["/a/"].NeedsJWTUser {
+		t.Error("/a/: dest-side ${jwt_user} should set NeedsJWTUser")
+	}
+	if !routes["/b/"].NeedsJWTUser {
+		t.Error("/b/: client-side ${jwt_user} should set NeedsJWTUser")
+	}
+	// The CLI parity fix: client-side ${trusted_xff} must set BOTH flags.
+	if !routes["/c/"].NeedsTrustedXFF || !routes["/c/"].ClientNeedsTrustedXFF {
+		t.Error("/c/: client-side ${trusted_xff} must set NeedsTrustedXFF and ClientNeedsTrustedXFF")
+	}
+}
+
+func TestYAML_JWTUserFlags(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "c.yml")
+	os.WriteFile(cfgPath, []byte(`
+global:
+  port: 8080
+vhosts:
+  - domains: ["*"]
+    routes:
+      /api/:
+        dest: http://localhost:1/
+        dest-add-header:
+          X-U: ${jwt_user}
+`), 0o644)
+	cfg, err := loadConfigFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc := cfg.VHosts[0].Routes["/api/"]
+	if !rc.NeedsJWTUser {
+		t.Error("YAML dest-add-header ${jwt_user} should set NeedsJWTUser")
 	}
 }

@@ -23,6 +23,7 @@ import (
 // perRequestKeys are unexported context key types to avoid collisions.
 type ctxKeyRequestHost struct{}
 type ctxKeyXFFCopy struct{}
+type ctxKeyJWTUser struct{} // validated JWT user claim, stored by jwtMiddleware for ${jwt_user}
 
 type server struct {
 	state  atomic.Pointer[serverState]
@@ -214,7 +215,11 @@ func (s *server) buildMux(routes map[string]*RouteConfig, cfg *Config) (*http.Se
 // Does the work of validating a JWT flow. It reads the token from the
 // configured header or cookie, calls jwtverify.Verify, and enforces the
 // per-route auth-users list
-func jwtValidation(w http.ResponseWriter, r *http.Request, rc *RouteConfig, jwtCfg *JWTAuth) bool {
+// jwtValidation authenticates the request's JWT and enforces per-route user
+// authorisation. On success it also returns the user claim value (the
+// jwt-claim-user claim, sanitised for header use) so ${jwt_user} can reference
+// it; empty when no claim is configured or the claim is not a string.
+func jwtValidation(w http.ResponseWriter, r *http.Request, rc *RouteConfig, jwtCfg *JWTAuth) (bool, string) {
 	// Extract token: header takes precedence over cookie.
 	var tokenStr string
 	if jwtCfg.HeaderKey != "" {
@@ -232,7 +237,7 @@ func jwtValidation(w http.ResponseWriter, r *http.Request, rc *RouteConfig, jwtC
 	}
 	if tokenStr == "" {
 		http.Error(w, "Unauthorized: missing token", http.StatusUnauthorized)
-		return false
+		return false, ""
 	}
 
 	// Verify token.
@@ -244,12 +249,19 @@ func jwtValidation(w http.ResponseWriter, r *http.Request, rc *RouteConfig, jwtC
 	if err != nil {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		log.Printf("JWT Unauthorized: %v", err)
-		return false
+		return false, ""
+	}
+
+	// The user claim value, sanitised for safe use in an HTTP header via
+	// ${jwt_user}: the token signature is verified, but a claim string may
+	// still contain CR/LF, which must never reach a header value.
+	username, _ := usernameVal.(string)
+	if strings.ContainsAny(username, "\r\n") {
+		username = strings.NewReplacer("\r", "", "\n", "").Replace(username)
 	}
 
 	// Authorisation: check username against per-route auth-users list.
 	if jwtCfg.ClaimUserKey != "" {
-		username, _ := usernameVal.(string)
 		if len(rc.AuthUsers) > 0 {
 			// Route has an explicit user list — check membership.
 			allowed := false
@@ -261,17 +273,17 @@ func jwtValidation(w http.ResponseWriter, r *http.Request, rc *RouteConfig, jwtC
 			}
 			if !allowed {
 				http.Error(w, "Forbidden: user not authorised for this route", http.StatusForbidden)
-				return false
+				return false, ""
 			}
 		} else if !jwtCfg.DefaultAllowAll {
 			// No auth-users list and DefaultAllowAll is false → deny all.
 			http.Error(w, "Forbidden: route requires explicit user access", http.StatusForbidden)
-			return false
+			return false, ""
 		}
 		// DefaultAllowAll=true and no auth-users list → allow any authenticated user.
 	}
 	// ClaimUserKeyword="" → authentication only, no user-level authorisation.
-	return true
+	return true, username
 }
 
 // jwtMiddleware wraps h with JWT authentication. It calls jwtValidation for token validation.
@@ -283,8 +295,14 @@ func jwtMiddleware(h http.Handler, rc *RouteConfig, jwtCfg *JWTAuth) http.Handle
 		return h
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !jwtValidation(w, r, rc, jwtCfg) {
+		ok, jwtUser := jwtValidation(w, r, rc, jwtCfg)
+		if !ok {
 			return
+		}
+		// Bridge the claim value to header evaluation (${jwt_user}) via the
+		// request context — paid only when some header actually uses it.
+		if rc.NeedsJWTUser && jwtUser != "" {
+			r = r.WithContext(context.WithValue(r.Context(), ctxKeyJWTUser{}, jwtUser))
 		}
 		h.ServeHTTP(w, r)
 	})
@@ -360,7 +378,7 @@ func buildFileHandler(routePath string, rc *RouteConfig) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// cfg is nil here: FILE routes do not run the Director, so
 			// ${trusted_xff} cannot be resolved and returns its literal form.
-			manipulateClientHeaders(w.Header(), nil, r, rc, nil, nil)
+			manipulateClientHeaders(w.Header(), nil, r, rc, nil)
 			stripped.ServeHTTP(w, r)
 		})
 	}
@@ -383,7 +401,7 @@ func buildFileHandler(routePath string, rc *RouteConfig) http.Handler {
 		w.Header().Set("Content-Type", contentType)
 		// cfg is nil here: FILE routes do not run the Director, so
 		// ${trusted_xff} cannot be resolved and returns its literal form.
-		manipulateClientHeaders(w.Header(), nil, r, rc, nil, nil)
+		manipulateClientHeaders(w.Header(), nil, r, rc, nil)
 		w.WriteHeader(statusCode)
 		w.Write(fileBytes) //nolint:errcheck
 	})
@@ -395,7 +413,7 @@ func buildStatusHandler(rc *RouteConfig) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// cfg is nil here: STATUS routes do not run the Director, so
 		// ${trusted_xff} cannot be resolved and returns its literal form.
-		manipulateClientHeaders(w.Header(), nil, r, rc, nil, nil)
+		manipulateClientHeaders(w.Header(), nil, r, rc, nil)
 
 		w.WriteHeader(rc.StatusCode)
 		if rc.StatusText != "" {
@@ -625,13 +643,16 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 			// value contains a variable (AddHasVars), avoiding unnecessary work
 			// for routes with all plain-string add-headers.
 			if len(rc.ParsedAddHeaders) > 0 {
-				var scheme, requestURI string
+				var scheme, requestURI, jwtUser string
 				if rc.AddHasVars {
 					scheme = schemeOf(req)
 					requestURI = req.RequestURI
 				}
+				if rc.NeedsJWTUser {
+					jwtUser, _ = req.Context().Value(ctxKeyJWTUser{}).(string)
+				}
 				for name, ph := range rc.ParsedAddHeaders {
-					resolved := ph.eval(requestHost, clientIP, clientPort, scheme, requestURI, xffCopy, cfg, originalHeaders)
+					resolved := ph.eval(requestHost, clientIP, clientPort, scheme, requestURI, xffCopy, cfg, originalHeaders, jwtUser)
 					if strings.EqualFold(name, "host") {
 						req.Host = resolved
 						continue
@@ -643,13 +664,6 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 		ModifyResponse: func(resp *http.Response) error {
 			// Read per-request values stored by Director in the request context.
 			reqHost, _ := resp.Request.Context().Value(ctxKeyRequestHost{}).(string)
-			// The Director snapshots the (post-rewrite) X-Forwarded-For chain into
-			// the context when ${trusted_xff} is used, so client-add-header can
-			// resolve it here against the same chain dest-add-header sees.
-			var xffCopy []string
-			if rc.ClientNeedsTrustedXFF {
-				xffCopy, _ = resp.Request.Context().Value(ctxKeyXFFCopy{}).([]string)
-			}
 			// ${header.X} in client-add-header resolves from the upstream response headers.
 			// Snapshot before we modify so add-header can reference headers we're about to delete.
 			var originalRespHeaders http.Header
@@ -658,7 +672,7 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 			}
 			resp.Request.Host = reqHost
 
-			manipulateClientHeaders(resp.Header, originalRespHeaders, resp.Request, rc, xffCopy, cfg)
+			manipulateClientHeaders(resp.Header, originalRespHeaders, resp.Request, rc, cfg)
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
@@ -699,7 +713,10 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 //   - originalHeaders is a snapshot of the upstream response headers taken
 //     before deletion, so ${header.X} in add values sees the original values;
 //     pass nil for STATUS/FILE routes (no upstream response headers)
-func manipulateClientHeaders(respHeaders http.Header, originalHeaders http.Header, req *http.Request, rc *RouteConfig, xffCopy []string, cfg *Config) {
+//   - per-request variable inputs (${trusted_xff} snapshot, ${jwt_user}) are
+//     read from req's context here, where they are consumed — the Director and
+//     jwtMiddleware store them there when the respective flags are set
+func manipulateClientHeaders(respHeaders http.Header, originalHeaders http.Header, req *http.Request, rc *RouteConfig, cfg *Config) {
 	respHeaders.Set("Via", "RouteMUX")
 	// Apply client-side response header manipulation.
 	// Delete first, then add (add always wins).
@@ -710,14 +727,24 @@ func manipulateClientHeaders(respHeaders http.Header, originalHeaders http.Heade
 		// clientIP/clientPort only parsed when needed — eval() for const headers
 		// returns segments[0].value immediately without using them, but we still
 		// avoid the SplitHostPort call entirely when all headers are constant.
-		var clientIP, clientPort, scheme, requestURI string
+		var clientIP, clientPort, scheme, requestURI, jwtUser string
+		var xffCopy []string
 		if rc.ClientAddHasVars {
 			clientIP, clientPort, _ = net.SplitHostPort(req.RemoteAddr)
 			scheme = schemeOf(req)
 			requestURI = req.RequestURI
 		}
+		// The Director snapshots the (post-rewrite) X-Forwarded-For chain into
+		// the context when client-add-header uses ${trusted_xff}, so it can be
+		// resolved here against the same chain dest-add-header sees.
+		if rc.ClientNeedsTrustedXFF {
+			xffCopy, _ = req.Context().Value(ctxKeyXFFCopy{}).([]string)
+		}
+		if rc.NeedsJWTUser {
+			jwtUser, _ = req.Context().Value(ctxKeyJWTUser{}).(string)
+		}
 		for name, ph := range rc.ParsedClientAddHeaders {
-			respHeaders.Set(name, ph.eval(req.Host, clientIP, clientPort, scheme, requestURI, xffCopy, cfg, originalHeaders))
+			respHeaders.Set(name, ph.eval(req.Host, clientIP, clientPort, scheme, requestURI, xffCopy, cfg, originalHeaders, jwtUser))
 		}
 	}
 }
@@ -1091,7 +1118,7 @@ func (s *server) Reload(fileMod bool) {
 		newCfg.Listen = oldState.cfg.Listen
 	}
 	if newCfg.GlobalTLSCert != oldState.cfg.GlobalTLSCert || newCfg.GlobalTLSKey != oldState.cfg.GlobalTLSKey {
-		log.Printf("Reload: TLS cert/key path changes require a full restart (file contents at the existing paths are re-read automatically). Reverting to current paths.")
+		log.Printf("Reload: TLS cert/key path changes require a full restart (file contents at the existing paths are re-read on every reload, but paths cannot change). Reverting to current paths.")
 		newCfg.GlobalTLSCert = oldState.cfg.GlobalTLSCert
 		newCfg.GlobalTLSKey = oldState.cfg.GlobalTLSKey
 	}
