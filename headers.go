@@ -1,10 +1,10 @@
 package main
 
 import (
+	"net"
 	"net/http"
 	"path"
 	"strings"
-	"net"
 )
 
 // hasWildcard returns true if any entry in the list contains a '*' character.
@@ -73,9 +73,9 @@ func applyDeleteHeaders(h http.Header, deleteList []string, hasWild bool) {
 // causing duplication. By the time RoundTrip is called, the fix is simple:
 //
 //   - 2+ IPs: Director built the chain, ReverseProxy appended one extra.
-//             Strip the last entry.
+//     Strip the last entry.
 //   - 1 IP:  Director deleted XFF (dest-del-header config), ReverseProxy
-//             re-added just the client IP. Delete it entirely.
+//     re-added just the client IP. Delete it entirely.
 type xffRoundTripper struct {
 	base http.RoundTripper
 }
@@ -167,7 +167,7 @@ func compileHeaderValue(raw string) parsedHeaderValue {
 		}
 		// Check for escape \${
 		if idx > 0 && s[idx-1] == '\\' {
-			// Everything before the backslash + literal ${ 
+			// Everything before the backslash + literal ${
 			appendLit(s[:idx-1] + "${")
 			s = s[idx+2:] // skip past ${
 			continue
@@ -259,7 +259,7 @@ func evalTrustedXFF(xff []string, cfg *Config, clientIP string) string {
 			}
 			return strings.TrimSpace(ips[i+1])
 		}
-		if !cfg.TrustedProxies.list.Contains(parsed) {
+		if !cfg.TrustedProxies.Contains(parsed) {
 			return ip // first untrusted from right
 		}
 	}
@@ -311,7 +311,6 @@ func compiledHeaders(raw map[string]string) map[string]parsedHeaderValue {
 	return out
 }
 
-
 // hasTrustedXFFVar returns true if any header value contains a ${trusted_xff} segment.
 func hasTrustedXFFVar(headers map[string]parsedHeaderValue) bool {
 	for _, ph := range headers {
@@ -323,6 +322,7 @@ func hasTrustedXFFVar(headers map[string]parsedHeaderValue) bool {
 	}
 	return false
 }
+
 // hasNonConstHeader returns true if any header value contains any variable
 // reference. Used to decide whether to compute scheme/URI at request time.
 func hasNonConstHeader(headers map[string]parsedHeaderValue) bool {

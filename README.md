@@ -117,7 +117,7 @@ RouteMUX looks for `config.yml` in this order:
 
 ```yaml
 global:
-  listen:           # IP address, interface name (e.g. 192.168.1.10, eth0, lo), or unix:/path.sock. Empty = all interfaces.
+  listen:           # IP address, interface name (e.g. 192.168.1.10, eth0, lo), or unix://<path.sock>. Empty = all interfaces.
   port: 8080        # Port to listen on (default: 8080)
   # global-tls-cert: /path/to/cert.pem
   # global-tls-key:  /path/to/key.pem
@@ -227,7 +227,7 @@ routemux [global options] \
 | Flag | Description |
 |------|-------------|
 | `--config PATH` | Config file path. Pass `""` to disable config file loading. |
-| `--listen ADDR` | IP address or interface name to listen on (default: all interfaces) |
+| `--listen ADDR` | IP address or interface name or Unix socket (unix://<socket-path>) to listen on (default: all interfaces) |
 | `--port PORT` | Port to listen on (default: `8080`) |
 | `--global-tls-cert FILE` | TLS certificate file — enables HTTPS |
 | `--globl-tls-key FILE` | TLS key file — required when `--tls-cert` is set |
@@ -982,10 +982,10 @@ Set `listen` to a `unix:` address (the `port` is ignored):
 
 ```yaml
 global:
-  listen: unix:/var/run/routemux.sock
+  listen: unix:///var/run/routemux.sock
 ```
 
-Both `unix:/path.sock` and `unix:///path.sock` forms are accepted. A stale socket file from an unclean shutdown is removed automatically before binding.
+Both `unix:///path.sock` and `unix:/path.sock` forms are accepted. A stale socket file from an unclean shutdown is removed automatically before binding.
 
 ### Upstreams over a Unix socket
 

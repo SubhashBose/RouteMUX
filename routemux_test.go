@@ -1,30 +1,28 @@
 package main
 
 import (
-	"io"
 	"bufio"
+	"bytes"
 	"context"
-	"crypto/tls"
-	"math/big"
-	"encoding/pem"
-	"crypto/x509"
-	"crypto/rand"
-	"crypto/elliptic"
 	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
+	"io"
+	"log"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
-	"bytes"
-	"log"
 	"strings"
 	"testing"
 	"time"
 )
-
-
 
 // evalConst returns the constant value of a parsedHeaderValue for testing.
 // Panics if the value contains variables (use in tests that only test plain values).
@@ -34,7 +32,6 @@ func evalConst(ph parsedHeaderValue) string {
 	}
 	return ph.segments[0].value
 }
-
 
 // makeConfig creates a Config with a single catch-all vhost — shorthand for tests.
 // Use makeConfigVHosts for multi-vhost tests.
@@ -366,7 +363,7 @@ func TestRouteHandler_BasicProxy(t *testing.T) {
 
 	cfg := &Config{
 		Port:   8080,
-		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/v1/", 1)}}}}},
+		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL+"/v1/", 1)}}}}},
 	}
 	srv, err := newServer(cfg)
 	if err != nil {
@@ -397,7 +394,7 @@ func TestRouteHandler_GlobalAuth(t *testing.T) {
 	cfg := &Config{
 		Port:       8080,
 		GlobalAuth: &Auth{"admin", "secret"},
-		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/secure/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)}}}}},
+		VHosts:     []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/secure/": {Upstreams: []Upstream{mustUpstream(backend.URL+"/", 1)}}}}},
 	}
 	srv, _ := newServer(cfg)
 	ts := httptest.NewServer(srv.state.Load().vhosts[0].mux)
@@ -437,7 +434,7 @@ func TestRouteHandler_RouteAuthOverridesGlobal(t *testing.T) {
 		GlobalAuth: &Auth{"admin", "secret"},
 		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{
 			"/public/": {
-				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
+				Upstreams:    []Upstream{mustUpstream(backend.URL+"/", 1)},
 				AuthExplicit: true,
 				Auth:         nil, // explicit no-auth overrides global
 			},
@@ -464,7 +461,7 @@ func TestRouteHandler_PerRouteAuth(t *testing.T) {
 		GlobalAuth: &Auth{"admin", "global"},
 		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{
 			"/special/": {
-				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
+				Upstreams:    []Upstream{mustUpstream(backend.URL+"/", 1)},
 				AuthExplicit: true,
 				Auth:         &Auth{"special", "pass"},
 			},
@@ -501,7 +498,7 @@ func TestRouteHandler_PathStripping(t *testing.T) {
 
 	cfg := &Config{
 		Port:   8080,
-		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/prefix/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/base/", 1)}}}}},
+		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/prefix/": {Upstreams: []Upstream{mustUpstream(backend.URL+"/base/", 1)}}}}},
 	}
 	srv, _ := newServer(cfg)
 	ts := httptest.NewServer(srv.state.Load().vhosts[0].mux)
@@ -524,7 +521,7 @@ func TestRouteHandler_XForwardedHeaders(t *testing.T) {
 
 	cfg := &Config{
 		Port:   8080,
-		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)}}}}},
+		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/": {Upstreams: []Upstream{mustUpstream(backend.URL+"/", 1)}}}}},
 	}
 	srv, _ := newServer(cfg)
 	ts := httptest.NewServer(srv.state.Load().vhosts[0].mux)
@@ -557,9 +554,9 @@ func TestValidate_MissingDest(t *testing.T) {
 
 func TestValidate_TLSPartial(t *testing.T) {
 	cfg := &Config{
-		Port:    8080,
+		Port:          8080,
 		GlobalTLSCert: "/c.pem",
-		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/x/": {Upstreams: []Upstream{mustUpstream("http://x/", 1)}}}}},
+		VHosts:        []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/x/": {Upstreams: []Upstream{mustUpstream("http://x/", 1)}}}}},
 	}
 	if err := cfg.validate(); err == nil {
 		t.Error("expected error for tls-cert without tls-key")
@@ -581,7 +578,7 @@ func TestRouteHandler_AddHeader(t *testing.T) {
 		Port: 8080,
 		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{
 			"/api/": {
-				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
+				Upstreams:        []Upstream{mustUpstream(backend.URL+"/", 1)},
 				ParsedAddHeaders: map[string]parsedHeaderValue{"User-Agent": compileHeaderValue("RouteMUX"), "X-Custom": compileHeaderValue("hello")},
 			},
 		}}},
@@ -615,7 +612,7 @@ func TestRouteHandler_DeleteHeader(t *testing.T) {
 		Port: 8080,
 		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{
 			"/api/": {
-				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
+				Upstreams:     []Upstream{mustUpstream(backend.URL+"/", 1)},
 				DeleteHeaders: []string{"User-Agent", "Cookie"},
 			},
 		}}},
@@ -649,7 +646,7 @@ func TestRouteHandler_DeleteHostIgnored(t *testing.T) {
 		Port: 8080,
 		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{
 			"/api/": {
-				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
+				Upstreams:     []Upstream{mustUpstream(backend.URL+"/", 1)},
 				DeleteHeaders: []string{"Host"}, // should be silently ignored
 			},
 		}}},
@@ -678,8 +675,8 @@ func TestRouteHandler_AddAndDeleteOrder(t *testing.T) {
 		Port: 8080,
 		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{
 			"/api/": {
-				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
-				DeleteHeaders: []string{"User-Agent"},
+				Upstreams:        []Upstream{mustUpstream(backend.URL+"/", 1)},
+				DeleteHeaders:    []string{"User-Agent"},
 				ParsedAddHeaders: map[string]parsedHeaderValue{"User-Agent": compileHeaderValue("RouteMUX")},
 			},
 		}}},
@@ -782,7 +779,7 @@ func TestRouteHandler_AddHostHeader(t *testing.T) {
 		Port: 8080,
 		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{
 			"/api/": {
-				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
+				Upstreams:        []Upstream{mustUpstream(backend.URL+"/", 1)},
 				ParsedAddHeaders: map[string]parsedHeaderValue{"Host": compileHeaderValue("custom.example.com")},
 			},
 		}}},
@@ -813,7 +810,7 @@ func TestRouteHandler_DeleteHostHeader_FallsBackToUpstream(t *testing.T) {
 		Port: 8080,
 		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{
 			"/api/": {
-				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
+				Upstreams:     []Upstream{mustUpstream(backend.URL+"/", 1)},
 				DeleteHeaders: []string{"Host"},
 			},
 		}}},
@@ -842,7 +839,7 @@ func TestRouteHandler_ClientHostPassedThrough(t *testing.T) {
 
 	cfg := &Config{
 		Port:   8080,
-		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)}}}}},
+		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL+"/", 1)}}}}},
 	}
 	srv, _ := newServer(cfg)
 	ts := httptest.NewServer(srv.state.Load().vhosts[0].mux)
@@ -873,7 +870,7 @@ func TestRouteHandler_ProxyAuthStripsAuthorization(t *testing.T) {
 	cfg := &Config{
 		Port:       8080,
 		GlobalAuth: &Auth{"admin", "secret"},
-		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)}}}}},
+		VHosts:     []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL+"/", 1)}}}}},
 	}
 	srv, _ := newServer(cfg)
 	ts := httptest.NewServer(srv.state.Load().vhosts[0].mux)
@@ -900,7 +897,7 @@ func TestRouteHandler_NoProxyAuthPassesAuthorization(t *testing.T) {
 
 	cfg := &Config{
 		Port:   8080,
-		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)}}}}},
+		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL+"/", 1)}}}}},
 	}
 	srv, _ := newServer(cfg)
 	ts := httptest.NewServer(srv.state.Load().vhosts[0].mux)
@@ -930,7 +927,7 @@ func TestRouteHandler_ProxyAuthWithAddHeaderAuthOverride(t *testing.T) {
 		GlobalAuth: &Auth{"admin", "secret"},
 		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{
 			"/api/": {
-				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
+				Upstreams:        []Upstream{mustUpstream(backend.URL+"/", 1)},
 				ParsedAddHeaders: map[string]parsedHeaderValue{"Authorization": compileHeaderValue("Bearer upstream-token")},
 			},
 		}}},
@@ -961,7 +958,7 @@ func TestRouteHandler_NoProxyAuthDeleteAuthorization(t *testing.T) {
 		Port: 8080,
 		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{
 			"/api/": {
-				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
+				Upstreams:     []Upstream{mustUpstream(backend.URL+"/", 1)},
 				DeleteHeaders: []string{"Authorization"},
 			},
 		}}},
@@ -993,8 +990,8 @@ func TestDeleteHeader_WildcardPrefix(t *testing.T) {
 		Port: 8080,
 		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{
 			"/api/": {
-				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
-				DeleteHeaders:    []string{"CF-*"},
+				Upstreams:         []Upstream{mustUpstream(backend.URL+"/", 1)},
+				DeleteHeaders:     []string{"CF-*"},
 				DeleteHasWildcard: true,
 			},
 		}}},
@@ -1032,8 +1029,8 @@ func TestDeleteHeader_WildcardSuffix(t *testing.T) {
 		Port: 8080,
 		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{
 			"/api/": {
-				Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)},
-				DeleteHeaders:    []string{"*-Secret"},
+				Upstreams:         []Upstream{mustUpstream(backend.URL+"/", 1)},
+				DeleteHeaders:     []string{"*-Secret"},
 				DeleteHasWildcard: true,
 			},
 		}}},
@@ -1062,8 +1059,8 @@ func TestDeleteHeader_WildcardSuffix(t *testing.T) {
 func TestDeleteHeader_NoWildcard_FastPath(t *testing.T) {
 	// Verify that exact-match delete still works and the wildcard flag is false.
 	rc := &RouteConfig{
-		Upstreams: []Upstream{mustUpstream("http://x/", 1)},
-		DeleteHeaders:    []string{"Cookie", "Authorization"},
+		Upstreams:         []Upstream{mustUpstream("http://x/", 1)},
+		DeleteHeaders:     []string{"Cookie", "Authorization"},
 		DeleteHasWildcard: false,
 	}
 	if rc.DeleteHasWildcard {
@@ -1117,8 +1114,8 @@ func TestHasWildcard(t *testing.T) {
 		t.Error("wildcard expected")
 	}
 }
-// ---- Variable resolution tests ----
 
+// ---- Variable resolution tests ----
 
 // ---- Variable (compiled header value) tests ----
 
@@ -1387,7 +1384,7 @@ func TestTrustClientHeaders_False_DiscardXFF(t *testing.T) {
 	cfg := &Config{
 		Port:               8080,
 		TrustClientHeaders: false,
-		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)}}}}},
+		VHosts:             []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL+"/", 1)}}}}},
 	}
 	srv, _ := newServer(cfg)
 	ts := httptest.NewServer(srv.state.Load().vhosts[0].mux)
@@ -1415,7 +1412,7 @@ func TestTrustClientHeaders_True_AppendXFF(t *testing.T) {
 	cfg := &Config{
 		Port:               8080,
 		TrustClientHeaders: true,
-		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)}}}}},
+		VHosts:             []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL+"/", 1)}}}}},
 	}
 	srv, _ := newServer(cfg)
 	ts := httptest.NewServer(srv.state.Load().vhosts[0].mux)
@@ -1447,7 +1444,7 @@ func TestTrustClientHeaders_False_SetsXForwardedHeaders(t *testing.T) {
 	cfg := &Config{
 		Port:               8080,
 		TrustClientHeaders: false,
-		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)}}}}},
+		VHosts:             []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL+"/", 1)}}}}},
 	}
 	srv, _ := newServer(cfg)
 	ts := httptest.NewServer(srv.state.Load().vhosts[0].mux)
@@ -1480,7 +1477,7 @@ func TestTrustClientHeaders_True_LeavesXForwardedHeadersUntouched(t *testing.T) 
 	cfg := &Config{
 		Port:               8080,
 		TrustClientHeaders: true,
-		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL + "/", 1)}}}}},
+		VHosts:             []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL+"/", 1)}}}}},
 	}
 	srv, _ := newServer(cfg)
 	ts := httptest.NewServer(srv.state.Load().vhosts[0].mux)
@@ -1499,6 +1496,7 @@ func TestTrustClientHeaders_True_LeavesXForwardedHeadersUntouched(t *testing.T) 
 		t.Errorf("X-Forwarded-Proto = %q, want https", gotProto)
 	}
 }
+
 // ---- Upstream / STATUS route tests ----
 
 func TestParseDestField_Status(t *testing.T) {
@@ -1536,7 +1534,7 @@ func TestParseUpstreamString(t *testing.T) {
 		{"http://localhost:3000/", "http://localhost:3000/", 1, false},
 		{"http://localhost:3000/  weight=2", "http://localhost:3000/", 2, false},
 		{"http://localhost:4000/ weight=0", "http://localhost:4000/", 1, false}, // weight<1 → 1
-		{"STATUS 200 OK", "", 0, true}, // STATUS not allowed in list
+		{"STATUS 200 OK", "", 0, true},                                          // STATUS not allowed in list
 	}
 	for _, tc := range cases {
 		u, err := parseUpstreamString(tc.in)
@@ -1637,7 +1635,10 @@ func TestStatusRoute_EmptyBody(t *testing.T) {
 	ts := httptest.NewServer(srv.state.Load().vhosts[0].mux)
 	defer ts.Close()
 
-	resp, _ := http.Get(ts.URL + "/ping/")
+	resp, err := http.Get(ts.URL + "/ping/")
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 204 {
 		t.Errorf("status = %d, want 204", resp.StatusCode)
@@ -1652,7 +1653,7 @@ func TestStatusRoute_WithAuth(t *testing.T) {
 	cfg := &Config{
 		Port:       8080,
 		GlobalAuth: &Auth{User: "admin", Password: "secret"},
-		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/health/": {StatusCode: 200, StatusText: "healthy"}}}},
+		VHosts:     []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/health/": {StatusCode: 200, StatusText: "healthy"}}}},
 	}
 	srv, _ := newServer(cfg)
 	ts := httptest.NewServer(srv.state.Load().vhosts[0].mux)
@@ -1679,7 +1680,7 @@ func TestUpstreamPicker_SingleUpstream(t *testing.T) {
 	upstreams := []Upstream{{URL: "http://a/", Weight: 1}}
 	p := newUpstreamPicker(upstreams, "random")
 	for i := 0; i < 10; i++ {
-		u := p.pick("random")
+		u := p.pick()
 		if u.URL != "http://a/" {
 			t.Errorf("pick() = %q, want http://a/", u.URL)
 		}
@@ -1694,7 +1695,7 @@ func TestUpstreamPicker_RoundRobin_Equal(t *testing.T) {
 	p := newUpstreamPicker(upstreams, "round-robin")
 	got := make([]string, 6)
 	for i := range got {
-		got[i] = p.pick("round-robin").URL
+		got[i] = p.pick().URL
 	}
 	want := []string{"http://a/", "http://b/", "http://a/", "http://b/", "http://a/", "http://b/"}
 	for i, g := range got {
@@ -1712,7 +1713,7 @@ func TestUpstreamPicker_RoundRobin_Weighted(t *testing.T) {
 	p := newUpstreamPicker(upstreams, "round-robin")
 	counts := map[string]int{}
 	for i := 0; i < 300; i++ {
-		counts[p.pick("round-robin").URL]++
+		counts[p.pick().URL]++
 	}
 	// a should get ~2x the requests of b
 	if counts["http://a/"] < counts["http://b/"]*15/10 {
@@ -1728,7 +1729,7 @@ func TestUpstreamPicker_Random_Weighted(t *testing.T) {
 	p := newUpstreamPicker(upstreams, "random")
 	counts := map[string]int{}
 	for i := 0; i < 4000; i++ {
-		counts[p.pick("random").URL]++
+		counts[p.pick().URL]++
 	}
 	// a should get ~3x the requests of b (allow 20% variance)
 	ratio := float64(counts["http://a/"]) / float64(counts["http://b/"])
@@ -1858,6 +1859,7 @@ func TestParseAll_AutoDiscovered_InvalidYAML_ShowsRealError(t *testing.T) {
 		t.Errorf("should show real YAML error, not 'no routes configured': %v", err)
 	}
 }
+
 // ---- VHost tests ----
 
 func TestVHost_ExactMatch(t *testing.T) {
@@ -2252,6 +2254,7 @@ func TestVHost_CLI_BackwardCompat(t *testing.T) {
 		t.Error("route /api/ missing")
 	}
 }
+
 // ---- client-add-header / client-del-header tests ----
 
 func TestClientHeader_AddPlain(t *testing.T) {
@@ -2294,7 +2297,7 @@ func TestClientHeader_DelHeader(t *testing.T) {
 
 	cfg := makeConfig(8080, map[string]*RouteConfig{
 		"/api/": {
-			Upstreams:       []Upstream{mustUpstream(backend.URL+"/", 1)},
+			Upstreams:        []Upstream{mustUpstream(backend.URL+"/", 1)},
 			ClientDelHeaders: []string{"X-Powered-By", "Server"},
 		},
 	})
@@ -2557,16 +2560,6 @@ func TestManipulateClientHeaders_ViaOnStatus(t *testing.T) {
 }
 
 // ---- evalTrustedXFF tests ----
-
-
-
-
-
-
-
-
-
-
 
 // ---- expandEnvVars tests ----
 
@@ -3021,10 +3014,10 @@ func TestRouteHandler_VarTrustedXFF_NoTrust(t *testing.T) {
 	ph := compileHeaderValue("${trusted_xff}")
 	cfg := makeConfig(8080, map[string]*RouteConfig{
 		"/api/": {
-			Upstreams:       []Upstream{mustUpstream(backend.URL+"/", 1)},
+			Upstreams:        []Upstream{mustUpstream(backend.URL+"/", 1)},
 			ParsedAddHeaders: map[string]parsedHeaderValue{"X-Client": ph},
-			AddHasVars:      true,
-			NeedsTrustedXFF: true,
+			AddHasVars:       true,
+			NeedsTrustedXFF:  true,
 		},
 	})
 
@@ -3055,10 +3048,10 @@ func TestRouteHandler_VarTrustedXFF_TrustAll(t *testing.T) {
 	ph := compileHeaderValue("${trusted_xff}")
 	cfg := makeConfig(8080, map[string]*RouteConfig{
 		"/api/": {
-			Upstreams:       []Upstream{mustUpstream(backend.URL+"/", 1)},
+			Upstreams:        []Upstream{mustUpstream(backend.URL+"/", 1)},
 			ParsedAddHeaders: map[string]parsedHeaderValue{"X-Client": ph},
-			AddHasVars:      true,
-			NeedsTrustedXFF: true,
+			AddHasVars:       true,
+			NeedsTrustedXFF:  true,
 		},
 	})
 	cfg.TrustClientHeaders = true
@@ -3191,7 +3184,7 @@ func TestWebSocket_DestDelHeader(t *testing.T) {
 
 	cfg := makeConfig(8080, map[string]*RouteConfig{
 		"/ws/": {
-			Upstreams:    []Upstream{mustUpstream(upstream.URL+"/", 1)},
+			Upstreams:     []Upstream{mustUpstream(upstream.URL+"/", 1)},
 			DeleteHeaders: []string{"Sec-WebSocket-Key"},
 		},
 	})
@@ -3379,6 +3372,7 @@ func TestWebSocket_Auth(t *testing.T) {
 		t.Errorf("with auth: status = %d, want 101", resp2.StatusCode)
 	}
 }
+
 // ---- vhost ordering: specific domains must win over catch-all ----
 
 func TestVHost_SpecificBeforeCatchAll_CatchAllFirst(t *testing.T) {
@@ -3551,6 +3545,7 @@ vhosts:
 		t.Errorf("X-Vhost = %q, want specific (catch-all declared first in YAML should not win)", resp.Header.Get("X-Vhost"))
 	}
 }
+
 // ---- hot reload: debounce and concurrent-trigger tests ----
 
 func TestScheduledReload_Debounce(t *testing.T) {
@@ -3709,6 +3704,7 @@ routes:
 		t.Error("debounce timer should be nil after reload completed")
 	}
 }
+
 // ---- Unknown config key detection tests ----
 
 func TestUnknownKey_TopLevel(t *testing.T) {
@@ -3944,7 +3940,7 @@ routes:
 
 func TestNoStrictYAML_CLIFlag(t *testing.T) {
 	// Verify the flag is correctly parsed and stored
-	strictYAML = true // reset
+	strictYAML = true                    // reset
 	defer func() { strictYAML = true }() // restore after test
 
 	yml := `
@@ -3967,32 +3963,49 @@ routes:
 		t.Error("strictYAML should be false after --no-strict-yaml")
 	}
 }
+
 // ---- FILE static route tests ----
 
 func TestParseFileField_Basic(t *testing.T) {
 	code, path, _, ok := parseFileField("FILE 200 /tmp/index.html")
-	if !ok { t.Fatal("should be FILE directive") }
-	if code != 200 { t.Errorf("code = %d, want 200", code) }
-	if path != "/tmp/index.html" { t.Errorf("path = %q", path) }
+	if !ok {
+		t.Fatal("should be FILE directive")
+	}
+	if code != 200 {
+		t.Errorf("code = %d, want 200", code)
+	}
+	if path != "/tmp/index.html" {
+		t.Errorf("path = %q", path)
+	}
 }
 
 // TestParseFileField_ExtraTokensIgnored verifies that extra tokens after the path are ignored gracefully.
 func TestParseFileField_ExtraTokensIgnored(t *testing.T) {
 	// Extra token after path is silently ignored (content-type was removed)
 	code, path, _, ok := parseFileField("FILE 200 /tmp/data.bin something-extra")
-	if !ok { t.Fatal("should be FILE directive") }
-	if code != 200 { t.Errorf("code = %d, want 200", code) }
-	if path != "/tmp/data.bin" { t.Errorf("path = %q, want /tmp/data.bin", path) }
+	if !ok {
+		t.Fatal("should be FILE directive")
+	}
+	if code != 200 {
+		t.Errorf("code = %d, want 200", code)
+	}
+	if path != "/tmp/data.bin" {
+		t.Errorf("path = %q, want /tmp/data.bin", path)
+	}
 }
 
 func TestParseFileField_CaseInsensitive(t *testing.T) {
 	_, _, _, ok := parseFileField("file 200 /tmp/x.html")
-	if !ok { t.Error("FILE directive should be case-insensitive") }
+	if !ok {
+		t.Error("FILE directive should be case-insensitive")
+	}
 }
 
 func TestParseFileField_NotAFileDirective(t *testing.T) {
 	_, _, _, ok := parseFileField("http://localhost:3000/")
-	if ok { t.Error("regular URL should not parse as FILE directive") }
+	if ok {
+		t.Error("regular URL should not parse as FILE directive")
+	}
 }
 
 func TestGuessContentType(t *testing.T) {
@@ -4031,8 +4044,8 @@ func TestFileRoute_ServesContent(t *testing.T) {
 
 	cfg := makeConfig(8080, map[string]*RouteConfig{
 		"/page/": {
-			StatusCode:            200,
-			StaticFilePath:        f.Name(),
+			StatusCode:     200,
+			StaticFilePath: f.Name(),
 		},
 	})
 	srv, _ := newServer(cfg)
@@ -4040,7 +4053,9 @@ func TestFileRoute_ServesContent(t *testing.T) {
 	defer ts.Close()
 
 	resp, err := http.Get(ts.URL + "/page/")
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 200 {
 		t.Errorf("status = %d, want 200", resp.StatusCode)
 	}
@@ -4061,8 +4076,8 @@ func TestFileRoute_CustomStatusCode(t *testing.T) {
 
 	cfg := makeConfig(8080, map[string]*RouteConfig{
 		"/missing/": {
-			StatusCode:            404,
-			StaticFilePath:        f.Name(),
+			StatusCode:     404,
+			StaticFilePath: f.Name(),
 		},
 	})
 	srv, _ := newServer(cfg)
@@ -4116,10 +4131,14 @@ routes:
 	defer os.Remove(ymlFile.Name())
 
 	cfg, err := loadConfigFile(ymlFile.Name())
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	rc := cfg.VHosts[0].Routes["/page/"]
-	if rc == nil { t.Fatal("route not found") }
+	if rc == nil {
+		t.Fatal("route not found")
+	}
 	if rc.StaticFilePath != htmlFile.Name() {
 		t.Errorf("StaticFilePath = %q, want %q", rc.StaticFilePath, htmlFile.Name())
 	}
@@ -4151,9 +4170,13 @@ routes:
 	defer os.Remove(ymlFile.Name())
 
 	cfg, err := loadConfigFile(ymlFile.Name())
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	rc := cfg.VHosts[0].Routes["/page/"]
-	if rc == nil { t.Fatal("route not found") }
+	if rc == nil {
+		t.Fatal("route not found")
+	}
 	if rc.StatusCode != 200 {
 		t.Errorf("default code = %d, want 200", rc.StatusCode)
 	}
@@ -4166,8 +4189,8 @@ func TestFileRoute_MissingFileReturns404(t *testing.T) {
 	// File is read per-request; missing file should return 404, not crash startup.
 	cfg := makeConfig(8080, map[string]*RouteConfig{
 		"/page/": {
-			StatusCode:            200,
-			StaticFilePath:        "/nonexistent/path/file.html",
+			StatusCode:     200,
+			StaticFilePath: "/nonexistent/path/file.html",
 		},
 	})
 	// validate() should succeed — missing file is a runtime 404, not a config error
@@ -4193,8 +4216,8 @@ func TestFileRoute_FileUpdatedWithoutReload(t *testing.T) {
 
 	cfg := makeConfig(8080, map[string]*RouteConfig{
 		"/page/": {
-			StatusCode:            200,
-			StaticFilePath:        f.Name(),
+			StatusCode:     200,
+			StaticFilePath: f.Name(),
 		},
 	})
 	srv, _ := newServer(cfg)
@@ -4226,8 +4249,8 @@ func TestFileRoute_ClientHeaders(t *testing.T) {
 
 	cfg := makeConfig(8080, map[string]*RouteConfig{
 		"/file/": {
-			StatusCode:            200,
-			StaticFilePath:        f.Name(),
+			StatusCode:     200,
+			StaticFilePath: f.Name(),
 			ParsedClientAddHeaders: map[string]parsedHeaderValue{
 				"X-Custom": compileHeaderValue("added"),
 			},
@@ -4365,16 +4388,17 @@ func TestPathMapping_NoSlashRoute_EmptyDestPath(t *testing.T) {
 		t.Errorf("exact: upstream got %q, want empty or /", *got)
 	}
 }
+
 // ---- JWT authentication middleware tests ----
 
 // makeJWTConfig returns a minimal JWTAuth config suitable for tests.
 // Uses the test HMAC key from jwtverify.
 func makeJWTConfig(headerKw, claimUser string, defaultAllowAll bool) *JWTAuth {
 	return &JWTAuth{
-		HeaderKey:    headerKw,
-		ClaimUserKey: claimUser,
-		Secret:           "test-secret",
-		DefaultAllowAll:  defaultAllowAll,
+		HeaderKey:       headerKw,
+		ClaimUserKey:    claimUser,
+		Secret:          "test-secret",
+		DefaultAllowAll: defaultAllowAll,
 	}
 }
 
@@ -4436,10 +4460,10 @@ func TestJWT_DefaultAllowAll_False_NoUserList_Forbidden(t *testing.T) {
 		},
 	})
 	cfg.JWTAuth = &JWTAuth{
-		HeaderKey:    "Authorization",
-		ClaimUserKey: "sub",
-		Secret:           "secret",
-		DefaultAllowAll:  false,
+		HeaderKey:       "Authorization",
+		ClaimUserKey:    "sub",
+		Secret:          "secret",
+		DefaultAllowAll: false,
 	}
 
 	// Validate that config wires correctly
@@ -5045,9 +5069,9 @@ func TestJWT_Validation_JWKURLWithoutAud_OK(t *testing.T) {
 
 func TestUnix_ParseListenAddress(t *testing.T) {
 	cases := map[string]string{
-		"unix:/run/r.sock":    "/run/r.sock",
-		"unix:///run/r.sock":  "/run/r.sock",
-		"unix://run/r.sock":   "/run/r.sock",
+		"unix:/run/r.sock":   "/run/r.sock",
+		"unix:///run/r.sock": "/run/r.sock",
+		"unix://run/r.sock":  "/run/r.sock",
 	}
 	for in, want := range cases {
 		if !isUnixListen(in) {
@@ -5522,6 +5546,7 @@ func TestUnix_HostHeaderManipulation(t *testing.T) {
 	}
 	ts4.Close()
 }
+
 // ---- WebSocket coverage additions (pre-refactor safety net) ----
 
 // wsEchoServer returns a server that completes the upgrade handshake and then
@@ -6146,6 +6171,7 @@ routes:
 		t.Error("client-side: both NeedsTrustedXFF and ClientNeedsTrustedXFF should be true")
 	}
 }
+
 // ---- ACME / per-vhost TLS (Phase 1: SNI cert serving) ----
 
 func TestVHostTLS_StaticCertServedViaSNI(t *testing.T) {
@@ -6176,15 +6202,15 @@ func TestVHostTLS_StaticCertServedViaSNI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if srv.acmeMgr == nil {
+	if srv.tlsMgr == nil {
 		t.Fatal("expected acme manager to be built for per-vhost TLS")
 	}
-	if err := srv.acmeMgr.Start(); err != nil {
+	if err := srv.tlsMgr.Start(); err != nil {
 		t.Fatal(err)
 	}
 
 	// The manager should now serve a cert for example.test via SNI.
-	cert, err := srv.acmeMgr.GetCertificate(&tls.ClientHelloInfo{ServerName: "example.test"})
+	cert, err := srv.tlsMgr.GetCertificate(&tls.ClientHelloInfo{ServerName: "example.test"})
 	if err != nil || cert == nil {
 		t.Fatalf("SNI cert for example.test: cert=%v err=%v", cert, err)
 	}
@@ -6225,8 +6251,8 @@ func buildWithCapturedLog(t *testing.T, cfg *Config) string {
 	old := log.Writer()
 	log.SetOutput(&buf)
 	defer log.SetOutput(old)
-	if _, err := buildACMEManager(cfg); err != nil {
-		t.Fatalf("buildACMEManager: %v", err)
+	if _, err := buildTLSManager(cfg); err != nil {
+		t.Fatalf("buildTLSManager: %v", err)
 	}
 	return buf.String()
 }
@@ -6278,9 +6304,9 @@ func TestWarn_Port443_HTTP01_NoWarning(t *testing.T) {
 
 func TestACMEDomainValidation_RejectsBadDomains(t *testing.T) {
 	bad := [][]string{
-		{"*"},                          // catch-all
-		{"*.example.com"},              // wildcard
-		{"not a domain"},               // malformed
+		{"*"},             // catch-all
+		{"*.example.com"}, // wildcard
+		{"not a domain"},  // malformed
 	}
 	for _, domains := range bad {
 		cfg := &Config{
@@ -6291,8 +6317,8 @@ func TestACMEDomainValidation_RejectsBadDomains(t *testing.T) {
 				TLS:     &VHostTLS{AcmeSource: "letsencrypt"},
 			}},
 		}
-		if _, err := buildACMEManager(cfg); err == nil {
-			t.Errorf("buildACMEManager should reject ACME domains %v", domains)
+		if _, err := buildTLSManager(cfg); err == nil {
+			t.Errorf("buildTLSManager should reject ACME domains %v", domains)
 		}
 	}
 }
@@ -6307,7 +6333,7 @@ func TestACMEDomainValidation_AllowsStaticCatchAll(t *testing.T) {
 			TLS:     &VHostTLS{Cert: "/x.crt", Key: "/x.key"},
 		}},
 	}
-	if _, err := buildACMEManager(cfg); err != nil {
+	if _, err := buildTLSManager(cfg); err != nil {
 		t.Errorf("static catch-all vhost should be allowed: %v", err)
 	}
 }
@@ -6405,15 +6431,15 @@ func TestCLI_PerVHostTLSRequiresVHost(t *testing.T) {
 func TestACMEConfigChanged_GlobalBlock(t *testing.T) {
 	a := &Config{ACME: &ACMEConfig{Email: "a@b.com", ChallengeMode: "http"}}
 	b := &Config{ACME: &ACMEConfig{Email: "a@b.com", ChallengeMode: "http"}}
-	if acmeConfigChanged(a, b) {
+	if tlsConfigChanged(a, b) {
 		t.Error("identical ACME global blocks should not be flagged as changed")
 	}
 	c := &Config{ACME: &ACMEConfig{Email: "a@b.com", ChallengeMode: "https"}}
-	if !acmeConfigChanged(a, c) {
+	if !tlsConfigChanged(a, c) {
 		t.Error("changed challenge-mode should be detected")
 	}
 	// nil vs non-nil.
-	if !acmeConfigChanged(&Config{}, a) {
+	if !tlsConfigChanged(&Config{}, a) {
 		t.Error("adding an ACME block should be detected")
 	}
 }
@@ -6427,7 +6453,7 @@ func TestACMEConfigChanged_VHostTLS(t *testing.T) {
 		Domains: []string{"example.com"},
 		TLS:     &VHostTLS{AcmeSource: "letsencrypt"},
 	}}}
-	if acmeConfigChanged(base, same) {
+	if tlsConfigChanged(base, same) {
 		t.Error("identical vhost TLS should not be flagged")
 	}
 
@@ -6436,7 +6462,7 @@ func TestACMEConfigChanged_VHostTLS(t *testing.T) {
 		Domains: []string{"example.com"},
 		TLS:     &VHostTLS{AcmeSource: "zerossl"},
 	}}}
-	if !acmeConfigChanged(base, changedSrc) {
+	if !tlsConfigChanged(base, changedSrc) {
 		t.Error("changed acme-source should be detected")
 	}
 
@@ -6445,13 +6471,13 @@ func TestACMEConfigChanged_VHostTLS(t *testing.T) {
 		{Domains: []string{"example.com"}, TLS: &VHostTLS{AcmeSource: "letsencrypt"}},
 		{Domains: []string{"new.com"}, TLS: &VHostTLS{AcmeSource: "letsencrypt"}},
 	}}
-	if !acmeConfigChanged(base, added) {
+	if !tlsConfigChanged(base, added) {
 		t.Error("adding an ACME vhost should be detected")
 	}
 
 	// Removed the TLS block.
 	removed := &Config{VHosts: []VHost{{Domains: []string{"example.com"}}}}
-	if !acmeConfigChanged(base, removed) {
+	if !tlsConfigChanged(base, removed) {
 		t.Error("removing a vhost TLS block should be detected")
 	}
 }
@@ -6482,7 +6508,7 @@ func TestACME_GlobalBlockAloneDoesNotEnableTLS(t *testing.T) {
 			Routes:  map[string]*RouteConfig{"/": {}},
 		}},
 	}
-	mgr, err := buildACMEManager(cfg)
+	mgr, err := buildTLSManager(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -6501,7 +6527,7 @@ func TestACME_EmptyTLSBlockDoesNotEnableTLS(t *testing.T) {
 			Routes:  map[string]*RouteConfig{"/": {}},
 		}},
 	}
-	mgr, err := buildACMEManager(cfg)
+	mgr, err := buildTLSManager(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -6520,7 +6546,7 @@ func TestACME_TLSBlockOnlyRenewalDoesNotEnableTLS(t *testing.T) {
 			Routes:  map[string]*RouteConfig{"/": {}},
 		}},
 	}
-	mgr, err := buildACMEManager(cfg)
+	mgr, err := buildTLSManager(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -6540,7 +6566,7 @@ func TestACME_VHostACMESourceWithGlobalSettings(t *testing.T) {
 			Routes:  map[string]*RouteConfig{"/": {}},
 		}},
 	}
-	mgr, err := buildACMEManager(cfg)
+	mgr, err := buildTLSManager(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -6560,11 +6586,167 @@ func TestACME_StaticVHostTLSBuildsManager(t *testing.T) {
 			Routes:  map[string]*RouteConfig{"/": {}},
 		}},
 	}
-	mgr, err := buildACMEManager(cfg)
+	mgr, err := buildTLSManager(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if mgr == nil {
 		t.Error("a static per-vhost tls cert should build the SNI manager")
+	}
+}
+
+func TestGuessContentType_MimeFallback(t *testing.T) {
+	// Existing switch mappings keep precedence (never change).
+	if got := guessContentType("a.html"); got != "text/html; charset=utf-8" {
+		t.Errorf(".html = %q", got)
+	}
+	if got := guessContentType("a.js"); got != "application/javascript" {
+		t.Errorf(".js = %q (switch must take precedence over platform MIME db)", got)
+	}
+	// Types not in the switch resolve via mime.TypeByExtension (builtin table).
+	if got := guessContentType("a.webp"); got != "image/webp" {
+		t.Errorf(".webp = %q, want image/webp", got)
+	}
+	if got := guessContentType("a.wasm"); got != "application/wasm" {
+		t.Errorf(".wasm = %q, want application/wasm", got)
+	}
+	// Truly unknown extensions still fall back to octet-stream.
+	if got := guessContentType("a.zz-unknown-ext"); got != "application/octet-stream" {
+		t.Errorf("unknown ext = %q, want application/octet-stream", got)
+	}
+}
+
+// ---- Homogenized TLS: global cert served through the manager ----
+
+func TestTLSManager_GlobalCertOnly(t *testing.T) {
+	// A config with ONLY a global cert (no vhost tls) now builds the manager
+	// too, so global-only and per-vhost TLS share one code path.
+	dir := t.TempDir()
+	certPath, keyPath := writeSelfSignedCert(t, dir, "global.test")
+	cfg := &Config{
+		Port:          443,
+		GlobalTLSCert: certPath,
+		GlobalTLSKey:  keyPath,
+		VHosts: []VHost{{
+			Domains: []string{"global.test"},
+			Routes:  map[string]*RouteConfig{"/": {}},
+		}},
+	}
+	mgr, err := buildTLSManager(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mgr == nil {
+		t.Fatal("global-cert-only config should build the TLS manager")
+	}
+	if mgr.UsesACME() {
+		t.Error("global-only manager must not report ACME in use")
+	}
+	if len(mgr.ManagedDomains()) != 0 {
+		t.Error("global-only manager should have no managed (per-vhost) domains")
+	}
+
+	// End-to-end: fallback + Start, then a real handshake must present the
+	// global cert for any SNI, and reject TLS 1.1 (uniform 1.2 minimum).
+	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr.SetFallback(&cert)
+	if err := mgr.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer mgr.Stop()
+
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", mgr.TLSConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				if tc, ok := c.(*tls.Conn); ok {
+					tc.Handshake() //nolint:errcheck
+				}
+				c.Close()
+			}(c)
+		}
+	}()
+
+	// TLS 1.2+ client gets the global cert regardless of SNI.
+	conn, err := tls.Dial("tcp", ln.Addr().String(), &tls.Config{
+		ServerName:         "whatever.example",
+		InsecureSkipVerify: true,
+	})
+	if err != nil {
+		t.Fatalf("TLS 1.2 handshake failed: %v", err)
+	}
+	state := conn.ConnectionState()
+	conn.Close()
+	if state.Version < tls.VersionTLS12 {
+		t.Errorf("negotiated version %x, want >= TLS 1.2", state.Version)
+	}
+	if len(state.PeerCertificates) == 0 || state.PeerCertificates[0].DNSNames[0] != "global.test" {
+		t.Error("expected the global certificate to be served")
+	}
+
+	// TLS 1.1 client must be rejected (uniform minimum).
+	_, err = tls.Dial("tcp", ln.Addr().String(), &tls.Config{
+		MaxVersion:         tls.VersionTLS11,
+		InsecureSkipVerify: true,
+	})
+	if err == nil {
+		t.Error("TLS 1.1 handshake should be rejected with the 1.2 minimum")
+	}
+}
+
+func TestChallengePathRoutesNormally_WithoutACME(t *testing.T) {
+	// With a static-only (or global-only) TLS manager, requests under
+	// /.well-known/acme-challenge/ must NOT be intercepted — an upstream
+	// behind the proxy may run its own ACME. They fall through to routing.
+	dir := t.TempDir()
+	certPath, keyPath := writeSelfSignedCert(t, dir, "static.test")
+	cfg := &Config{
+		Port: 443,
+		VHosts: []VHost{{
+			Domains: []string{"*"},
+			TLS:     &VHostTLS{Cert: certPath, Key: keyPath},
+			Routes:  map[string]*RouteConfig{"/": {StatusCode: 299, StatusText: "routed"}},
+		}},
+	}
+	srv, err := newServer(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if srv.tlsMgr == nil {
+		t.Fatal("static vhost TLS should build the manager")
+	}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/.well-known/acme-challenge/some-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 299 {
+		t.Errorf("challenge path returned %d, want 299 (should route to the vhost, not be intercepted)", resp.StatusCode)
+	}
+}
+
+func TestResolveListen_UnixsRejectedWithHint(t *testing.T) {
+	_, err := resolveListenAddress("unixs:///run/r.sock")
+	if err == nil || !strings.Contains(err.Error(), "unix:/path") {
+		t.Errorf("unixs: listen should error with a hint, got %v", err)
+	}
+	// Plain unix: still passes through.
+	got, err := resolveListenAddress("unix:/run/r.sock")
+	if err != nil || got != "unix:/run/r.sock" {
+		t.Errorf("unix: listen = %q, %v", got, err)
 	}
 }

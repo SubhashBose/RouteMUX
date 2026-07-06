@@ -11,8 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 	"sync"
+	"time"
 
 	xacme "golang.org/x/crypto/acme"
 )
@@ -35,7 +35,7 @@ type Manager struct {
 	httpChallenge *httpChallengeServer
 	issueState    *issueState
 
-	mu      sync.Mutex // guards issuance scheduling
+	mu      sync.Mutex // guards stopped
 	ctx     context.Context
 	cancel  context.CancelFunc
 	stopped bool
@@ -73,10 +73,12 @@ func NewManager(global GlobalConfig, vhosts []VHostConfig) (*Manager, error) {
 
 // HTTPChallengeHandler returns the handler that serves ACME HTTP-01 challenge
 // tokens. The main router mounts this at /.well-known/acme-challenge/ so
-// challenges work on whatever port RouteMUX serves. Returns nil when ACME is
-// not using HTTP-01.
+// challenges work on whatever port RouteMUX serves. Returns nil when no vhost
+// uses ACME or when the challenge mode is not HTTP-01 — in those cases the
+// challenge path must route normally (an upstream behind the proxy may be
+// doing its own ACME).
 func (m *Manager) HTTPChallengeHandler() http.Handler {
-	if m.global.ChallengeMode != ChallengeHTTP01 {
+	if m.global.ChallengeMode != ChallengeHTTP01 || !m.UsesACME() {
 		return nil
 	}
 	return m.httpChallenge.Handler()
@@ -93,8 +95,6 @@ func (m *Manager) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, 
 	return m.store.GetCertificate(hello)
 }
 
-// TLSConfig returns a *tls.Config wired to this Manager, including the ALPN
-// protocol required for TLS-ALPN-01 challenges when that mode is selected.
 // ManagedDomains returns the set of domains that have a certificate of their
 // own configured (static or ACME) — i.e. that will NOT be served by the SNI
 // fallback. Used by the server to warn about vhosts relying on the fallback.
@@ -119,6 +119,8 @@ func (m *Manager) UsesACME() bool {
 	return false
 }
 
+// TLSConfig returns a *tls.Config wired to this Manager, including the ALPN
+// protocol required for TLS-ALPN-01 challenges when that mode is selected.
 func (m *Manager) TLSConfig() *tls.Config {
 	cfg := &tls.Config{
 		GetCertificate: m.GetCertificate,
@@ -134,8 +136,13 @@ func (m *Manager) TLSConfig() *tls.Config {
 // the background renewal loop. Returns an error only for unrecoverable setup
 // problems; per-vhost issuance failures are logged and retried by the loop.
 func (m *Manager) Start() error {
-	if err := os.MkdirAll(m.global.CacheDir, 0o700); err != nil {
-		return fmt.Errorf("acme: creating cache dir %s: %w", m.global.CacheDir, err)
+	// The cache dir stores ACME account material, issued certificates, and
+	// backoff state — only needed when some vhost actually uses ACME. Static
+	// or global-cert-only setups must not create directories as a side effect.
+	if m.UsesACME() {
+		if err := os.MkdirAll(m.global.CacheDir, 0o700); err != nil {
+			return fmt.Errorf("acme: creating cache dir %s: %w", m.global.CacheDir, err)
+		}
 	}
 
 	// Install a self-signed bootstrap certificate as the fallback so the TLS
@@ -215,9 +222,9 @@ func (m *Manager) Stop() {
 	}
 }
 
-// issueAndStore obtains a certificate for the vhost via ACME, writes the PEM
-// files to the resolved paths, and installs the cert in the SNI store.
-// issueAndStore is the rate-limit-safe entry point for issuance. It enforces a
+// issueAndStore is the rate-limit-safe entry point for issuance: it obtains a
+// certificate for the vhost via ACME, writes the PEM files to the resolved
+// paths, and installs the cert in the SNI store. It enforces a
 // per-domain backoff window so repeated failures (bad config, CA rejection,
 // rate limits) cannot hammer the CA and trigger a lockout. On success the
 // backoff state is cleared; on failure the next-eligible time is advanced
@@ -226,8 +233,6 @@ func (m *Manager) issueAndStore(ctx context.Context, v *VHostConfig) error {
 	if ok, wait := m.issueState.shouldAttempt(v.Domains); !ok {
 		return fmt.Errorf("issuance for %v skipped: backing off for %s after prior failure", v.Domains, wait.Round(time.Second))
 	}
-	m.issueState.recordAttempt(v.Domains)
-
 	err := m.doIssue(ctx, v)
 	if err == nil {
 		m.issueState.recordSuccess(v.Domains)
@@ -451,14 +456,9 @@ func certDetail(cert *tls.Certificate) string {
 	return fmt.Sprintf("issuer %q, expires %s, %dd left", issuer, expiry, daysLeft)
 }
 
-// cacheDir returns the resolved cache directory (for account storage etc.).
-func (m *Manager) cacheDir() string {
-	return m.global.CacheDir
-}
-
 // accountDir returns the per-CA account storage directory for a directory URL.
 func (m *Manager) accountDir(directoryURL string) string {
-	return filepath.Join(m.cacheDir(), "accounts", sanitizeForPath(directoryURL))
+	return filepath.Join(m.global.CacheDir, "accounts", sanitizeForPath(directoryURL))
 }
 
 // sanitizeForPath turns a directory URL into a filesystem-safe folder name.

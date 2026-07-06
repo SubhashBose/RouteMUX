@@ -4,12 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
-	"log"
 )
 
 // jwksCacheEntry holds a fetched JWKS for one URL.
@@ -101,6 +101,7 @@ func (c *jwksCache) getKey(url, kid string) (interface{}, error) {
 // fetchAndParseJWKS downloads a JWKS, parses all keys, and returns:
 //   - map[kid]→publicKey
 //   - TTL derived from Cache-Control: max-age (or defaultJWKSTTL as fallback)
+//
 // jwksHTTPClient has a bounded timeout so a slow or malicious JWKS endpoint
 // cannot hang verification indefinitely.
 var jwksHTTPClient = &http.Client{Timeout: 10 * time.Second}

@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"routemux/acme"
-	"routemux/jwtverify"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -13,6 +11,8 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"os"
+	"routemux/acme"
+	"routemux/jwtverify"
 	"sort"
 	"strings"
 	"sync"
@@ -20,22 +20,18 @@ import (
 	"time"
 )
 
-
 // perRequestKeys are unexported context key types to avoid collisions.
 type ctxKeyRequestHost struct{}
 type ctxKeyXFFCopy struct{}
 
 type server struct {
-	state    atomic.Pointer[serverState]
-	bindIP   string // resolved from cfg.Listen (does not change on reload)
+	state  atomic.Pointer[serverState]
+	bindIP string // resolved from cfg.Listen (does not change on reload)
 
-	acmeMgr *acme.Manager // nil = no automatic/per-vhost TLS via SNI
-
-	// globalCert holds the global TLS certificate for the legacy single-cert
-	// path (no SNI manager). It is served via a GetCertificate callback so it
-	// can be swapped on reload when the cert file is updated. nil when the
-	// manager is in use or no global cert is configured.
-	globalCert atomic.Pointer[tls.Certificate]
+	// tlsMgr manages all per-vhost TLS — static certificates and ACME
+	// auto-issuance — and answers SNI via GetCertificate. nil when no vhost
+	// configures TLS. It persists across reloads so renewals keep running.
+	tlsMgr *acme.Manager
 
 	// Hot reload coordination.
 	// reloadMu ensures only one Reload() runs at a time — concurrent triggers
@@ -54,7 +50,7 @@ type serverState struct {
 
 // vhostEntry holds a compiled vhost: its domain list and ready-to-use ServeMux.
 type vhostEntry struct {
-	domains []string        // lower-cased; "*" matches any host
+	domains []string // lower-cased; "*" matches any host
 	mux     *http.ServeMux
 }
 
@@ -99,12 +95,12 @@ func newServer(cfg *Config) (*server, error) {
 		cfg.TrustedProxies.StartRefresh()
 	}
 
-	// Build the ACME / per-vhost TLS manager (nil if no TLS vhosts configured).
-	mgr, err := buildACMEManager(cfg)
+	// Build the per-vhost TLS manager (static + ACME; nil if no TLS vhosts configured).
+	mgr, err := buildTLSManager(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("acme: %w", err)
 	}
-	s.acmeMgr = mgr
+	s.tlsMgr = mgr
 
 	return s, nil
 }
@@ -162,7 +158,6 @@ func (s *server) buildMux(routes map[string]*RouteConfig, cfg *Config) (*http.Se
 		if len(rc.Upstreams) > 0 {
 			picker = newUpstreamPicker(rc.Upstreams, rc.LBMode)
 		}
-
 
 		pattern := path
 
@@ -279,7 +274,7 @@ func jwtValidation(w http.ResponseWriter, r *http.Request, rc *RouteConfig, jwtC
 	return true
 }
 
-// jwtMiddleware wraps h with JWT authentication. It calls jwtValidation for token validation. 
+// jwtMiddleware wraps h with JWT authentication. It calls jwtValidation for token validation.
 // If validation fails, it Returns 401 on missing/invalid token and 403 as returned by jwtValidation
 // on authorisation failure.
 func jwtMiddleware(h http.Handler, rc *RouteConfig, jwtCfg *JWTAuth) http.Handler {
@@ -294,7 +289,6 @@ func jwtMiddleware(h http.Handler, rc *RouteConfig, jwtCfg *JWTAuth) http.Handle
 		h.ServeHTTP(w, r)
 	})
 }
-
 
 // isDir reports whether path is an existing directory.
 func isDir(path string) bool {
@@ -334,85 +328,90 @@ func (fs noListFS) Open(name string) (http.File, error) {
 	return f, nil
 }
 
-// buildRouteHandler creates the http.Handler for one route.
-func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc *RouteConfig, cfg *Config) (http.Handler, error) {
-	// -- Static FILE / directory route --
-	if rc.StaticFilePath != "" {
-		var h http.Handler
-
-		if rc.StaticDirListing || isDir(rc.StaticFilePath) {
-			// Directory serving via http.FileServer.
-			// Warn if the user supplied an explicit status code — it is ignored.
-			if rc.StatusCode != 0 && rc.StatusCode != 200 {
-				log.Printf("Warning: route %q specifies status code %d with a directory path — status code is ignored for directory routes", routePath, rc.StatusCode)
-			}
-			dirPath := rc.StaticFilePath
-			showListing := rc.StaticDirListing
-			fs := http.FileServer(noListFS{http.Dir(dirPath), showListing})
-			// Strip the route prefix so the file server sees paths relative to dirPath.
-			stripped := http.StripPrefix(routePath, fs)
-			h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				// cfg is nil here: STATIC/FILE routes do not run the Director, so
-			// ${trusted_xff} cannot be resolved and returns its literal form.
-			manipulateClientHeaders(w.Header(), nil, r, rc, nil, nil)
-				stripped.ServeHTTP(w, r)
-			})
-		} else {
-			// Single file: read from disk on every request so updates are served
-			// immediately. OS page cache keeps hot files in RAM.
-			filePath := rc.StaticFilePath
-			statuscode := rc.StatusCode
-			contentType := guessContentType(filePath)
-			h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				fileBytes, err := os.ReadFile(filePath)
-				if err != nil {
-					if os.IsNotExist(err) {
-						http.Error(w, "Not Found", http.StatusNotFound)
-					} else {
-						http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-						log.Printf("file route %q: error reading %q: %v", routePath, filePath, err)
-					}
-					return
-				}
-				w.Header().Set("Content-Type", contentType)
-				// cfg is nil here: STATIC/FILE routes do not run the Director, so
-			// ${trusted_xff} cannot be resolved and returns its literal form.
-			manipulateClientHeaders(w.Header(), nil, r, rc, nil, nil)
-				w.WriteHeader(statuscode)
-				w.Write(fileBytes) //nolint:errcheck
-			})
-		}
-
-		effectiveAuth := cfg.GlobalAuth
-		if rc.AuthExplicit {
-			effectiveAuth = rc.Auth
-		}
-		h = requireBasicAuth(effectiveAuth, h)
-		h = jwtMiddleware(h, rc, cfg.JWTAuth)
-		return h, nil
+// routeAuth returns the effective Basic Auth credentials for a route: the
+// route's own auth when set explicitly (even if cleared), otherwise the global.
+func routeAuth(rc *RouteConfig, cfg *Config) *Auth {
+	if rc.AuthExplicit {
+		return rc.Auth // may be nil (auth explicitly disabled)
 	}
+	return cfg.GlobalAuth
+}
 
-	// -- Static STATUS response route --
-	if rc.StatusCode != 0 {
-		var h http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// cfg is nil here: STATIC/FILE routes do not run the Director, so
+// wrapAuth applies the route's authentication layers to h: HTTP Basic Auth
+// (route-level or global) and JWT. Shared by FILE, STATUS, and proxy routes.
+func wrapAuth(h http.Handler, rc *RouteConfig, cfg *Config) http.Handler {
+	h = requireBasicAuth(routeAuth(rc, cfg), h)
+	return jwtMiddleware(h, rc, cfg.JWTAuth)
+}
+
+// buildFileHandler builds the handler for a FILE / FILE-BROWSE route: either a
+// directory server or a single file read per request. Auth is applied by the
+// caller.
+func buildFileHandler(routePath string, rc *RouteConfig) http.Handler {
+	if rc.StaticDirListing || isDir(rc.StaticFilePath) {
+		// Directory serving via http.FileServer.
+		// Warn if the user supplied an explicit status code — it is ignored.
+		if rc.StatusCode != 0 && rc.StatusCode != 200 {
+			log.Printf("Warning: route %q specifies status code %d with a directory path — status code is ignored for directory routes", routePath, rc.StatusCode)
+		}
+		fs := http.FileServer(noListFS{http.Dir(rc.StaticFilePath), rc.StaticDirListing})
+		// Strip the route prefix so the file server sees paths relative to the dir.
+		stripped := http.StripPrefix(routePath, fs)
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// cfg is nil here: FILE routes do not run the Director, so
 			// ${trusted_xff} cannot be resolved and returns its literal form.
 			manipulateClientHeaders(w.Header(), nil, r, rc, nil, nil)
-
-			w.WriteHeader(rc.StatusCode)
-			if rc.StatusText != "" {
-				fmt.Fprint(w, rc.StatusText)
-			}
+			stripped.ServeHTTP(w, r)
 		})
-		effectiveAuth := cfg.GlobalAuth
-		if rc.AuthExplicit {
-			effectiveAuth = rc.Auth
+	}
+	// Single file: read from disk on every request so updates are served
+	// immediately. OS page cache keeps hot files in RAM.
+	filePath := rc.StaticFilePath
+	statusCode := rc.StatusCode
+	contentType := guessContentType(filePath)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fileBytes, err := os.ReadFile(filePath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				http.Error(w, "Not Found", http.StatusNotFound)
+			} else {
+				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+				log.Printf("file route %q: error reading %q: %v", routePath, filePath, err)
+			}
+			return
 		}
-		h = requireBasicAuth(effectiveAuth, h)
-		// Wrap with JWT auth.
-		h = jwtMiddleware(h, rc, cfg.JWTAuth)
+		w.Header().Set("Content-Type", contentType)
+		// cfg is nil here: FILE routes do not run the Director, so
+		// ${trusted_xff} cannot be resolved and returns its literal form.
+		manipulateClientHeaders(w.Header(), nil, r, rc, nil, nil)
+		w.WriteHeader(statusCode)
+		w.Write(fileBytes) //nolint:errcheck
+	})
+}
 
-		return h, nil
+// buildStatusHandler builds the handler for a STATUS route (fixed code + body).
+// Auth is applied by the caller.
+func buildStatusHandler(rc *RouteConfig) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// cfg is nil here: STATUS routes do not run the Director, so
+		// ${trusted_xff} cannot be resolved and returns its literal form.
+		manipulateClientHeaders(w.Header(), nil, r, rc, nil, nil)
+
+		w.WriteHeader(rc.StatusCode)
+		if rc.StatusText != "" {
+			fmt.Fprint(w, rc.StatusText)
+		}
+	})
+}
+
+// buildRouteHandler creates the http.Handler for one route: FILE, STATUS, or
+// reverse proxy, each wrapped with the route's auth layers.
+func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc *RouteConfig, cfg *Config) (http.Handler, error) {
+	if rc.StaticFilePath != "" {
+		return wrapAuth(buildFileHandler(routePath, rc), rc, cfg), nil
+	}
+	if rc.StatusCode != 0 {
+		return wrapAuth(buildStatusHandler(rc), rc, cfg), nil
 	}
 
 	// -- TLS transport wrapped in a RoundTripper that fixes X-Forwarded-For --
@@ -474,7 +473,6 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 		baseTransport.DialContext = dialer.DialContext
 	}
 	transport := &xffRoundTripper{base: baseTransport}
-	lbMode := rc.LBMode
 
 	// -- Timeout --
 	var clientTimeout time.Duration
@@ -486,18 +484,15 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 		clientTimeout = d
 	}
 
-	// -- Effective auth for this route (used in Director closure and WS handler) --
-	effectiveAuth := cfg.GlobalAuth
-	if rc.AuthExplicit {
-		effectiveAuth = rc.Auth // may be nil (no auth)
-	}
+	// -- Effective auth for this route (the Director strips Authorization when set) --
+	effectiveAuth := routeAuth(rc, cfg)
 
 	// -- Reverse proxy --
 	proxy := &httputil.ReverseProxy{
 		Transport: transport,
 		Director: func(req *http.Request) {
 			// Pick an upstream for this request — ParsedURL computed once at startup.
-			upstream := picker.pick(lbMode)
+			upstream := picker.pick()
 			destURL := upstream.ParsedURL
 			upstreamIsUnix := upstream.UnixSocket != ""
 
@@ -508,7 +503,7 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 			// handled by the subtree handler (routePath ends with "/"), so
 			// TrimPrefix leaves no leading slash.
 			destPath := destURL.Path
-			if !strings.HasSuffix(destPath, "/") && stripped!="" {
+			if !strings.HasSuffix(destPath, "/") && stripped != "" {
 				destPath += "/"
 			}
 
@@ -564,7 +559,7 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 				clientNetIP = net.ParseIP(clientIP)
 			}
 			trusted := cfg.TrustClientHeaders ||
-				(clientNetIP != nil && cfg.TrustedProxies.list.Contains(clientNetIP))
+				(clientNetIP != nil && cfg.TrustedProxies.Contains(clientNetIP))
 			if clientIP != "" {
 				if trusted {
 					if prior, ok := req.Header["X-Forwarded-For"]; ok {
@@ -694,13 +689,7 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 		})
 	}
 
-	// Wrap with basic auth if needed.
-	h = requireBasicAuth(effectiveAuth, h)
-
-	// Wrap with JWT auth.
-	h = jwtMiddleware(h, rc, cfg.JWTAuth)
-
-	return h, nil
+	return wrapAuth(h, rc, cfg), nil
 }
 
 // manipulateClientHeaders applies client-side response header manipulation
@@ -709,9 +698,7 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 //   - delete runs first, then add/overwrite — add always wins
 //   - originalHeaders is a snapshot of the upstream response headers taken
 //     before deletion, so ${header.X} in add values sees the original values;
-//     pass nil for STATUS routes (no upstream response headers)
-//   - returns error to satisfy http.ReverseProxy.ModifyResponse signature;
-//     always returns nil
+//     pass nil for STATUS/FILE routes (no upstream response headers)
 func manipulateClientHeaders(respHeaders http.Header, originalHeaders http.Header, req *http.Request, rc *RouteConfig, xffCopy []string, cfg *Config) {
 	respHeaders.Set("Via", "RouteMUX")
 	// Apply client-side response header manipulation.
@@ -795,12 +782,11 @@ func (s *server) run() error {
 		return err
 	}
 
-	// TLS listener selection:
-	//   - If an ACME/per-vhost TLS manager is present, use its SNI GetCertificate
-	//     (multi-cert). A global tls-cert, if also set, becomes the fallback for
-	//     unmatched SNI names.
-	//   - Otherwise, fall back to the legacy single global cert.
-	if s.acmeMgr != nil {
+	// TLS listener: when the TLS manager is present (any per-vhost TLS and/or a
+	// global cert), its SNI GetCertificate serves all certificates. The global
+	// cert, if set, is the fallback for unmatched SNI names — and the only cert
+	// in global-only mode. Plain HTTP otherwise.
+	if s.tlsMgr != nil {
 		// Install the global tls-cert (if any) as the SNI fallback BEFORE Start,
 		// so it takes precedence over the self-signed bootstrap fallback that
 		// Start installs when no fallback is present.
@@ -810,61 +796,49 @@ func (s *server) run() error {
 				ln.Close()
 				return fmt.Errorf("TLS: %w", cerr)
 			}
-			s.acmeMgr.SetFallback(&cert)
+			s.tlsMgr.SetFallback(&cert)
 		}
-		if err := s.acmeMgr.Start(); err != nil {
+		if err := s.tlsMgr.Start(); err != nil {
 			ln.Close()
 			return fmt.Errorf("acme: %w", err)
 		}
-		tlsCfg := s.acmeMgr.TLSConfig()
-		ln = tls.NewListener(ln, tlsCfg)
-		if s.acmeMgr.UsesACME() {
+		ln = tls.NewListener(ln, s.tlsMgr.TLSConfig())
+
+		managed := s.tlsMgr.ManagedDomains()
+		switch {
+		case s.tlsMgr.UsesACME():
 			log.Printf("TLS enabled (SNI; automatic certificates via ACME)")
-		} else {
+		case len(managed) > 0:
 			log.Printf("TLS enabled (SNI; per-vhost certificates)")
+		default:
+			log.Printf("TLS enabled (global certificate: %s)", state.cfg.GlobalTLSCert)
 		}
 		// Warn about routed vhosts that have no certificate of their own: with
 		// TLS enabled server-wide, they will be served the SNI fallback (the
 		// global cert if set, otherwise the self-signed bootstrap cert), so the
-		// presented certificate will not match their hostname.
-		managed := s.acmeMgr.ManagedDomains()
-		var fallbackVHosts []string
-		for _, vh := range state.cfg.VHosts {
-			for _, d := range vh.Domains {
-				if d == "*" || d == "" {
-					continue // catch-all isn't a real SNI name
-				}
-				if !managed[strings.ToLower(d)] {
-					fallbackVHosts = append(fallbackVHosts, d)
+		// presented certificate may not match their hostname. Suppressed in
+		// global-only mode (no per-vhost certs at all): there the fallback IS
+		// the intended certificate for every vhost, not a surprise.
+		if len(managed) > 0 {
+			var fallbackVHosts []string
+			for _, vh := range state.cfg.VHosts {
+				for _, d := range vh.Domains {
+					if d == "*" || d == "" {
+						continue // catch-all isn't a real SNI name
+					}
+					if !managed[strings.ToLower(d)] {
+						fallbackVHosts = append(fallbackVHosts, d)
+					}
 				}
 			}
-		}
-		if len(fallbackVHosts) > 0 {
-			fallbackKind := "self-signed bootstrap"
-			if state.cfg.GlobalTLSCert != "" {
-				fallbackKind = "global-tls-cert"
+			if len(fallbackVHosts) > 0 {
+				fallbackKind := "self-signed bootstrap"
+				if state.cfg.GlobalTLSCert != "" {
+					fallbackKind = "global-tls-cert"
+				}
+				log.Printf("TLS: vhost(s) %v have no certificate of their own and will be served the %s fallback certificate (name will not match)", fallbackVHosts, fallbackKind)
 			}
-			log.Printf("TLS: vhost(s) %v have no certificate of their own and will be served the %s fallback certificate (name will not match)", fallbackVHosts, fallbackKind)
 		}
-		log.Printf("RouteMUX listening on %s (TLS)", ln.Addr())
-	} else if state.cfg.GlobalTLSCert != "" {
-		// Load the certificate and wrap the listener in TLS before logging,
-		// so the message appears only when TLS is also ready.
-		cert, cerr := tls.LoadX509KeyPair(state.cfg.GlobalTLSCert, state.cfg.GlobalTLSKey)
-		if cerr != nil {
-			ln.Close()
-			return fmt.Errorf("TLS: %w", cerr)
-		}
-		log.Printf("TLS enabled (cert: %s)", state.cfg.GlobalTLSCert)
-		// Serve via a GetCertificate callback backed by an atomic holder, so the
-		// cert can be swapped on reload when the file is updated.
-		s.globalCert.Store(&cert)
-		tlsCfg := &tls.Config{
-			GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
-				return s.globalCert.Load(), nil
-			},
-		}
-		ln = tls.NewListener(ln, tlsCfg)
 		log.Printf("RouteMUX listening on %s (TLS)", ln.Addr())
 	} else {
 		log.Printf("RouteMUX listening on %s", ln.Addr())
@@ -873,8 +847,8 @@ func (s *server) run() error {
 
 	// ErrServerClosed is the normal return after Shutdown() — not an error.
 	if errors.Is(err, http.ErrServerClosed) {
-		if s.acmeMgr != nil {
-			s.acmeMgr.Stop()
+		if s.tlsMgr != nil {
+			s.tlsMgr.Stop()
 		}
 		log.Printf("RouteMUX stopped.")
 		return nil
@@ -893,18 +867,16 @@ func isCatchAll(domains []string) bool {
 	return false
 }
 
-// handler returns the top-level HTTP handler.
-// IP filter (if configured) is checked first, before vhost dispatch.
-// When there is only one catch-all vhost (singleMux), vhost dispatch is skipped.
-// handler returns the top-level HTTP handler.
-// IP filter and vhost dispatch are inlined — no closure allocation per request.
+// handler returns the top-level HTTP handler. The ACME challenge path is
+// answered first, then the IP filter, then vhost dispatch. When there is only
+// one catch-all vhost (singleMux), vhost dispatch is skipped.
 func (s *server) handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// ACME HTTP-01 challenges must be served regardless of vhost, IP filter,
 		// or routing — the CA reaches /.well-known/acme-challenge/<token> on
 		// whatever port RouteMUX serves (directly or via a downstream proxy).
-		if s.acmeMgr != nil && acme.IsChallengeRequest(r) {
-			if h := s.acmeMgr.HTTPChallengeHandler(); h != nil {
+		if s.tlsMgr != nil && acme.IsChallengeRequest(r) {
+			if h := s.tlsMgr.HTTPChallengeHandler(); h != nil {
 				h.ServeHTTP(w, r)
 				return
 			}
@@ -956,7 +928,6 @@ func closeConnection(w http.ResponseWriter) {
 	w.WriteHeader(http.StatusBadRequest)
 }
 
-
 // requireBasicAuth wraps handler h with HTTP Basic Auth enforcement.
 // If auth is nil, h is returned unchanged.
 func requireBasicAuth(auth *Auth, h http.Handler) http.Handler {
@@ -983,6 +954,7 @@ func checkBasicAuth(w http.ResponseWriter, r *http.Request, auth *Auth) bool {
 	}
 	return valid
 }
+
 // schemeOf returns the actual scheme of the incoming connection.
 // Used only for $scheme variable resolution in dest-dest-add-header values.
 // Does NOT trust X-Forwarded-Proto from the client — use trust-client-headers
@@ -993,6 +965,7 @@ func schemeOf(r *http.Request) string {
 	}
 	return "http"
 }
+
 // upstreamPicker selects an upstream for each request according to the
 // configured load-balancing mode and weights.
 //
@@ -1004,6 +977,7 @@ func schemeOf(r *http.Request) string {
 // counter cycles through it. No per-request weight arithmetic.
 type upstreamPicker struct {
 	upstreams []Upstream
+	mode      string // "random" (default) or "round-robin"; fixed per route
 
 	// random mode
 	totalWeight int
@@ -1015,24 +989,13 @@ type upstreamPicker struct {
 }
 
 func newUpstreamPicker(upstreams []Upstream, mode string) *upstreamPicker {
-	p := &upstreamPicker{upstreams: upstreams}
-	for _, u := range upstreams {
-		w := u.Weight
-		if w < 1 {
-			w = 1
-		}
-		p.totalWeight += w
-		for i := 0; i < w; i++ {
-			p.pool = append(p.pool, len(p.pool)) // will be rebuilt below
-		}
-	}
-	// Rebuild pool with correct upstream indices
-	p.pool = p.pool[:0]
+	p := &upstreamPicker{upstreams: upstreams, mode: mode}
 	for idx, u := range upstreams {
 		w := u.Weight
 		if w < 1 {
 			w = 1
 		}
+		p.totalWeight += w
 		for i := 0; i < w; i++ {
 			p.pool = append(p.pool, idx)
 		}
@@ -1040,11 +1003,11 @@ func newUpstreamPicker(upstreams []Upstream, mode string) *upstreamPicker {
 	return p
 }
 
-func (p *upstreamPicker) pick(mode string) *Upstream {
+func (p *upstreamPicker) pick() *Upstream {
 	if len(p.upstreams) == 1 {
 		return &p.upstreams[0]
 	}
-	if mode == "round-robin" {
+	if p.mode == "round-robin" {
 		p.mu.Lock()
 		idx := p.pool[p.next%len(p.pool)]
 		p.next++
@@ -1096,14 +1059,13 @@ func (s *server) Reload(fileMod bool) {
 	}
 	defer s.reloadMu.Unlock()
 
-
 	oldState := s.state.Load()
 	if oldState.cfg.ConfigPath == "" {
 		log.Printf("Reload: no config file to reload")
 		return
 	}
 
-	if(fileMod) {
+	if fileMod {
 		log.Printf("Config file changed, reloading...")
 	} else {
 		log.Printf("Received signal to reload config, reloading...")
@@ -1129,7 +1091,7 @@ func (s *server) Reload(fileMod bool) {
 		newCfg.Listen = oldState.cfg.Listen
 	}
 	if newCfg.GlobalTLSCert != oldState.cfg.GlobalTLSCert || newCfg.GlobalTLSKey != oldState.cfg.GlobalTLSKey {
-		log.Printf("Reload: TLS cert/key changes require a full restart. Reverting to current values.")
+		log.Printf("Reload: TLS cert/key path changes require a full restart (file contents at the existing paths are re-read automatically). Reverting to current paths.")
 		newCfg.GlobalTLSCert = oldState.cfg.GlobalTLSCert
 		newCfg.GlobalTLSKey = oldState.cfg.GlobalTLSKey
 	}
@@ -1137,7 +1099,7 @@ func (s *server) Reload(fileMod bool) {
 	// is built once and persists across reloads so renewals keep running).
 	// Detect changes, warn, and revert them so routing doesn't update while the
 	// certificate behaviour silently stays on the old config.
-	if acmeConfigChanged(oldState.cfg, newCfg) {
+	if tlsConfigChanged(oldState.cfg, newCfg) {
 		log.Printf("Reload: ACME / per-vhost TLS changes require a full restart to take effect " +
 			"(adding/removing ACME vhosts, changing acme-source, cert/key paths, challenge-mode, " +
 			"or the global acme block). Reverting these to the running configuration; restart RouteMUX " +
@@ -1195,25 +1157,17 @@ func (s *server) Reload(fileMod bool) {
 	// out-of-band or replaced) are picked up without a restart. Paths themselves
 	// can't change on reload (that needs a restart, handled above), but the file
 	// contents at those paths can.
-	if s.acmeMgr != nil {
+	if s.tlsMgr != nil {
 		// Per-vhost static/ACME certs in the SNI store.
-		s.acmeMgr.ReloadCerts()
+		s.tlsMgr.ReloadCerts()
 		// The global cert serves as the SNI fallback when the manager is present.
 		if newCfg.GlobalTLSCert != "" {
 			if cert, cerr := tls.LoadX509KeyPair(newCfg.GlobalTLSCert, newCfg.GlobalTLSKey); cerr == nil {
-				s.acmeMgr.SetFallback(&cert)
+				s.tlsMgr.SetFallback(&cert)
 				log.Printf("tls: reloaded global fallback certificate from %s", newCfg.GlobalTLSCert)
 			} else {
 				log.Printf("tls: reload of global cert %s failed: %v (keeping current)", newCfg.GlobalTLSCert, cerr)
 			}
-		}
-	} else if newCfg.GlobalTLSCert != "" && s.globalCert.Load() != nil {
-		// Legacy single-cert path: swap the atomically-held global cert.
-		if cert, cerr := tls.LoadX509KeyPair(newCfg.GlobalTLSCert, newCfg.GlobalTLSKey); cerr == nil {
-			s.globalCert.Store(&cert)
-			log.Printf("tls: reloaded global certificate from %s", newCfg.GlobalTLSCert)
-		} else {
-			log.Printf("tls: reload of global cert %s failed: %v (keeping current)", newCfg.GlobalTLSCert, cerr)
 		}
 	}
 

@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"routemux/jwtverify"
 	"github.com/golang-jwt/jwt/v5"
+	"routemux/jwtverify"
 )
 
 func itoa(n int) string {
@@ -209,5 +209,5 @@ func TestCache_MultipleURLsIndependent(t *testing.T) {
 	}
 }
 
-var _ = time.Second // keep time import used
+var _ = time.Second     // keep time import used
 var _ = jwt.MapClaims{} // keep jwt import used

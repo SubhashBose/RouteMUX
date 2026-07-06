@@ -29,8 +29,8 @@ func TestIssuerSSRF_PathTrick(t *testing.T) {
 // correct JWKS URL, reconstructed from scheme+host only.
 func TestIssuerValid_Reconstructed(t *testing.T) {
 	cases := map[string]string{
-		"https://team.cloudflareaccess.com":        "https://team.cloudflareaccess.com/cdn-cgi/access/certs",
-		"https://myorg.auth0.com":                  "https://myorg.auth0.com/.well-known/jwks.json",
+		"https://team.cloudflareaccess.com":         "https://team.cloudflareaccess.com/cdn-cgi/access/certs",
+		"https://myorg.auth0.com":                   "https://myorg.auth0.com/.well-known/jwks.json",
 		"https://team.cloudflareaccess.com/":        "https://team.cloudflareaccess.com/cdn-cgi/access/certs",
 		"https://team.cloudflareaccess.com/ignored": "https://team.cloudflareaccess.com/cdn-cgi/access/certs",
 	}

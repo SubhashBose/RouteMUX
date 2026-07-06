@@ -4,14 +4,14 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"gopkg.in/yaml.v3"
 	"io"
 	"log"
 	"net"
 	"net/http"
-	"reflect"
-	"gopkg.in/yaml.v3"
-	"path/filepath"
 	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -116,7 +116,7 @@ func (cl *CIDRList) Load() error {
 	return nil
 }
 
-// AsyncRefresh starts a background goroutine to periodic or 
+// AsyncRefresh starts a background goroutine to periodic or
 // onetime refresh the CIDRs for one source.
 func (cl *CIDRList) AsyncRefresh(ctx context.Context, idx int, onetime bool) {
 	src := &cl.sources[idx]
@@ -312,6 +312,12 @@ func (f *IPFilter) Stop() {
 // trust-client-headers were enabled for that request only.
 type TrustedProxies struct {
 	list *CIDRList
+}
+
+// Contains reports whether an already-parsed IP is a trusted proxy. Used on
+// the hot path where the caller has the net.IP in hand (avoids re-parsing).
+func (tp *TrustedProxies) Contains(ip net.IP) bool {
+	return tp.list.Contains(ip)
 }
 
 // IsTrusted reports whether the connecting address is a trusted proxy.

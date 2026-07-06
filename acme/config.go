@@ -26,7 +26,6 @@ const (
 
 	// ZeroSSL ACME directory and its EAB-credentials endpoint.
 	zeroSSLDirectory = "https://acme.zerossl.com/v2/DV90"
-
 )
 
 // ChallengeMode selects which ACME challenge type RouteMUX uses to prove

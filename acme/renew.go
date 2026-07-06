@@ -42,7 +42,7 @@ func (m *Manager) checkRenewals() {
 		default:
 		}
 
-		certPath, keyPath := v.resolveCertPaths(m.global.CacheDir)
+		certPath, _ := v.resolveCertPaths(m.global.CacheDir)
 		due, err := renewalDue(certPath, v.RenewBefore)
 		if err != nil {
 			// No readable cert — (re)issue.
@@ -59,7 +59,6 @@ func (m *Manager) checkRenewals() {
 		if err := m.issueAndStore(m.ctx, v); err != nil {
 			log.Printf("acme: renewal for %v failed: %v (will retry)", v.Domains, err)
 		}
-		_ = keyPath
 	}
 }
 

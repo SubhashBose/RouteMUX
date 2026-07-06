@@ -9,8 +9,8 @@ import (
 
 func main() {
 	daemon.Handle(daemon.Config{
-		OnStart: run,
-		AppName: "RouteMUX",
+		OnStart:            run,
+		AppName:            "RouteMUX",
 		RestartOnCleanExit: true,
 	})
 }

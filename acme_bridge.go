@@ -28,12 +28,12 @@ func revertVHostTLS(oldVHosts []VHost, newVHosts []VHost) {
 	}
 }
 
-// acmeConfigChanged reports whether ACME-relevant settings differ between two
-// configs — either the global acme block or any vhost's tls block. These take
-// effect only at server start (the acme.Manager is built once and persists
-// across reloads), so a reload must warn and revert them rather than silently
-// ignoring the change.
-func acmeConfigChanged(oldCfg, newCfg *Config) bool {
+// tlsConfigChanged reports whether TLS-relevant settings differ between two
+// configs — the global acme block or any vhost's tls block (static or ACME).
+// These take effect only at server start (the TLS manager is built once and
+// persists across reloads), so a reload must warn and revert them rather than
+// silently ignoring the change.
+func tlsConfigChanged(oldCfg, newCfg *Config) bool {
 	if !sameACMEGlobal(oldCfg.ACME, newCfg.ACME) {
 		return true
 	}
@@ -83,31 +83,19 @@ func vhostTLSMap(vhosts []VHost) map[string]VHostTLS {
 	return m
 }
 
-// buildACMEManager constructs an acme.Manager from the parsed config, or
-// returns nil if no ACME/automatic TLS or per-vhost TLS is configured.
-//
-// It is also responsible for collecting per-vhost static certificates so the
-// SNI listener can serve them — a vhost may have a static cert/key even when
-// global ACME is absent.
-func buildACMEManager(cfg *Config) (*acme.Manager, error) {
-	// Determine whether any vhost needs the SNI manager at all: either a
-	// per-vhost tls block (static or ACME) exists, or global ACME is set.
+// buildTLSManager constructs the per-vhost TLS manager (acme.Manager) from the
+// parsed config, or returns nil if no vhost configures TLS. Despite living in
+// the acme package, the manager serves BOTH static per-vhost certificates and
+// ACME auto-issued ones — it is the SNI certificate store for the listener.
+func buildTLSManager(cfg *Config) (*acme.Manager, error) {
 	var tlsVHosts []acme.VHostConfig
 	hasAny := false
 
-	var challengeMode string
-	var email, cacheDir, directoryURL string
-	var caRootFile string
-	var insecure bool
-	servePort80 := false
+	// Global ACME settings (zero value when no acme block is configured —
+	// only consulted for vhosts that actually opt into ACME).
+	var g ACMEConfig
 	if cfg.ACME != nil {
-		email = cfg.ACME.Email
-		cacheDir = cfg.ACME.CacheDir
-		challengeMode = cfg.ACME.ChallengeMode
-		servePort80 = cfg.ACME.ServePort80
-		directoryURL = cfg.ACME.DirectoryURL
-		caRootFile = cfg.ACME.CARootFile
-		insecure = cfg.ACME.Insecure
+		g = *cfg.ACME
 	}
 
 	for _, vh := range cfg.VHosts {
@@ -148,17 +136,18 @@ func buildACMEManager(cfg *Config) (*acme.Manager, error) {
 		})
 	}
 
-	// Build the SNI manager only if at least one vhost actually configures TLS
-	// (static cert/key or acme-source). A global `acme:` block, or an empty
-	// `tls:` block, does not by itself enable TLS — the user opts in via
-	// global-tls-cert/key, per-vhost cert/key, or per-vhost acme-source.
-	// (global-tls-cert alone is served by the legacy single-cert path, which
-	// does not need this manager.)
-	if !hasAny {
+	// Build the SNI manager if at least one vhost configures TLS (static
+	// cert/key or acme-source) OR a global cert is set. The global cert is
+	// served as the manager's fallback, so global-only and per-vhost TLS share
+	// one code path (one listener setup, one reload path, one TLS policy).
+	// A bare `acme:` block, or an empty `tls:` block, still does not enable
+	// TLS — the user opts in via global-tls-cert/key, per-vhost cert/key, or
+	// per-vhost acme-source.
+	if !hasAny && cfg.GlobalTLSCert == "" {
 		return nil, nil
 	}
 
-	mode, err := acme.ParseChallengeMode(challengeMode)
+	mode, err := acme.ParseChallengeMode(g.ChallengeMode)
 	if err != nil {
 		return nil, err
 	}
@@ -169,7 +158,7 @@ func buildACMEManager(cfg *Config) (*acme.Manager, error) {
 	// already holds :80), and the main listener can't serve a plain-HTTP
 	// challenge because it speaks TLS. TLS-ALPN-01 is the correct choice when
 	// RouteMUX terminates TLS directly on the challenge port.
-	if cfg.Port == 80 && mode == acme.ChallengeHTTP01 && servePort80 {
+	if cfg.Port == 80 && mode == acme.ChallengeHTTP01 && g.ServePort80 {
 		log.Printf("acme: WARNING — RouteMUX is configured to serve TLS on port 80 with " +
 			"challenge-mode: http and serve-port80: true. The temporary port-80 challenge " +
 			"listener cannot bind because the main TLS listener already holds port 80, and " +
@@ -179,13 +168,13 @@ func buildACMEManager(cfg *Config) (*acme.Manager, error) {
 	}
 
 	mgr, err := acme.NewManager(acme.GlobalConfig{
-		Email:         email,
-		CacheDir:      cacheDir,
-		ChallengeMode: mode,
-		ServePort80:   servePort80,
-		DirectoryURL:  directoryURL,
-		CARootFile:    caRootFile,
-		InsecureSkipVerify: insecure,
+		Email:              g.Email,
+		CacheDir:           g.CacheDir,
+		ChallengeMode:      mode,
+		ServePort80:        g.ServePort80,
+		DirectoryURL:       g.DirectoryURL,
+		CARootFile:         g.CARootFile,
+		InsecureSkipVerify: g.Insecure,
 	}, tlsVHosts)
 	if err != nil {
 		return nil, err

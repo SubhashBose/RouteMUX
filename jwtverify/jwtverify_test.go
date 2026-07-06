@@ -306,6 +306,7 @@ func TestIss_UnknownDomain_ReturnsErrMissingKey(t *testing.T) {
 		}
 	}
 }
+
 // ── Security regression tests ────────────────────────────────────────────────
 
 // TestAlgConfusion_RSAPublicKeyAsHMAC verifies the RS256→HS256 confusion attack

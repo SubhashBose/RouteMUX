@@ -69,14 +69,6 @@ func (s *certStore) removeChallengeCert(domain string) {
 	s.mu.Unlock()
 }
 
-// hasCert reports whether a (non-challenge) certificate is installed for domain.
-func (s *certStore) hasCert(domain string) bool {
-	s.mu.RLock()
-	_, ok := s.byDomain[strings.ToLower(domain)]
-	s.mu.RUnlock()
-	return ok
-}
-
 // GetCertificate is the tls.Config.GetCertificate callback. It returns the
 // TLS-ALPN-01 challenge certificate during a challenge handshake, otherwise the
 // real certificate for the requested SNI host, otherwise the fallback.

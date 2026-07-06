@@ -8,10 +8,10 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
-	"fmt"
 	"testing"
 
 	xacme "golang.org/x/crypto/acme"
@@ -194,7 +194,7 @@ func TestCertStore_TLSALPNChallenge(t *testing.T) {
 
 	// ACME-ALPN handshake → challenge cert.
 	got, err := store.GetCertificate(&tls.ClientHelloInfo{
-		ServerName:     "example.com",
+		ServerName:      "example.com",
 		SupportedProtos: []string{acmeALPNProto},
 	})
 	if err != nil || got != chalCert {
@@ -204,7 +204,7 @@ func TestCertStore_TLSALPNChallenge(t *testing.T) {
 	// After removal, ALPN handshake errors.
 	store.removeChallengeCert("example.com")
 	if _, err := store.GetCertificate(&tls.ClientHelloInfo{
-		ServerName:     "example.com",
+		ServerName:      "example.com",
 		SupportedProtos: []string{acmeALPNProto},
 	}); err == nil {
 		t.Error("expected error after challenge cert removed")
@@ -229,8 +229,9 @@ func TestManager_StartLoadsExisting(t *testing.T) {
 	if err := mgr.Start(); err != nil {
 		t.Fatal(err)
 	}
-	if !mgr.store.hasCert("example.com") {
-		t.Error("Start should have loaded the existing certificate")
+	cert, err := mgr.GetCertificate(&tls.ClientHelloInfo{ServerName: "example.com"})
+	if err != nil || cert == nil {
+		t.Errorf("Start should have loaded the existing certificate, got %v", err)
 	}
 }
 
@@ -287,5 +288,33 @@ func TestDiscardAccount(t *testing.T) {
 	// Idempotent: discarding again is fine.
 	if err := discardAccount(dir); err != nil {
 		t.Errorf("second discard should not error: %v", err)
+	}
+}
+
+func TestHTTPChallengeHandler_OnlyWithACME(t *testing.T) {
+	dir := t.TempDir()
+	// Static-only manager: challenge handler must be nil so the challenge
+	// path routes normally (an upstream may run its own ACME).
+	staticMgr, err := NewManager(
+		GlobalConfig{CacheDir: dir},
+		[]VHostConfig{{Domains: []string{"s.example"}, CertPath: "/c", KeyPath: "/k"}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if staticMgr.HTTPChallengeHandler() != nil {
+		t.Error("static-only manager must not intercept the challenge path")
+	}
+
+	// ACME manager in HTTP-01 mode: handler present.
+	acmeMgr, err := NewManager(
+		GlobalConfig{Email: "a@b.com", CacheDir: dir, ChallengeMode: ChallengeHTTP01},
+		[]VHostConfig{{Domains: []string{"a.example"}, AcmeSource: "letsencrypt"}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acmeMgr.HTTPChallengeHandler() == nil {
+		t.Error("ACME manager in HTTP-01 mode should serve the challenge path")
 	}
 }

@@ -5,8 +5,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"strings"
 	"routemux/daemon"
+	"strings"
 
 	"github.com/SubhashBose/GoPkg-selfupdater"
 )
@@ -14,8 +14,6 @@ import (
 var version = "0.6"
 var buildDate = ""
 
-// parseAll merges config file + CLI args into a final Config.
-// CLI args take precedence over config file.
 // ensureACME returns cfg.ACME, allocating it on first use so ACME CLI flags can
 // be applied incrementally regardless of order.
 func ensureACME(cfg *Config) *ACMEConfig {
@@ -33,6 +31,8 @@ func ensureVHostTLS(p **VHostTLS) *VHostTLS {
 	return *p
 }
 
+// parseAll merges config file + CLI args into a final Config.
+// CLI args take precedence over config file.
 func parseAll(args []string) (*Config, error) {
 	// --- 1. Find config file path from args (first pass) ---
 	// Scan args once to find --config and detect --help early.
@@ -113,9 +113,6 @@ func findDefaultConfig() string {
 	return ""
 }
 
-// resolveListenAddress turns an interface name or IP into a bind IP string.
-// Returns "" (all interfaces) for empty input.
-
 // isUnixListen reports whether a listen address denotes a Unix domain socket.
 // Accepted forms: "unix:/path/to.sock" and "unix:///path/to.sock".
 func isUnixListen(listen string) bool {
@@ -134,9 +131,18 @@ func unixSocketPath(listen string) string {
 	return p
 }
 
+// resolveListenAddress turns an interface name or IP into a bind IP string.
+// Returns "" (all interfaces) for empty input. Unix socket addresses
+// ("unix:/path") pass through untouched.
 func resolveListenAddress(listen string) (string, error) {
 	if listen == "" {
 		return "", nil
+	}
+	// A natural but wrong assumption from the upstream syntax: unixs:// is an
+	// upstream-only scheme (it says how to CONNECT). On the listener, TLS is
+	// enabled by the tls/acme configuration, not the address scheme.
+	if strings.HasPrefix(listen, "unixs:") {
+		return "", fmt.Errorf("listen %q: unixs: is not a listen scheme — use unix:/path; TLS on the listener is enabled by global-tls-cert/key or per-vhost tls/acme configuration", listen)
 	}
 	// Unix socket listen address — pass through unchanged.
 	if isUnixListen(listen) {
@@ -340,37 +346,63 @@ func applyCLI(cfg *Config, rawArgs []string) error {
 			ensureACME(cfg).Insecure = true
 			i++
 		case "--jwt-header":
-			if i+1 >= len(args) { return fmt.Errorf("--jwt-header requires a value") }
-			if cfg.JWTAuth == nil { cfg.JWTAuth = &JWTAuth{} }
+			if i+1 >= len(args) {
+				return fmt.Errorf("--jwt-header requires a value")
+			}
+			if cfg.JWTAuth == nil {
+				cfg.JWTAuth = &JWTAuth{}
+			}
 			cfg.JWTAuth.HeaderKey = args[i+1]
 			i += 2
 		case "--jwt-cookie":
-			if i+1 >= len(args) { return fmt.Errorf("--jwt-cookie requires a value") }
-			if cfg.JWTAuth == nil { cfg.JWTAuth = &JWTAuth{} }
+			if i+1 >= len(args) {
+				return fmt.Errorf("--jwt-cookie requires a value")
+			}
+			if cfg.JWTAuth == nil {
+				cfg.JWTAuth = &JWTAuth{}
+			}
 			cfg.JWTAuth.CookieKey = args[i+1]
 			i += 2
 		case "--jwt-claim-user":
-			if i+1 >= len(args) { return fmt.Errorf("--jwt-claim-user requires a value") }
-			if cfg.JWTAuth == nil { cfg.JWTAuth = &JWTAuth{} }
+			if i+1 >= len(args) {
+				return fmt.Errorf("--jwt-claim-user requires a value")
+			}
+			if cfg.JWTAuth == nil {
+				cfg.JWTAuth = &JWTAuth{}
+			}
 			cfg.JWTAuth.ClaimUserKey = args[i+1]
 			i += 2
 		case "--jwt-secret":
-			if i+1 >= len(args) { return fmt.Errorf("--jwt-secret requires a value") }
-			if cfg.JWTAuth == nil { cfg.JWTAuth = &JWTAuth{} }
+			if i+1 >= len(args) {
+				return fmt.Errorf("--jwt-secret requires a value")
+			}
+			if cfg.JWTAuth == nil {
+				cfg.JWTAuth = &JWTAuth{}
+			}
 			cfg.JWTAuth.Secret = args[i+1]
 			i += 2
 		case "--jwt-jwk-url":
-			if i+1 >= len(args) { return fmt.Errorf("--jwt-jwk-url requires a value") }
-			if cfg.JWTAuth == nil { cfg.JWTAuth = &JWTAuth{} }
+			if i+1 >= len(args) {
+				return fmt.Errorf("--jwt-jwk-url requires a value")
+			}
+			if cfg.JWTAuth == nil {
+				cfg.JWTAuth = &JWTAuth{}
+			}
 			cfg.JWTAuth.JWKURL = args[i+1]
 			i += 2
 		case "--jwt-aud":
-			if i+1 >= len(args) { return fmt.Errorf("--jwt-aud requires a value") }
-			if cfg.JWTAuth == nil { cfg.JWTAuth = &JWTAuth{} }
+			if i+1 >= len(args) {
+				return fmt.Errorf("--jwt-aud requires a value")
+			}
+			if cfg.JWTAuth == nil {
+				cfg.JWTAuth = &JWTAuth{}
+			}
 			cfg.JWTAuth.AudID = args[i+1]
 			i += 2
 		case "--jwt-default-allow-all":
-			if cfg.JWTAuth == nil { cfg.JWTAuth = &JWTAuth{} }
+			if cfg.JWTAuth == nil {
+				cfg.JWTAuth = &JWTAuth{}
+			}
 			cfg.JWTAuth.DefaultAllowAll = true
 			i++
 		case "--trust-client-headers":
@@ -679,7 +711,7 @@ func parseAuthString(s string) (*Auth, error) {
 	return &Auth{User: parts[0], Password: parts[1]}, nil
 }
 
-func runUpgrade(){
+func runUpgrade() {
 	cfg := selfupdate.Config{
 		RepoURL:        "https://github.com/SubhashBose/RouteMUX",
 		BinaryPrefix:   "routemux-",
@@ -688,7 +720,7 @@ func runUpgrade(){
 	}
 
 	fmt.Printf("Current version: %s\nChecking for updates…", version)
- 
+
 	res, err := selfupdate.Update(cfg)
 
 	if res.LatestVersion != "" {
@@ -696,17 +728,17 @@ func runUpgrade(){
 	} else {
 		fmt.Printf("\n")
 	}
-	
+
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Update failed:", err)
 		os.Exit(1)
 	}
- 
+
 	if !res.Updated {
 		fmt.Printf("Already up to date (latest: %s)\n", res.LatestVersion)
 		return
 	}
- 
+
 	fmt.Printf("Successfully updated to v%s (asset: %s)\nPlease restart any running instances of the program.\n",
 		res.LatestVersion, res.AssetName)
 }
@@ -728,9 +760,10 @@ Command lineUsage:
            [--route PATH2 --dest URL [route options]] ...
 
 Global options:
-  --config PATH            Config file (default: `+bindir+` or
+  --config PATH            Config file (default: ` + bindir + ` or
                            ./config.yml or ~/.config/routemux/config.yml)
-  --listen ADDR            IP address or interface name to listen on (default: all interfaces)
+  --listen ADDR            IP address or interface name or Unix socket (unix://<socket-path>)
+                           to listen on (default: all interfaces)
   --port PORT              Port to listen on (default: 8080)
   --global-tls-cert FILE   Global TLS certificate file (enables HTTPS; fallback for SNI)
   --global-tls-key  FILE   Global TLS key file (enables HTTPS)
@@ -813,8 +846,8 @@ Routes:
       --client-del-header K    Delete a header from the upstream response (repeatable)
                                Can take wildcards (e.g. --client-del-header *cookie*)
 `)
-if daemon.DAEMONIZE_SUPPORTED {
-	fmt.Print(`
+	if daemon.DAEMONIZE_SUPPORTED {
+		fmt.Print(`
 Daemon options:
   start                    Start RouteMUX as a background daemon process.
   watch-start              Start RouteMUX as a background daemon process with watchdog,
@@ -828,7 +861,7 @@ Daemon options:
                            config file for changes and gracefully reloads automatically. 
   status                   Show RouteMUX daemon status
 `)
-}
+	}
 	fmt.Print(`
 General flags:
   --help, -h               Show this help

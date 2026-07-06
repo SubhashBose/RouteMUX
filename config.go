@@ -1,17 +1,19 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha1"
 	"encoding/hex"
-	"bytes"
 	"fmt"
+	"gopkg.in/yaml.v3"
 	"log"
+	"mime"
 	"net/url"
-	"path/filepath"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
-	"gopkg.in/yaml.v3"
+	"sync"
 )
 
 // expandEnvVars replaces all ${env.NAME} occurrences in the YAML source with
@@ -81,31 +83,30 @@ func expandEnvVars(data []byte) []byte {
 	return result
 }
 
-
 // JWTAuth holds the global JWT authentication configuration.
 type JWTAuth struct {
-	HeaderKey        string `yaml:"header-key"`        // HTTP header to read token from (e.g. "Authorization")
-	CookieKey        string `yaml:"cookie-key"`        // Cookie name to read token from (fallback if header absent)
-	ClaimUserKey     string `yaml:"claim-user-key"`    // Claim key for username extraction (empty = no user check)
-	Secret           string `yaml:"secret"`            // HMAC secret or PEM public key (base64 or raw)
-	JWKURL           string `yaml:"jwk-url"`           // JWKS endpoint URL
-	AudID            string `yaml:"aud-id"`            // Expected audience value
-	DefaultAllowAll  bool   `yaml:"default-allow-all"` // If true, authenticated users may access routes with no auth-users list
+	HeaderKey       string `yaml:"header-key"`        // HTTP header to read token from (e.g. "Authorization")
+	CookieKey       string `yaml:"cookie-key"`        // Cookie name to read token from (fallback if header absent)
+	ClaimUserKey    string `yaml:"claim-user-key"`    // Claim key for username extraction (empty = no user check)
+	Secret          string `yaml:"secret"`            // HMAC secret or PEM public key (base64 or raw)
+	JWKURL          string `yaml:"jwk-url"`           // JWKS endpoint URL
+	AudID           string `yaml:"aud-id"`            // Expected audience value
+	DefaultAllowAll bool   `yaml:"default-allow-all"` // If true, authenticated users may access routes with no auth-users list
 }
 
 // Config is the top-level runtime configuration structure.
 type Config struct {
 	Listen             string
 	Port               int
-	GlobalTLSCert            string
-	GlobalTLSKey             string
+	GlobalTLSCert      string
+	GlobalTLSKey       string
 	GlobalAuth         *Auth
 	TrustClientHeaders bool
-	VHosts             []VHost    // ordered list; matched top-to-bottom per request
-	IPFilter           *IPFilter        // nil = no IP filtering
-	TrustedProxies     *TrustedProxies  // nil = use global TrustClientHeaders
-	JWTAuth            *JWTAuth         // nil = no JWT authentication
-	ACME               *ACMEConfig      // nil = no ACME / automatic TLS
+	VHosts             []VHost         // ordered list; matched top-to-bottom per request
+	IPFilter           *IPFilter       // nil = no IP filtering
+	TrustedProxies     *TrustedProxies // nil = use global TrustClientHeaders
+	JWTAuth            *JWTAuth        // nil = no JWT authentication
+	ACME               *ACMEConfig     // nil = no ACME / automatic TLS
 
 	// Metadata for hot reload
 	ConfigPath   string   // Path to the config file being used (if any)
@@ -158,33 +159,33 @@ type Upstream struct {
 
 // RouteConfig describes a single reverse-proxy route.
 type RouteConfig struct {
-	Upstreams          []Upstream        // upstream destinations (nil for STATUS routes)
-	LBMode             string            // "random" (default) or "round-robin"
-	StatusCode         int               // non-zero: static response route
-	StatusText         string            // body text for static response
-	StaticFilePath     string            // non-empty: serve this file or directory
-	StaticDirListing   bool              // true: enable directory listing (path ends with *)
-	NoTLSVerify        bool              // skip TLS verification for all upstreams
-	Auth               *Auth             // nil = inherit global-auth; explicitly cleared = no auth
-	AuthExplicit       bool              // true when auth was set explicitly (even as empty)
-	Timeout            string            // e.g. "30s", "2m" (total request timeout; empty = unbounded)
-	DialTimeout        string            // e.g. "5s" (upstream connect timeout; empty = default 5s)
-	ParsedAddHeaders   map[string]parsedHeaderValue // compiled dest-dest-add-header values (parsed at startup)
-	NeedsOriginal      bool              // true if any header value references ${header.X}
-	AddHasVars         bool              // true if any header value contains a variable (non-const)
-	DeleteHeaders      []string          // headers to remove from upstream request
-	DeleteHasWildcard  bool              // true if any DeleteHeaders entry contains '*'
+	Upstreams         []Upstream                   // upstream destinations (nil for STATUS routes)
+	LBMode            string                       // "random" (default) or "round-robin"
+	StatusCode        int                          // non-zero: static response route
+	StatusText        string                       // body text for static response
+	StaticFilePath    string                       // non-empty: serve this file or directory
+	StaticDirListing  bool                         // true: enable directory listing (path ends with *)
+	NoTLSVerify       bool                         // skip TLS verification for all upstreams
+	Auth              *Auth                        // nil = inherit global-auth; explicitly cleared = no auth
+	AuthExplicit      bool                         // true when auth was set explicitly (even as empty)
+	Timeout           string                       // e.g. "30s", "2m" (total request timeout; empty = unbounded)
+	DialTimeout       string                       // e.g. "5s" (upstream connect timeout; empty = default 5s)
+	ParsedAddHeaders  map[string]parsedHeaderValue // compiled dest-dest-add-header values (parsed at startup)
+	NeedsOriginal     bool                         // true if any header value references ${header.X}
+	AddHasVars        bool                         // true if any header value contains a variable (non-const)
+	DeleteHeaders     []string                     // headers to remove from upstream request
+	DeleteHasWildcard bool                         // true if any DeleteHeaders entry contains '*'
 	// Client-side response header manipulation (applied to upstream response before client)
-	ParsedClientAddHeaders  map[string]parsedHeaderValue // compiled client-add-header values
-	ClientNeedsRespHeaders  bool              // true if any client-add-header refs ${header.X}
-	ClientAddHasVars        bool              // true if any client-add-header has a variable
-	NeedsTrustedXFF         bool              // true if any dest-add-header or client-add-header uses ${trusted_xff}
-	ClientNeedsTrustedXFF   bool              // true if client-add-header uses ${trusted_xff} (requires context bridge to ModifyResponse)
-	ClientDelHeaders        []string          // headers to remove from upstream response
-	ClientDelHasWildcard    bool              // true if any ClientDelHeaders entry contains '*'
-	AuthUsers          []string          // allowed JWT usernames for this route; nil = use DefaultAllowAll
-	SkipJwtAuth        bool              // true to skip JWT auth for this route
-	destEntries        []string          // temporary: accumulates --dest CLI args before parsing
+	ParsedClientAddHeaders map[string]parsedHeaderValue // compiled client-add-header values
+	ClientNeedsRespHeaders bool                         // true if any client-add-header refs ${header.X}
+	ClientAddHasVars       bool                         // true if any client-add-header has a variable
+	NeedsTrustedXFF        bool                         // true if any dest-add-header or client-add-header uses ${trusted_xff}
+	ClientNeedsTrustedXFF  bool                         // true if client-add-header uses ${trusted_xff} (requires context bridge to ModifyResponse)
+	ClientDelHeaders       []string                     // headers to remove from upstream response
+	ClientDelHasWildcard   bool                         // true if any ClientDelHeaders entry contains '*'
+	AuthUsers              []string                     // allowed JWT usernames for this route; nil = use DefaultAllowAll
+	SkipJwtAuth            bool                         // true to skip JWT auth for this route
+	destEntries            []string                     // temporary: accumulates --dest CLI args before parsing
 }
 
 func (c *Config) validate() error {
@@ -245,16 +246,16 @@ type fileVHostTLS struct {
 }
 
 type fileGlobal struct {
-	Listen     string   `yaml:"listen"`
-	Port       int      `yaml:"port"`
-	GlobalTLSCert    string   `yaml:"global-tls-cert"`
-	GlobalTLSKey     string   `yaml:"global-tls-key"`
-	GlobalAuth          []string `yaml:"global-auth"`   // ["USER", "PASSWORD"]
-	TrustClientHeaders  bool            `yaml:"trust-client-headers"`
-	IPFilterCfg          *IPFilterConfig    `yaml:"ip-filter"`
-	TrustedProxiesCfg    TrustedProxiesConfig `yaml:"trusted-proxies"`
-	JWTAuthCfg           *JWTAuth             `yaml:"jwt-authentication"`
-	ACMECfg              *fileACME            `yaml:"acme"`
+	Listen             string               `yaml:"listen"`
+	Port               int                  `yaml:"port"`
+	GlobalTLSCert      string               `yaml:"global-tls-cert"`
+	GlobalTLSKey       string               `yaml:"global-tls-key"`
+	GlobalAuth         []string             `yaml:"global-auth"` // ["USER", "PASSWORD"]
+	TrustClientHeaders bool                 `yaml:"trust-client-headers"`
+	IPFilterCfg        *IPFilterConfig      `yaml:"ip-filter"`
+	TrustedProxiesCfg  TrustedProxiesConfig `yaml:"trusted-proxies"`
+	JWTAuthCfg         *JWTAuth             `yaml:"jwt-authentication"`
+	ACMECfg            *fileACME            `yaml:"acme"`
 }
 
 // fileACME mirrors the global.acme YAML block.
@@ -269,18 +270,18 @@ type fileACME struct {
 }
 
 type fileRoute struct {
-	Dest        destValue         `yaml:"dest"` // string or []string — custom unmarshaler
-	NoTLSVerify bool              `yaml:"noTLSverify"`
-	Auth        []string          `yaml:"auth"` // ["USER", "PASSWORD"] or absent
-	Timeout     string            `yaml:"timeout"`
-	DialTimeout string            `yaml:"dial-timeout"`
-	LBMode      string            `yaml:"load-balancer-mode"`
-	AddHeaders  map[string]string `yaml:"dest-add-header"`
-	DeleteHeaders []string        `yaml:"dest-del-header"`
-	ClientAddHeaders  map[string]string `yaml:"client-add-header"`
-	ClientDelHeaders  []string          `yaml:"client-del-header"`
-	AuthUsers         []string          `yaml:"auth-users"`
-	SkipJwtAuth       bool              `yaml:"skip-jwt-auth"`
+	Dest             destValue         `yaml:"dest"` // string or []string — custom unmarshaler
+	NoTLSVerify      bool              `yaml:"noTLSverify"`
+	Auth             []string          `yaml:"auth"` // ["USER", "PASSWORD"] or absent
+	Timeout          string            `yaml:"timeout"`
+	DialTimeout      string            `yaml:"dial-timeout"`
+	LBMode           string            `yaml:"load-balancer-mode"`
+	AddHeaders       map[string]string `yaml:"dest-add-header"`
+	DeleteHeaders    []string          `yaml:"dest-del-header"`
+	ClientAddHeaders map[string]string `yaml:"client-add-header"`
+	ClientDelHeaders []string          `yaml:"client-del-header"`
+	AuthUsers        []string          `yaml:"auth-users"`
+	SkipJwtAuth      bool              `yaml:"skip-jwt-auth"`
 
 	// authPresent records whether the "auth" key existed in the YAML at all.
 	authPresent bool
@@ -337,12 +338,15 @@ func (r *fileRoute) UnmarshalYAML(value *yaml.Node) error {
 }
 
 // yamlFieldsCache caches the known yaml field names per struct type so
-// reflection only runs once per type, not on every decode call.
+// reflection only runs once per type, not on every decode call. Guarded by
+// yamlFieldsMu: loads are serialized today (startup + reloadMu), but the cache
+// must not silently become a data race if that ever changes.
 var (
-	yamlFieldsCache   = map[reflect.Type]map[string]struct{}{}
+	yamlFieldsMu    sync.Mutex
+	yamlFieldsCache = map[reflect.Type]map[string]struct{}{}
 
-// strictYAML controls whether unknown YAML keys are rejected.
-// Set to false by --no-strict-yaml CLI flag. Checked by all UnmarshalYAML methods.
+	// strictYAML controls whether unknown YAML keys are rejected.
+	// Set to false by --no-strict-yaml CLI flag. Checked by all UnmarshalYAML methods.
 	strictYAML = true
 )
 
@@ -352,6 +356,8 @@ func knownYAMLFields(t reflect.Type) map[string]struct{} {
 	if t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
+	yamlFieldsMu.Lock()
+	defer yamlFieldsMu.Unlock()
 	if m, ok := yamlFieldsCache[t]; ok {
 		return m
 	}
@@ -468,8 +474,8 @@ func loadConfigFile(path string) (*Config, error) {
 	cfg := &Config{
 		Listen:             fc.Global.Listen,
 		Port:               fc.Global.Port,
-		GlobalTLSCert:            fc.Global.GlobalTLSCert,
-		GlobalTLSKey:             fc.Global.GlobalTLSKey,
+		GlobalTLSCert:      fc.Global.GlobalTLSCert,
+		GlobalTLSKey:       fc.Global.GlobalTLSKey,
 		TrustClientHeaders: fc.Global.TrustClientHeaders,
 	}
 	if cfg.Port == 0 {
@@ -557,7 +563,7 @@ func parseFileVHost(fileRoutes map[string]fileRoute, domains []string) (VHost, e
 		rc := &RouteConfig{
 			NoTLSVerify:       fr.NoTLSVerify,
 			Timeout:           fr.Timeout,
-			DialTimeout:        fr.DialTimeout,
+			DialTimeout:       fr.DialTimeout,
 			LBMode:            normalizeLBMode(fr.LBMode),
 			AuthExplicit:      fr.authPresent,
 			ParsedAddHeaders:  compiledHeaders(fr.AddHeaders),
@@ -613,7 +619,6 @@ func parseDestField(dest string) (code int, text string, isStatus bool) {
 	}
 	return n, text, true
 }
-
 
 // parseFileField checks if a dest value is a FILE or FILE-BROWSE directive.
 // Format: "FILE [code] <path>"  or  "FILE-BROWSE [code] <path>" (case-insensitive).
@@ -678,11 +683,16 @@ func guessContentType(filename string) string {
 		return "application/pdf"
 	case ".zip":
 		return "application/zip"
-	default:
-		return "application/octet-stream"
 	}
+	// Not in the built-in table: ask the platform MIME database (covers .mp4,
+	// .webp, .woff2, and everything in /etc/mime.types). The explicit switch
+	// above keeps precedence so existing mappings never change. Only truly
+	// unknown extensions fall back to octet-stream.
+	if mt := mime.TypeByExtension(ext); mt != "" {
+		return mt
+	}
+	return "application/octet-stream"
 }
-
 
 // parseUnixUpstream recognises a Unix-socket upstream and returns a synthetic
 // HTTP(S) URL plus the socket path. Format:

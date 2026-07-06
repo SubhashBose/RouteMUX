@@ -5,8 +5,10 @@
 package daemon
 
 import (
+	"bufio"
 	"crypto/md5"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -14,11 +16,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
-	"bufio"
-	"io"
-	"sync/atomic"
 )
 
 const DAEMONIZE_SUPPORTED = true
@@ -61,14 +61,14 @@ type Config struct {
 
 	// Command strings to be used for start/stop/restart/status commands.
 	// Defaults to "start", "watch-start", "stop", "restart", "reload", "status".
-	// set like this in your main daemon.Config: (omit the commands not needed) 
+	// set like this in your main daemon.Config: (omit the commands not needed)
 	//daemon.Commands{Start: "start", WatchStart: "watch-start", Stop: "stop", Restart: "restart", Reload: "reload", Status: "status"},
 	CommandStrings Commands
 
 	// Log and PID file modtime refresh interval to avoid OS cleaning up /tmp.
 	// Defaults to 12h.
 	TmpFileTouchInterval time.Duration
-	
+
 	// (internal variables) Logger is used for daemon-internal messages. Defaults to log.Default().
 	logger *log.Logger
 
@@ -77,20 +77,20 @@ type Config struct {
 }
 
 type Commands struct {
-	Start string
+	Start      string
 	WatchStart string
-	Stop string
-	Restart string
-	Reload string
-	Status string
+	Stop       string
+	Restart    string
+	Reload     string
+	Status     string
 }
 
-const pidFileEnvVar  = "DAEMON_PID_FILE"
+const pidFileEnvVar = "DAEMON_PID_FILE"
 const watchdogEnvVar = "DAEMON_IS_WATCHDOG"
-const workerEnvVar   = "DAEMON_IS_WORKER"
+const workerEnvVar = "DAEMON_IS_WORKER"
+
 // set to true when watchdog in shutting down state
 var watchdogShuttingDown atomic.Bool
-
 
 // Handle inspects os.Args for control commands and acts accordingly.
 //
@@ -125,7 +125,7 @@ func Handle(cfg Config) {
 		// Always have a valid logger as fallback
 		cfg.logger = log.Default()
 	}
-	
+
 	initLogger := func() {
 		if cfg.LoggerFile != "" {
 			f, err := os.OpenFile(cfg.LoggerFile, os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0644)
@@ -168,7 +168,6 @@ func Handle(cfg Config) {
 		return
 	}
 
-
 	if cfg.CommandStrings == (Commands{}) {
 		cfg.CommandStrings.Start = "start"
 		cfg.CommandStrings.WatchStart = "watch-start"
@@ -182,29 +181,29 @@ func Handle(cfg Config) {
 	command, passArgs := parseArgs(os.Args[1:], &cfg.CommandStrings)
 
 	/*
-	switch command {
-	default:
-		// No control command — run normally attached to terminal.
-		if cfg.OnStart != nil {
-			cfg.OnStart()
+		switch command {
+		default:
+			// No control command — run normally attached to terminal.
+			if cfg.OnStart != nil {
+				cfg.OnStart()
+			}
+		case "":
+			if cfg.OnStart != nil {
+				cfg.OnStart()
+			}
+		case cfg.CommandStrings.Start:
+			handleStart(passArgs, &cfg)
+		case cfg.CommandStrings.WatchStart:
+			handleWatchStart(passArgs, &cfg)
+		case cfg.CommandStrings.Stop:
+			_ = handleStop(&cfg)
+		case cfg.CommandStrings.Restart:
+			handleRestart(&cfg)
+		case cfg.CommandStrings.Reload:
+			handleReload(&cfg)
+		case cfg.CommandStrings.Status:
+			handleStatus(&cfg)
 		}
-	case "":
-		if cfg.OnStart != nil {
-			cfg.OnStart()
-		}
-	case cfg.CommandStrings.Start:
-		handleStart(passArgs, &cfg)
-	case cfg.CommandStrings.WatchStart:
-		handleWatchStart(passArgs, &cfg)
-	case cfg.CommandStrings.Stop:
-		_ = handleStop(&cfg)
-	case cfg.CommandStrings.Restart:
-		handleRestart(&cfg)
-	case cfg.CommandStrings.Reload:
-		handleReload(&cfg)
-	case cfg.CommandStrings.Status:
-		handleStatus(&cfg)
-	}
 	*/
 	// instead of case using a map of functions
 	handlers := map[string]func(){
@@ -235,29 +234,29 @@ func Handle(cfg Config) {
 // ---- internal ---------------------------------------------------------------
 
 func parseArgs(args []string, commandStrings *Commands) (command string, rest []string) {
-    validCommands := make(map[string]struct{})
-    for _, cmd := range []string{
-        commandStrings.Start,
-        commandStrings.WatchStart,
-        commandStrings.Stop,
-        commandStrings.Restart,
-        commandStrings.Reload,
-        commandStrings.Status,
-    } {
-        if cmd != "" {
-            validCommands[cmd] = struct{}{}
-        }
-    }
+	validCommands := make(map[string]struct{})
+	for _, cmd := range []string{
+		commandStrings.Start,
+		commandStrings.WatchStart,
+		commandStrings.Stop,
+		commandStrings.Restart,
+		commandStrings.Reload,
+		commandStrings.Status,
+	} {
+		if cmd != "" {
+			validCommands[cmd] = struct{}{}
+		}
+	}
 
-    for i := len(args) - 1; i >= 0; i-- {
-        if _, ok := validCommands[args[i]]; ok {
-            rest = make([]string, 0, len(args)-1)
-            rest = append(rest, args[:i]...)
-            rest = append(rest, args[i+1:]...)
-            return args[i], rest
-        }
-    }
-    return "", args
+	for i := len(args) - 1; i >= 0; i-- {
+		if _, ok := validCommands[args[i]]; ok {
+			rest = make([]string, 0, len(args)-1)
+			rest = append(rest, args[:i]...)
+			rest = append(rest, args[i+1:]...)
+			return args[i], rest
+		}
+	}
+	return "", args
 }
 
 func pidFilePath(cfg Config) (string, error) {
@@ -367,7 +366,7 @@ func handleWatchStart(childArgs []string, cfg *Config) {
 }
 
 func getWatchdogLogfileName(cfg *Config) string {
-	if cfg.WatchdogLoggerFile !="" {
+	if cfg.WatchdogLoggerFile != "" {
 		return cfg.WatchdogLoggerFile
 	}
 	if cfg.LoggerFile != "" {
@@ -387,7 +386,7 @@ func runWatchdog(cfg *Config) {
 	exe, _ := filepath.Abs(mustExecutable())
 
 	cfg.WatchdogLoggerFile = getWatchdogLogfileName(cfg)
-	
+
 	f, err := os.OpenFile(cfg.WatchdogLoggerFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err == nil {
 		cfg.logger = log.New(f, "", log.LstdFlags)
@@ -508,9 +507,9 @@ func handleStop(cfg *Config) bool {
 
 func handleRestart(cfg *Config) {
 	_, mode, _ := readPID(cfg.pidFile)
-    if mode == "" {
-        mode = "start" // fallback
-    }
+	if mode == "" {
+		mode = "start" // fallback
+	}
 
 	// Remember the args the running process was launched with so we can
 	// restart it with the same flags.
@@ -522,13 +521,13 @@ func handleRestart(cfg *Config) {
 	}
 
 	if handleStop(cfg) {
-		cfg.WatchdogLoggerFile = getWatchdogLogfileName(cfg)+" " // making file nonexistent, tricking to not delete the file on restart
+		cfg.WatchdogLoggerFile = getWatchdogLogfileName(cfg) + " " // making file nonexistent, tricking to not delete the file on restart
 		switch mode {
-        case "watch-start":
-            handleWatchStart(passArgs, cfg)
-        default:
-            handleStart(passArgs, cfg)
-        }
+		case "watch-start":
+			handleWatchStart(passArgs, cfg)
+		default:
+			handleStart(passArgs, cfg)
+		}
 	}
 }
 
@@ -624,7 +623,7 @@ func forwardSignal(cfg *Config, workerCmd **exec.Cmd) {
 	signal.Notify(ch, syscall.SIGHUP)
 	go func() {
 		for {
-			sig := <-ch  // block until signal arrives
+			sig := <-ch // block until signal arrives
 			if workerCmd != nil && *workerCmd != nil && (*workerCmd).Process != nil {
 				cfg.logger.Printf("%s: received %s, forwarding to worker (PID %d)",
 					cfg.AppName, sig, (*workerCmd).Process.Pid)
@@ -647,24 +646,24 @@ func mustExecutable() string {
 }
 
 func writePID(path string, pid int, mode string) error {
-    return os.WriteFile(path, []byte(strconv.Itoa(pid)+"\n"+mode+"\n"), 0644)
+	return os.WriteFile(path, []byte(strconv.Itoa(pid)+"\n"+mode+"\n"), 0644)
 }
 
 func readPID(path string) (int, string, error) {
-    data, err := os.ReadFile(path)
-    if err != nil {
-        return 0, "", err
-    }
-    lines := strings.SplitN(strings.TrimSpace(string(data)), "\n", 2)
-    pid, err := strconv.Atoi(strings.TrimSpace(lines[0]))
-    if err != nil {
-        return 0, "", err
-    }
-    mode := "start" // default for old PID files that don't have mode
-    if len(lines) > 1 {
-        mode = strings.TrimSpace(lines[1])
-    }
-    return pid, mode, nil
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, "", err
+	}
+	lines := strings.SplitN(strings.TrimSpace(string(data)), "\n", 2)
+	pid, err := strconv.Atoi(strings.TrimSpace(lines[0]))
+	if err != nil {
+		return 0, "", err
+	}
+	mode := "start" // default for old PID files that don't have mode
+	if len(lines) > 1 {
+		mode = strings.TrimSpace(lines[1])
+	}
+	return pid, mode, nil
 }
 
 // processExists checks whether a process with the given PID is alive.
@@ -673,7 +672,7 @@ func processExists(pid int) bool {
 	if err != nil {
 		return false
 	}
-// Signal 0 checks existence without actually sending a signal.
+	// Signal 0 checks existence without actually sending a signal.
 	return proc.Signal(syscall.Signal(0)) == nil
 }
 
@@ -758,7 +757,7 @@ func refreshModTime(path string, interval time.Duration) {
 			if err := os.Chtimes(path, now, now); err != nil {
 				// File may have been deleted externally — stop refreshing.
 				//return
-				
+
 				continue
 			}
 		}

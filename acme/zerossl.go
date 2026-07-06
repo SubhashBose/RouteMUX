@@ -2,8 +2,6 @@ package acme
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -74,11 +72,4 @@ func generateZeroSSLEAB(ctx context.Context, email string) (*xacme.ExternalAccou
 		KID: out.EABKID,
 		Key: hmacKey,
 	}, nil
-}
-
-// verifyHMAC is a tiny helper kept for completeness/testing of the HMAC path.
-func verifyHMAC(key, message []byte) []byte {
-	mac := hmac.New(sha256.New, key)
-	mac.Write(message)
-	return mac.Sum(nil)
 }

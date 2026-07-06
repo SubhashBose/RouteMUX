@@ -36,7 +36,6 @@ type issueState struct {
 type issueEntry struct {
 	Failures     int       `json:"failures"`
 	NextEligible time.Time `json:"next_eligible"`
-	lastAttempt  time.Time // in-memory only; not persisted
 }
 
 func newIssueState() *issueState {
@@ -109,19 +108,6 @@ func (s *issueState) shouldAttempt(domains []string) (bool, time.Duration) {
 		return false, e.NextEligible.Sub(now)
 	}
 	return true, 0
-}
-
-// recordAttempt marks that an attempt is starting.
-func (s *issueState) recordAttempt(domains []string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	k := issueKey(domains)
-	e := s.entries[k]
-	if e == nil {
-		e = &issueEntry{}
-		s.entries[k] = e
-	}
-	e.lastAttempt = time.Now()
 }
 
 // recordSuccess clears the failure state for the domains.

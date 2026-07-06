@@ -50,30 +50,30 @@ type jwk struct {
 //
 // Parameters:
 //   - tokenString:    the raw JWT string.
-//   - ClaimUsername:  the claim key whose value to extract from the payload.
-//                     Pass "" to skip this check entirely (no error returned).
-//   - Key:            the HMAC secret ([]byte) or PEM-encoded public key (RSA/EC).
-//                     Pass nil or empty to use automatic JWKS resolution.
-//   - JwkURL:         explicit JWKS endpoint. Used when Key is empty.
-//                     When both Key and JwkURL are empty the token's "iss" claim
-//                     is inspected for known providers:
-//                       • ends with ".cloudflareaccess.com" → {iss}/cdn-cgi/access/certs
-//                       • ends with ".auth0.com"            → {iss}/.well-known/jwks.json
-//   - Audience:       expected value of the "aud" claim. Pass "" to skip aud
-//                     verification. When non-empty the token must carry an "aud"
-//                     claim that contains this value (string or string array).
+//   - claimUsername:  the claim key whose value to extract from the payload.
+//     Pass "" to skip this check entirely (no error returned).
+//   - key:            the HMAC secret ([]byte) or PEM-encoded public key (RSA/EC).
+//     Pass nil or empty to use automatic JWKS resolution.
+//   - jwkURL:         explicit JWKS endpoint. Used when key is empty.
+//     When both key and jwkURL are empty the token's "iss" claim
+//     is inspected for known providers:
+//   - ends with ".cloudflareaccess.com" → {iss}/cdn-cgi/access/certs
+//   - ends with ".auth0.com"            → {iss}/.well-known/jwks.json
+//   - audience:       expected value of the "aud" claim. Pass "" to skip aud
+//     verification. When non-empty the token must carry an "aud"
+//     claim that contains this value (string or string array).
 //
 // Claim checks performed (in order):
 //  1. Signature verification.
 //  2. "exp" — returns ErrTokenExpired when present and elapsed.
 //  3. "aud" — returns ErrAudienceMismatch when Audience is set and not matched.
-//  4. ClaimUsername extraction.
+//  4. claimUsername extraction.
 //
 // Returns:
-//   - valid: true if the token passes all checks above.
-//   - value: the payload value for ClaimUsername (nil if ClaimUsername == "").
-//   - err:   non-nil on any failure.
-func Verify(tokenString string, ClaimUsername string, Key []byte, JwkURL string, Audience string) (value interface{}, err error) {
+//   - value: the payload value for claimUsername (nil when claimUsername == ""
+//     or on any failure).
+//   - err:   nil only when the token passes all checks above.
+func Verify(tokenString string, claimUsername string, key []byte, jwkURL string, audience string) (value interface{}, err error) {
 	// Parse without validation first so we can inspect headers and claims.
 	unverified, _, err := new(jwt.Parser).ParseUnverified(tokenString, jwt.MapClaims{})
 	if err != nil {
@@ -81,7 +81,7 @@ func Verify(tokenString string, ClaimUsername string, Key []byte, JwkURL string,
 	}
 
 	// Resolve the key material to use for verification.
-	keyFunc, err := resolveKeyFunc(unverified, Key, JwkURL)
+	keyFunc, err := resolveKeyFunc(unverified, key, jwkURL)
 	if err != nil {
 		return nil, err
 	}
@@ -110,20 +110,20 @@ func Verify(tokenString string, ClaimUsername string, Key []byte, JwkURL string,
 	}
 
 	// ── aud ──────────────────────────────────────────────────────────────────
-	if Audience != "" {
-		if err := checkAud(claims, Audience); err != nil {
+	if audience != "" {
+		if err := checkAud(claims, audience); err != nil {
 			return nil, err
 		}
 	}
 
-	// ── ClaimUsername extraction ──────────────────────────────────────────────
-	if ClaimUsername == "" {
+	// ── claimUsername extraction ──────────────────────────────────────────────
+	if claimUsername == "" {
 		return nil, nil
 	}
 
-	val, exists := claims[ClaimUsername]
+	val, exists := claims[claimUsername]
 	if !exists {
-		return nil, fmt.Errorf("%w: %q", ErrClaimNotFound, ClaimUsername)
+		return nil, fmt.Errorf("%w: %q", ErrClaimNotFound, claimUsername)
 	}
 
 	return val, nil
@@ -133,14 +133,14 @@ func Verify(tokenString string, ClaimUsername string, Key []byte, JwkURL string,
 
 // resolveKeyFunc picks the right jwt.Keyfunc based on the supplied arguments
 // and the token's own "iss" claim.
-func resolveKeyFunc(unverified *jwt.Token, Key []byte, JwkURL string) (jwt.Keyfunc, error) {
+func resolveKeyFunc(unverified *jwt.Token, key []byte, jwkURL string) (jwt.Keyfunc, error) {
 	switch {
-	case len(Key) > 0:
-		return staticKeyFunc(Key), nil
+	case len(key) > 0:
+		return staticKeyFunc(key), nil
 
-	case JwkURL != "":
+	case jwkURL != "":
 		kid, _ := unverified.Header["kid"].(string)
-		pubKey, err := globalJWKSCache.getKey(JwkURL, kid)
+		pubKey, err := globalJWKSCache.getKey(jwkURL, kid)
 		if err != nil {
 			return nil, err
 		}
@@ -240,12 +240,12 @@ var (
 // classifyKey inspects the key material. If it parses as a PEM public key it is
 // asymmetric (RSA or EC); otherwise it is treated as a raw HMAC secret.
 // Results are cached by key bytes to avoid re-parsing on every request.
-func classifyKey(raw []byte) (keyKind, interface{}, error) {
+func classifyKey(raw []byte) (keyKind, interface{}) {
 	cacheKey := string(raw)
 	keyClassCacheMu.RLock()
 	if ck, ok := keyClassCache[cacheKey]; ok {
 		keyClassCacheMu.RUnlock()
-		return ck.kind, ck.key, nil
+		return ck.kind, ck.key
 	}
 	keyClassCacheMu.RUnlock()
 
@@ -262,7 +262,7 @@ func classifyKey(raw []byte) (keyKind, interface{}, error) {
 	keyClassCacheMu.Lock()
 	keyClassCache[cacheKey] = ck
 	keyClassCacheMu.Unlock()
-	return ck.kind, ck.key, nil
+	return ck.kind, ck.key
 }
 
 // staticKeyFunc returns a jwt.Keyfunc that pins the signing algorithm family to
@@ -270,7 +270,7 @@ func classifyKey(raw []byte) (keyKind, interface{}, error) {
 // the KEY, never by the token header, which closes the RS256→HS256 confusion
 // attack where a public key is abused as an HMAC secret.
 func staticKeyFunc(raw []byte) jwt.Keyfunc {
-	kind, key, _ := classifyKey(raw)
+	kind, key := classifyKey(raw)
 	return func(token *jwt.Token) (interface{}, error) {
 		switch token.Method.(type) {
 		case *jwt.SigningMethodHMAC:
@@ -391,36 +391,26 @@ func checkAud(claims jwt.MapClaims, expected string) error {
 
 // ── JWK parsing ──────────────────────────────────────────────────────────────
 
-// jwkToPublicKey converts a JWK struct into a Go crypto public key.
+// jwkToPublicKey converts a JWK struct into a Go crypto public key. The struct
+// already carries the decoded fields, so no JSON round-trip is needed.
 func jwkToPublicKey(k jwk) (interface{}, error) {
-	single, err := json.Marshal(k)
-	if err != nil {
-		return nil, fmt.Errorf("re-encoding JWK: %w", err)
-	}
 	switch k.Kty {
 	case "RSA":
-		return parseRSAJWK(single)
+		return parseRSAJWK(k)
 	case "EC":
-		return parseECJWK(single)
+		return parseECJWK(k)
 	default:
 		return nil, fmt.Errorf("unsupported JWK key type: %s", k.Kty)
 	}
 }
 
-// parseRSAJWK decodes a JSON RSA public key.
-func parseRSAJWK(data []byte) (*rsa.PublicKey, error) {
-	var raw struct {
-		N string `json:"n"`
-		E string `json:"e"`
-	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil, err
-	}
-	n, err := base64URLDecodeBigInt(raw.N)
+// parseRSAJWK converts the RSA fields of a JWK into an *rsa.PublicKey.
+func parseRSAJWK(k jwk) (*rsa.PublicKey, error) {
+	n, err := base64URLDecodeBigInt(k.N)
 	if err != nil {
 		return nil, fmt.Errorf("RSA modulus: %w", err)
 	}
-	eBuf, err := base64URLDecodeBytes(raw.E)
+	eBuf, err := base64URLDecodeBytes(k.E)
 	if err != nil {
 		return nil, fmt.Errorf("RSA exponent: %w", err)
 	}
@@ -431,25 +421,17 @@ func parseRSAJWK(data []byte) (*rsa.PublicKey, error) {
 	return &rsa.PublicKey{N: n, E: e}, nil
 }
 
-// parseECJWK decodes a JSON EC public key.
-func parseECJWK(data []byte) (*ecdsa.PublicKey, error) {
-	var raw struct {
-		Crv string `json:"crv"`
-		X   string `json:"x"`
-		Y   string `json:"y"`
-	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil, err
-	}
-	curve, err := curveByName(raw.Crv)
+// parseECJWK converts the EC fields of a JWK into an *ecdsa.PublicKey.
+func parseECJWK(k jwk) (*ecdsa.PublicKey, error) {
+	curve, err := curveByName(k.Crv)
 	if err != nil {
 		return nil, err
 	}
-	x, err := base64URLDecodeBigInt(raw.X)
+	x, err := base64URLDecodeBigInt(k.X)
 	if err != nil {
 		return nil, fmt.Errorf("EC x: %w", err)
 	}
-	y, err := base64URLDecodeBigInt(raw.Y)
+	y, err := base64URLDecodeBigInt(k.Y)
 	if err != nil {
 		return nil, fmt.Errorf("EC y: %w", err)
 	}
