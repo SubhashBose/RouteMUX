@@ -185,7 +185,7 @@ func resolveListenAddress(listen string) (string, error) {
 
 // applyCLI parses os.Args-style slice and overwrites fields in cfg.
 // Routes are accumulated: --route PATH starts a new route context;
-// subsequent --dest/--noTLSverify/--auth/--timeout belong to it.
+// subsequent --dest/--noTLSverify/--http-auth/--timeout belong to it.
 // expandArgs converts --key=value tokens into ["--key", "value"] pairs.
 func expandArgs(in []string) []string {
 	out := make([]string, 0, len(in))
@@ -438,15 +438,15 @@ func applyCLI(cfg *Config, rawArgs []string) error {
 				addToCIDRList(&cfg.IPFilter.blocked, src)
 			}
 			i += 2
-		case "--global-auth":
+		case "--global-http-auth":
 			if i+1 >= len(args) {
-				return fmt.Errorf("--global-auth requires a value")
+				return fmt.Errorf("--global-http-auth requires a value")
 			}
-			a, err := parseAuthString(args[i+1])
+			a, err := parseHTTPAuthString(args[i+1])
 			if err != nil {
-				return fmt.Errorf("--global-auth: %w", err)
+				return fmt.Errorf("--global-http-auth: %w", err)
 			}
-			cfg.GlobalAuth = a
+			cfg.GlobalHTTPAuth = a
 			i += 2
 		case "--vhost":
 			flushVHost() // save previous vhost
@@ -538,23 +538,23 @@ func applyCLI(cfg *Config, rawArgs []string) error {
 			}
 			curRoute.SkipJwtAuth = true
 			i++
-		case "--auth":
+		case "--http-auth":
 			if curRoute == nil {
-				return fmt.Errorf("--auth must follow --route")
+				return fmt.Errorf("--http-auth must follow --route")
 			}
 			if i+1 >= len(args) {
-				return fmt.Errorf("--auth requires a value")
+				return fmt.Errorf("--http-auth requires a value")
 			}
-			curRoute.AuthExplicit = true
+			curRoute.HTTPAuthExplicit = true
 			val := args[i+1]
 			if val == "" {
-				curRoute.Auth = nil // explicit no-auth
+				curRoute.HTTPAuth = nil // explicit no-auth
 			} else {
-				a, err := parseAuthString(val)
+				a, err := parseHTTPAuthString(val)
 				if err != nil {
-					return fmt.Errorf("--auth: %w", err)
+					return fmt.Errorf("--http-auth: %w", err)
 				}
-				curRoute.Auth = a
+				curRoute.HTTPAuth = a
 			}
 			i += 2
 		case "--dest-add-header":
@@ -715,12 +715,12 @@ func parseHeaderString(s string) (name, value string, err error) {
 	return strings.TrimSpace(s[:idx]), strings.TrimSpace(s[idx+1:]), nil
 }
 
-func parseAuthString(s string) (*Auth, error) {
+func parseHTTPAuthString(s string) (*HTTPAuth, error) {
 	parts := strings.SplitN(s, ":", 2)
 	if len(parts) != 2 {
 		return nil, fmt.Errorf("expected USER:PASSWORD, got %q", s)
 	}
-	return &Auth{User: parts[0], Password: parts[1]}, nil
+	return &HTTPAuth{User: parts[0], Password: parts[1]}, nil
 }
 
 func runUpgrade() {
@@ -798,7 +798,7 @@ Global options:
                              /path/to/list.txt refresh=6h
                              https://example.com/list
                              https://example.com/list refresh=12h cache=/path
-  --global-auth U:P        HTTP Basic Auth applied to all routes (format: USER:PASSWORD)
+  --global-http-auth U:P   HTTP Basic HTTPAuth applied to all routes (format: USER:PASSWORD)
 
 Global JWT options:
   --jwt-header KEY         Header key to get JWT token
@@ -844,7 +844,7 @@ Routes:
                                code is optional and defaults to 200 if omitted.
       --load-balancer-mode     Load balancer mode, "round-robin" or "random", (default: random) 
       --noTLSverify            Skip TLS verification for upstream(s)
-      --auth U:P               Per-route Basic Auth (overrides global-auth; "" disables auth)
+      --http-auth U:P          Per-route Basic HTTPAuth (overrides global-auth; "" disables auth)
       --auth-users USER,...    Comma-separated list of JWT usernames allowed on this route
       --skip-jwt-auth          Skip JWT auth for this route
       --timeout DURATION       Total request timeout (e.g. 30s, 2m; default: unbounded)
@@ -893,7 +893,7 @@ Config file (config.yml) example:
     port: 8080
     global-tls-cert: ""
     global-tls-key: ""
-    global-auth: ["USER", "PASSWORD"]
+    global-http-auth: ["USER", "PASSWORD"]
     trust-client-headers: false
     trusted-proxy:
 	  - 192.168.0.0/16
@@ -928,7 +928,7 @@ Config file (config.yml) example:
         "/api/":
            dest: http://localhost:3000/
            noTLSverify: false
-           auth: ["USER", "PASSWORD"]
+           http-auth: ["USER", "PASSWORD"]
            auth-users: ["USER1", "USER2"]
            timeout: 30s
            dest-add-header:

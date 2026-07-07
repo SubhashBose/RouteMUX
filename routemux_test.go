@@ -74,14 +74,14 @@ global:
   port: 9000
   global-tls-cert: /tmp/cert.pem
   global-tls-key: /tmp/key.pem
-  global-auth: ["admin", "pass"]
+  global-http-auth: ["admin", "pass"]
 
 routes:
   /api/:
     dest: http://localhost:3000/v1/
     noTLSverify: true
     timeout: 60s
-    auth: ["user", "pw"]
+    http-auth: ["user", "pw"]
   /static/:
     dest: http://localhost:8000/
 `)
@@ -98,8 +98,8 @@ routes:
 	if cfg.GlobalTLSCert != "/tmp/cert.pem" {
 		t.Errorf("tls-cert = %q", cfg.GlobalTLSCert)
 	}
-	if cfg.GlobalAuth == nil || cfg.GlobalAuth.User != "admin" || cfg.GlobalAuth.Password != "pass" {
-		t.Errorf("global-auth = %+v", cfg.GlobalAuth)
+	if cfg.GlobalHTTPAuth == nil || cfg.GlobalHTTPAuth.User != "admin" || cfg.GlobalHTTPAuth.Password != "pass" {
+		t.Errorf("global-auth = %+v", cfg.GlobalHTTPAuth)
 	}
 	if len(cfg.VHosts[0].Routes) != 2 {
 		t.Fatalf("want 2 routes, got %d", len(cfg.VHosts[0].Routes))
@@ -118,8 +118,8 @@ routes:
 	if api.Timeout != "60s" {
 		t.Errorf("timeout = %q", api.Timeout)
 	}
-	if !api.AuthExplicit || api.Auth == nil || api.Auth.User != "user" {
-		t.Errorf("auth = %+v", api.Auth)
+	if !api.HTTPAuthExplicit || api.HTTPAuth == nil || api.HTTPAuth.User != "user" {
+		t.Errorf("auth = %+v", api.HTTPAuth)
 	}
 }
 
@@ -136,19 +136,19 @@ routes:
 	if cfg.Port != 8080 {
 		t.Errorf("default port = %d, want 8080", cfg.Port)
 	}
-	if cfg.GlobalAuth != nil {
-		t.Errorf("unexpected global-auth: %+v", cfg.GlobalAuth)
+	if cfg.GlobalHTTPAuth != nil {
+		t.Errorf("unexpected global-http-auth: %+v", cfg.GlobalHTTPAuth)
 	}
 }
 
 func TestLoadConfigFile_ExplicitNoAuth(t *testing.T) {
 	path := writeTempConfig(t, `
 global:
-  global-auth: ["admin", "secret"]
+  global-http-auth: ["admin", "secret"]
 routes:
   /public/:
     dest: http://localhost/
-    auth: []
+    http-auth: []
 `)
 	cfg, err := loadConfigFile(path)
 	if err != nil {
@@ -158,18 +158,18 @@ routes:
 	if r == nil {
 		t.Fatal("/public/ route missing")
 	}
-	if !r.AuthExplicit {
-		t.Error("AuthExplicit should be true")
+	if !r.HTTPAuthExplicit {
+		t.Error("HTTPAuthExplicit should be true")
 	}
-	if r.Auth != nil {
-		t.Errorf("Auth should be nil for empty auth list, got %+v", r.Auth)
+	if r.HTTPAuth != nil {
+		t.Errorf("HTTPAuth should be nil for empty auth list, got %+v", r.HTTPAuth)
 	}
 }
 
 func TestLoadConfigFile_BadGlobalAuth(t *testing.T) {
 	path := writeTempConfig(t, `
 global:
-  global-auth: ["onlyone"]
+  global-http-auth: ["onlyone"]
 routes:
   /x/:
     dest: http://localhost/
@@ -197,7 +197,7 @@ func TestCLI_GlobalFlags(t *testing.T) {
 		"--port", "9999",
 		"--global-tls-cert", "/c.pem",
 		"--global-tls-key", "/k.pem",
-		"--global-auth", "admin:secret",
+		"--global-http-auth", "admin:secret",
 		"--route", "/api/",
 		"--dest", "http://backend/",
 	})
@@ -213,8 +213,8 @@ func TestCLI_GlobalFlags(t *testing.T) {
 	if cfg.GlobalTLSCert != "/c.pem" || cfg.GlobalTLSKey != "/k.pem" {
 		t.Errorf("tls = %q %q", cfg.GlobalTLSCert, cfg.GlobalTLSKey)
 	}
-	if cfg.GlobalAuth == nil || cfg.GlobalAuth.User != "admin" || cfg.GlobalAuth.Password != "secret" {
-		t.Errorf("global-auth = %+v", cfg.GlobalAuth)
+	if cfg.GlobalHTTPAuth == nil || cfg.GlobalHTTPAuth.User != "admin" || cfg.GlobalHTTPAuth.Password != "secret" {
+		t.Errorf("global-auth = %+v", cfg.GlobalHTTPAuth)
 	}
 }
 
@@ -227,7 +227,7 @@ func TestCLI_MultipleRoutes(t *testing.T) {
 		"--noTLSverify",
 		"--route", "/b/",
 		"--dest", "http://b/",
-		"--auth", "u:p",
+		"--http-auth", "u:p",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -242,7 +242,7 @@ func TestCLI_MultipleRoutes(t *testing.T) {
 		t.Errorf("route /a/ = %+v", a)
 	}
 	b := cliVH.Routes["/b/"]
-	if b == nil || !b.AuthExplicit || b.Auth == nil || b.Auth.User != "u" || b.Auth.Password != "p" {
+	if b == nil || !b.HTTPAuthExplicit || b.HTTPAuth == nil || b.HTTPAuth.User != "u" || b.HTTPAuth.Password != "p" {
 		t.Errorf("route /b/ = %+v", b)
 	}
 }
@@ -252,17 +252,17 @@ func TestCLI_ExplicitNoAuth(t *testing.T) {
 	err := applyCLI(cfg, []string{
 		"--route", "/pub/",
 		"--dest", "http://pub/",
-		"--auth", "",
+		"--http-auth", "",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	r := cfg.VHosts[len(cfg.VHosts)-1].Routes["/pub/"]
-	if !r.AuthExplicit {
-		t.Error("AuthExplicit should be true")
+	if !r.HTTPAuthExplicit {
+		t.Error("HTTPAuthExplicit should be true")
 	}
-	if r.Auth != nil {
-		t.Error("Auth should be nil for empty --auth")
+	if r.HTTPAuth != nil {
+		t.Error("HTTPAuth should be nil for empty --http-auth")
 	}
 }
 
@@ -394,9 +394,9 @@ func TestRouteHandler_GlobalAuth(t *testing.T) {
 	defer backend.Close()
 
 	cfg := &Config{
-		Port:       8080,
-		GlobalAuth: &Auth{"admin", "secret"},
-		VHosts:     []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/secure/": {Upstreams: []Upstream{mustUpstream(backend.URL+"/", 1)}}}}},
+		Port:           8080,
+		GlobalHTTPAuth: &HTTPAuth{"admin", "secret"},
+		VHosts:         []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/secure/": {Upstreams: []Upstream{mustUpstream(backend.URL+"/", 1)}}}}},
 	}
 	srv, _ := newServer(cfg)
 	ts := httptest.NewServer(srv.state.Load().vhosts[0].mux)
@@ -432,13 +432,13 @@ func TestRouteHandler_RouteAuthOverridesGlobal(t *testing.T) {
 	defer backend.Close()
 
 	cfg := &Config{
-		Port:       8080,
-		GlobalAuth: &Auth{"admin", "secret"},
+		Port:           8080,
+		GlobalHTTPAuth: &HTTPAuth{"admin", "secret"},
 		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{
 			"/public/": {
-				Upstreams:    []Upstream{mustUpstream(backend.URL+"/", 1)},
-				AuthExplicit: true,
-				Auth:         nil, // explicit no-auth overrides global
+				Upstreams:        []Upstream{mustUpstream(backend.URL+"/", 1)},
+				HTTPAuthExplicit: true,
+				HTTPAuth:         nil, // explicit no-auth overrides global
 			},
 		}}},
 	}
@@ -459,13 +459,13 @@ func TestRouteHandler_PerRouteAuth(t *testing.T) {
 	defer backend.Close()
 
 	cfg := &Config{
-		Port:       8080,
-		GlobalAuth: &Auth{"admin", "global"},
+		Port:           8080,
+		GlobalHTTPAuth: &HTTPAuth{"admin", "global"},
 		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{
 			"/special/": {
-				Upstreams:    []Upstream{mustUpstream(backend.URL+"/", 1)},
-				AuthExplicit: true,
-				Auth:         &Auth{"special", "pass"},
+				Upstreams:        []Upstream{mustUpstream(backend.URL+"/", 1)},
+				HTTPAuthExplicit: true,
+				HTTPAuth:         &HTTPAuth{"special", "pass"},
 			},
 		}}},
 	}
@@ -870,9 +870,9 @@ func TestRouteHandler_ProxyAuthStripsAuthorization(t *testing.T) {
 	defer backend.Close()
 
 	cfg := &Config{
-		Port:       8080,
-		GlobalAuth: &Auth{"admin", "secret"},
-		VHosts:     []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL+"/", 1)}}}}},
+		Port:           8080,
+		GlobalHTTPAuth: &HTTPAuth{"admin", "secret"},
+		VHosts:         []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/api/": {Upstreams: []Upstream{mustUpstream(backend.URL+"/", 1)}}}}},
 	}
 	srv, _ := newServer(cfg)
 	ts := httptest.NewServer(srv.state.Load().vhosts[0].mux)
@@ -925,8 +925,8 @@ func TestRouteHandler_ProxyAuthWithAddHeaderAuthOverride(t *testing.T) {
 	defer backend.Close()
 
 	cfg := &Config{
-		Port:       8080,
-		GlobalAuth: &Auth{"admin", "secret"},
+		Port:           8080,
+		GlobalHTTPAuth: &HTTPAuth{"admin", "secret"},
 		VHosts: []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{
 			"/api/": {
 				Upstreams:        []Upstream{mustUpstream(backend.URL+"/", 1)},
@@ -1653,9 +1653,9 @@ func TestStatusRoute_EmptyBody(t *testing.T) {
 
 func TestStatusRoute_WithAuth(t *testing.T) {
 	cfg := &Config{
-		Port:       8080,
-		GlobalAuth: &Auth{User: "admin", Password: "secret"},
-		VHosts:     []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/health/": {StatusCode: 200, StatusText: "healthy"}}}},
+		Port:           8080,
+		GlobalHTTPAuth: &HTTPAuth{User: "admin", Password: "secret"},
+		VHosts:         []VHost{{Domains: []string{"*"}, Routes: map[string]*RouteConfig{"/health/": {StatusCode: 200, StatusText: "healthy"}}}},
 	}
 	srv, _ := newServer(cfg)
 	ts := httptest.NewServer(srv.state.Load().vhosts[0].mux)
@@ -3343,9 +3343,9 @@ func TestWebSocket_Auth(t *testing.T) {
 
 	cfg := makeConfig(8080, map[string]*RouteConfig{
 		"/ws/": {
-			Upstreams:    []Upstream{mustUpstream(upstream.URL+"/", 1)},
-			Auth:         &Auth{User: "user", Password: "pass"},
-			AuthExplicit: true,
+			Upstreams:        []Upstream{mustUpstream(upstream.URL+"/", 1)},
+			HTTPAuth:         &HTTPAuth{User: "user", Password: "pass"},
+			HTTPAuthExplicit: true,
 		},
 	})
 	srv, _ := newServer(cfg)
@@ -6968,5 +6968,49 @@ vhosts:
 	rc := cfg.VHosts[0].Routes["/api/"]
 	if !rc.NeedsJWTUser {
 		t.Error("YAML dest-add-header ${jwt_user} should set NeedsJWTUser")
+	}
+}
+
+// ---- breaking rename: auth → http-auth / global-auth → global-http-auth ----
+
+func TestCLI_OldAuthFlagsRemoved(t *testing.T) {
+	// The old flags must now be rejected as unknown.
+	if _, err := parseAll([]string{"--global-auth", "u:p", "--route", "/", "--dest", "http://x/"}); err == nil {
+		t.Error("--global-auth should no longer be accepted")
+	}
+	if _, err := parseAll([]string{"--route", "/", "--dest", "http://x/", "--auth", "u:p"}); err == nil {
+		t.Error("--auth should no longer be accepted")
+	}
+}
+
+func TestYAML_OldAuthKeysRemoved(t *testing.T) {
+	dir := t.TempDir()
+	oldGlobal := filepath.Join(dir, "g.yml")
+	os.WriteFile(oldGlobal, []byte(`
+global:
+  port: 8080
+  global-auth: ["u", "p"]
+vhosts:
+  - domains: ["*"]
+    routes:
+      /: {dest: "http://localhost:1/"}
+`), 0o644)
+	if _, err := loadConfigFile(oldGlobal); err == nil {
+		t.Error("old global-auth YAML key should be rejected by strict YAML")
+	}
+
+	oldRoute := filepath.Join(dir, "r.yml")
+	os.WriteFile(oldRoute, []byte(`
+global:
+  port: 8080
+vhosts:
+  - domains: ["*"]
+    routes:
+      /:
+        dest: "http://localhost:1/"
+        auth: ["u", "p"]
+`), 0o644)
+	if _, err := loadConfigFile(oldRoute); err == nil {
+		t.Error("old per-route auth YAML key should be rejected by strict YAML")
 	}
 }

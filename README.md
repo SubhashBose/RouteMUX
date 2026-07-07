@@ -121,7 +121,7 @@ global:
   port: 8080        # Port to listen on (default: 8080)
   # global-tls-cert: /path/to/cert.pem
   # global-tls-key:  /path/to/key.pem
-  global-auth: ["admin", "s3cr3t"]   # HTTP Basic Auth applied to all routes
+  global-http-auth: ["admin", "s3cr3t"]   # HTTP Basic Auth applied to all routes
   # trust-client-headers: true    # (default: false) Trust X-Forwarded-* from all connections
   trusted-proxies:              # Trust X-Forwarded-* from these IPs only
     - 10.0.0.0/8
@@ -143,8 +143,8 @@ vhosts:
         timeout: 30s                       # Optional total request timeout (e.g. 30s, 2m; default: unbounded)
         dial-timeout: 5s                   # Optional upstream connect timeout (e.g. 5s; default: 5s)
         # noTLSverify: true                # Skip TLS certificate verification for upstream
-        # auth: ["user", "pass"]           # Per-route auth (overrides global-auth)
-        # auth: []                         # Explicitly disable auth for this route
+        # http-auth: ["user", "pass"]           # Per-route auth (overrides global-http-auth)
+        # http-auth: []                         # Explicitly disable auth for this route
         dest-add-header:
           X-Proxy: RouteMUX               # Add or overwrite a header sent to upstream
           X-Built-URL: ${scheme}://${header.host}${request_uri} #combined text and variable
@@ -201,7 +201,7 @@ Environment variable substitution is globally supported in configuration file. `
 ```yaml
 global:
   port: ${env.HTTP_PORT:8080}
-  global-auth: ["${env.AUTH_USER}", "${env.AUTH_PASS}"]
+  global-http-auth: ["${env.AUTH_USER}", "${env.AUTH_PASS}"]
 
 routes:
   /:
@@ -238,7 +238,7 @@ routemux [global options] \
 | `--jwt-jwk-url URL` | JWKS endpoint URL |
 | `--jwt-aud AUDIENCE` | Expected audience claim |
 | `--jwt-default-allow-all` | Allow any authenticated user on routes with no `auth-users` |
-| `--global-auth USER:PASS` | HTTP Basic Auth for all routes |
+| `--global-http-auth USER:PASS` | HTTP Basic Auth for all routes |
 | `--trust-client-headers`  | Trust X-Forwarded-* headers from client (default: false) |
 | `--trusted-proxy ENTRY`   | Trust X-Forwarded-* headers from these IP/CIDR/file/URL list (repeatable) |
 | `--ip-filter-allow ENTRY` | Allow an IP, CIDR, file, or URL (repeatable) |
@@ -260,8 +260,8 @@ Following are the route options must follow `--route`. The `--route` + route opt
 | `--dest URL` | Upstream destination (repeatable — multiple `--dest` flags with URL and optional weight=<N> create a load-balanced route). Use `STATUS <code> [text]` for a static response. Use `FILE [code] <path>` to serve a static file, or `FILE-BROWSE <dir>` to serve a directory. Use `unix:///sock:/path` or `unixs:///sock:/path` for Unix-socket upstreams. |
 | `--load-balancer-mode MODE` | Load balancer mode: `random` (default) or `round-robin` |
 | `--noTLSverify` | Skip TLS certificate verification for this upstream |
-| `--auth USER:PASS` | Per-route Basic Auth (overrides `--global-auth`) |
-| `--auth ""` | Explicitly disable auth for this route |
+| `--http-auth USER:PASS` | Per-route Basic Auth (overrides `--global-http-auth`) |
+| `--http-auth ""` | Explicitly disable auth for this route |
 | `--timeout DURATION` | Total request timeout (e.g. `30s`, `2m`; default: unbounded) |
 | `--dial-timeout DURATION` | Upstream connect timeout (e.g. `5s`; default: `5s`) |
 | `--dest-add-header "Name: Value"` | Add or overwrite a header (repeatable). Value can be plain text, supported variables or combination of both |
@@ -319,9 +319,9 @@ routemux \
 
 # Global auth, public route
 routemux \
-  --global-auth admin:secret \
+  --global-http-auth admin:secret \
   --route /api/ --dest http://localhost:3000/ \
-  --route /public/ --dest http://localhost:4000/ --auth ""
+  --route /public/ --dest http://localhost:4000/ --http-auth ""
 
 # Header manipulation with wildcard and variables
 routemux \
@@ -545,16 +545,16 @@ HTTP Basic Auth can be configured at two levels:
 
 ```yaml
 global:
-  global-auth: ["admin", "secret"]   # applies to all routes
+  global-http-auth: ["admin", "secret"]   # applies to all routes
 
 routes:
   /api/:
     dest: http://localhost:3000/
-    auth: ["apiuser", "apipass"]      # overrides global-auth for this route
+    http-auth: ["apiuser", "apipass"]      # overrides global-http-auth for this route
 
   /public/:
     dest: http://localhost:4000/
-    auth: []                          # disables auth for this route even with global-auth set
+    http-auth: []                          # disables auth for this route even with global-http-auth set
 ```
 
 When proxy auth is active on a route, the `Authorization` header is **automatically stripped** before forwarding to the upstream — the upstream never sees the proxy credentials. You can still set your own `Authorization` header to the upstream via `dest-add-header`.
@@ -835,7 +835,7 @@ The format is `STATUS <code> [text]` where:
 - `<code>` is any valid HTTP status code (100–599)
 - `[text]` is an optional response body (empty is fine)
 
-Auth still applies to STATUS routes — a route with `global-auth` or per-route `auth` will require credentials before returning the static response.
+Auth still applies to STATUS routes — a route with `global-http-auth` or per-route `http-auth` will require credentials before returning the static response.
 
 STATUS is only valid as a single `dest` string. Mixing STATUS with other upstreams in a list is an error.
 
@@ -918,7 +918,7 @@ routemux \
 
 - FILE is only valid as a single `dest` value. Mixing FILE with other upstreams in a list is an error.
 - The file is read on every request — no restart or reload needed when the file changes.
-- Auth (`global-auth`, per-route `auth`) still applies to FILE routes.
+- Auth (`global-http-auth`, per-route `http-auth`) still applies to FILE routes.
 - `client-add-header` and `client-del-header` work on FILE routes.
 
 
@@ -962,7 +962,7 @@ Directory serving uses Go's built-in file server, which provides:
 
 - A status code supplied with a directory path (e.g. `FILE-BROWSE 404 /dir`) is **ignored** and a warning is logged — the file server sets the status itself.
 - `client-add-header`, `client-del-header`, and the `Via: RouteMUX` header apply to directory routes.
-- Auth (`global-auth`, per-route `auth`, JWT) applies to directory routes.
+- Auth (`global-http-auth`, per-route `http-auth`, JWT) applies to directory routes.
 
 ### CLI
 

@@ -346,24 +346,24 @@ func (fs noListFS) Open(name string) (http.File, error) {
 	return f, nil
 }
 
-// routeAuth returns the effective Basic Auth credentials for a route: the
+// routeHTTPAuth returns the effective Basic HTTPAuth credentials for a route: the
 // route's own auth when set explicitly (even if cleared), otherwise the global.
-func routeAuth(rc *RouteConfig, cfg *Config) *Auth {
-	if rc.AuthExplicit {
-		return rc.Auth // may be nil (auth explicitly disabled)
+func routeHTTPAuth(rc *RouteConfig, cfg *Config) *HTTPAuth {
+	if rc.HTTPAuthExplicit {
+		return rc.HTTPAuth // may be nil (auth explicitly disabled)
 	}
-	return cfg.GlobalAuth
+	return cfg.GlobalHTTPAuth
 }
 
-// wrapAuth applies the route's authentication layers to h: HTTP Basic Auth
+// wrapAuth applies the route's authentication layers to h: HTTP Basic HTTPAuth
 // (route-level or global) and JWT. Shared by FILE, STATUS, and proxy routes.
 func wrapAuth(h http.Handler, rc *RouteConfig, cfg *Config) http.Handler {
-	h = requireBasicAuth(routeAuth(rc, cfg), h)
+	h = requireBasicAuth(routeHTTPAuth(rc, cfg), h)
 	return jwtMiddleware(h, rc, cfg.JWTAuth)
 }
 
 // buildFileHandler builds the handler for a FILE / FILE-BROWSE route: either a
-// directory server or a single file read per request. Auth is applied by the
+// directory server or a single file read per request. HTTPAuth is applied by the
 // caller.
 func buildFileHandler(routePath string, rc *RouteConfig) http.Handler {
 	if rc.StaticDirListing || isDir(rc.StaticFilePath) {
@@ -408,7 +408,7 @@ func buildFileHandler(routePath string, rc *RouteConfig) http.Handler {
 }
 
 // buildStatusHandler builds the handler for a STATUS route (fixed code + body).
-// Auth is applied by the caller.
+// HTTPAuth is applied by the caller.
 func buildStatusHandler(rc *RouteConfig) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// cfg is nil here: STATUS routes do not run the Director, so
@@ -503,7 +503,7 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 	}
 
 	// -- Effective auth for this route (the Director strips Authorization when set) --
-	effectiveAuth := routeAuth(rc, cfg)
+	effectiveAuth := routeHTTPAuth(rc, cfg)
 
 	// -- Reverse proxy --
 	proxy := &httputil.ReverseProxy{
@@ -955,9 +955,9 @@ func closeConnection(w http.ResponseWriter) {
 	w.WriteHeader(http.StatusBadRequest)
 }
 
-// requireBasicAuth wraps handler h with HTTP Basic Auth enforcement.
+// requireBasicAuth wraps handler h with HTTP Basic HTTPAuth enforcement.
 // If auth is nil, h is returned unchanged.
-func requireBasicAuth(auth *Auth, h http.Handler) http.Handler {
+func requireBasicAuth(auth *HTTPAuth, h http.Handler) http.Handler {
 	if auth == nil {
 		return h
 	}
@@ -970,9 +970,9 @@ func requireBasicAuth(auth *Auth, h http.Handler) http.Handler {
 	})
 }
 
-// checkBasicAuth returns true if the request carries valid Basic Auth credentials.
+// checkBasicAuth returns true if the request carries valid Basic HTTPAuth credentials.
 // Otherwise, it returns false and writes unauthorized response with WWW-Authenticate header.
-func checkBasicAuth(w http.ResponseWriter, r *http.Request, auth *Auth) bool {
+func checkBasicAuth(w http.ResponseWriter, r *http.Request, auth *HTTPAuth) bool {
 	user, pass, ok := r.BasicAuth()
 	valid := ok && user == auth.User && pass == auth.Password
 	if !valid {

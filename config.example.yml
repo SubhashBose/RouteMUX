@@ -15,7 +15,7 @@ global:
   #  directory-url: ...               # Optional: override the ACME directory (staging/private CA)
   #  ca-root-file: /path/ca.pem       # Optional: trust this CA for the ACME endpoint (test servers)
   #  insecure-skip-verify: false      # Optional: skip ACME endpoint TLS verify (TESTING ONLY)
-  global-auth: ["admin", "s3cr3t"]   # HTTP Basic Auth for all routes
+  global-http-auth: ["admin", "s3cr3t"]   # HTTP Basic Auth for all routes
   #trust-client-headers: true    # Trust X-Forwarded-* headers for all connections
   trusted-proxies:               # Trust X-Forwarded-* headers only for these IPs/CIDRs
     # --- Private IP ranges
@@ -66,7 +66,7 @@ vhosts:
         dest: http://localhost:3000/v1/
         timeout: 30s
         #noTLSverify: true
-        auth: ["apiuser", "apipass"]   # overrides global-auth for this route
+        http-auth: ["apiuser", "apipass"]   # overrides global-http-auth for this route
         #auth-users: ["user1", "user2"]   # JWT authenticated users for this route
         skip-jwt-auth: true            # skip JWT authentication for this route
         dest-add-header:                # add-header supersedes delete-header
@@ -106,15 +106,15 @@ vhosts:
 
       /health/:
         dest: STATUS 200 Health is OK
-        auth:   # empty or [] disable global auth
+        http-auth:   # empty or [] disable global auth
         client-add-header:
           Cache-Control: no-store
           X-Served-By: RouteMUX
 
-      # Public route — explicitly disables HTTP auth even when global-auth is set:
+      # Public route — explicitly disables HTTP auth even when global-http-auth is set:
       # /public/:
       #   dest: http://localhost:9000/
-      #   auth: []
+      #   http-auth: []
       
       # HTTP 302 redirection using static response and client header manipulation
       /redirect/:

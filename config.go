@@ -100,7 +100,7 @@ type Config struct {
 	Port               int
 	GlobalTLSCert      string
 	GlobalTLSKey       string
-	GlobalAuth         *Auth
+	GlobalHTTPAuth     *HTTPAuth
 	TrustClientHeaders bool
 	VHosts             []VHost         // ordered list; matched top-to-bottom per request
 	IPFilter           *IPFilter       // nil = no IP filtering
@@ -143,8 +143,8 @@ type VHostTLS struct {
 	RenewBefore string // e.g. "30d"; empty = default (1/3 lifetime)
 }
 
-// Auth holds HTTP Basic Auth credentials.
-type Auth struct {
+// HTTPAuth holds HTTP Basic HTTPAuth credentials.
+type HTTPAuth struct {
 	User     string
 	Password string
 }
@@ -166,8 +166,8 @@ type RouteConfig struct {
 	StaticFilePath    string                       // non-empty: serve this file or directory
 	StaticDirListing  bool                         // true: enable directory listing (path ends with *)
 	NoTLSVerify       bool                         // skip TLS verification for all upstreams
-	Auth              *Auth                        // nil = inherit global-auth; explicitly cleared = no auth
-	AuthExplicit      bool                         // true when auth was set explicitly (even as empty)
+	HTTPAuth          *HTTPAuth                    // nil = inherit global-auth; explicitly cleared = no auth
+	HTTPAuthExplicit  bool                         // true when auth was set explicitly (even as empty)
 	Timeout           string                       // e.g. "30s", "2m" (total request timeout; empty = unbounded)
 	DialTimeout       string                       // e.g. "5s" (upstream connect timeout; empty = default 5s)
 	ParsedAddHeaders  map[string]parsedHeaderValue // compiled dest-dest-add-header values (parsed at startup)
@@ -251,7 +251,7 @@ type fileGlobal struct {
 	Port               int                  `yaml:"port"`
 	GlobalTLSCert      string               `yaml:"global-tls-cert"`
 	GlobalTLSKey       string               `yaml:"global-tls-key"`
-	GlobalAuth         []string             `yaml:"global-auth"` // ["USER", "PASSWORD"]
+	GlobalHTTPAuth     []string             `yaml:"global-http-auth"` // ["USER", "PASSWORD"]
 	TrustClientHeaders bool                 `yaml:"trust-client-headers"`
 	IPFilterCfg        *IPFilterConfig      `yaml:"ip-filter"`
 	TrustedProxiesCfg  TrustedProxiesConfig `yaml:"trusted-proxies"`
@@ -273,7 +273,7 @@ type fileACME struct {
 type fileRoute struct {
 	Dest             destValue         `yaml:"dest"` // string or []string — custom unmarshaler
 	NoTLSVerify      bool              `yaml:"noTLSverify"`
-	Auth             []string          `yaml:"auth"` // ["USER", "PASSWORD"] or absent
+	HTTPAuth         []string          `yaml:"http-auth"` // ["USER", "PASSWORD"] or absent
 	Timeout          string            `yaml:"timeout"`
 	DialTimeout      string            `yaml:"dial-timeout"`
 	LBMode           string            `yaml:"load-balancer-mode"`
@@ -284,8 +284,8 @@ type fileRoute struct {
 	AuthUsers        []string          `yaml:"auth-users"`
 	SkipJwtAuth      bool              `yaml:"skip-jwt-auth"`
 
-	// authPresent records whether the "auth" key existed in the YAML at all.
-	authPresent bool
+	// httpAuthPresent records whether the "http-auth" key existed in the YAML at all.
+	httpAuthPresent bool
 }
 
 // destValue holds the raw dest strings before they are parsed into Upstreams.
@@ -312,7 +312,7 @@ func (d *destValue) UnmarshalYAML(value *yaml.Node) error {
 }
 
 // UnmarshalYAML implements yaml.Unmarshaler so we can detect whether the
-// "auth" key was present in the document (even when its value is empty/null).
+// "http-auth" key was present in the document (even when its value is empty/null).
 func (r *fileRoute) UnmarshalYAML(value *yaml.Node) error {
 	// Check for unknown keys before decoding — catches typos early.
 	if err := checkUnknownFields(value, reflect.TypeOf(fileRoute{})); err != nil {
@@ -326,11 +326,11 @@ func (r *fileRoute) UnmarshalYAML(value *yaml.Node) error {
 	}
 	*r = fileRoute(tmp)
 
-	// Walk the mapping node's key-value pairs to detect "auth" key presence.
+	// Walk the mapping node's key-value pairs to detect "http-auth" key presence.
 	if value.Kind == yaml.MappingNode {
 		for i := 0; i+1 < len(value.Content); i += 2 {
-			if value.Content[i].Value == "auth" {
-				r.authPresent = true
+			if value.Content[i].Value == "http-auth" {
+				r.httpAuthPresent = true
 				break
 			}
 		}
@@ -512,12 +512,12 @@ func loadConfigFile(path string) (*Config, error) {
 		cfg.TrustedProxies = tp
 	}
 
-	if len(fc.Global.GlobalAuth) == 2 {
-		cfg.GlobalAuth = &Auth{
-			User:     fc.Global.GlobalAuth[0],
-			Password: fc.Global.GlobalAuth[1],
+	if len(fc.Global.GlobalHTTPAuth) == 2 {
+		cfg.GlobalHTTPAuth = &HTTPAuth{
+			User:     fc.Global.GlobalHTTPAuth[0],
+			Password: fc.Global.GlobalHTTPAuth[1],
 		}
-	} else if len(fc.Global.GlobalAuth) != 0 {
+	} else if len(fc.Global.GlobalHTTPAuth) != 0 {
 		return nil, fmt.Errorf("global-auth must be a two-element list [USER, PASSWORD]")
 	}
 
@@ -566,7 +566,7 @@ func parseFileVHost(fileRoutes map[string]fileRoute, domains []string) (VHost, e
 			Timeout:           fr.Timeout,
 			DialTimeout:       fr.DialTimeout,
 			LBMode:            normalizeLBMode(fr.LBMode),
-			AuthExplicit:      fr.authPresent,
+			HTTPAuthExplicit:  fr.httpAuthPresent,
 			ParsedAddHeaders:  compiledHeaders(fr.AddHeaders),
 			DeleteHeaders:     fr.DeleteHeaders,
 			DeleteHasWildcard: hasWildcard(fr.DeleteHeaders),
@@ -586,10 +586,10 @@ func parseFileVHost(fileRoutes map[string]fileRoute, domains []string) (VHost, e
 		if err := applyDestEntries(rc, fr.Dest.entries, path); err != nil {
 			return VHost{}, err
 		}
-		if fr.authPresent {
-			if len(fr.Auth) == 2 {
-				rc.Auth = &Auth{User: fr.Auth[0], Password: fr.Auth[1]}
-			} else if len(fr.Auth) != 0 {
+		if fr.httpAuthPresent {
+			if len(fr.HTTPAuth) == 2 {
+				rc.HTTPAuth = &HTTPAuth{User: fr.HTTPAuth[0], Password: fr.HTTPAuth[1]}
+			} else if len(fr.HTTPAuth) != 0 {
 				return VHost{}, fmt.Errorf("route %q: auth must be a two-element list [USER, PASSWORD]", path)
 			}
 		}
