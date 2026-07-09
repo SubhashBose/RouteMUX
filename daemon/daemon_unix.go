@@ -89,6 +89,10 @@ const pidFileEnvVar = "DAEMON_PID_FILE"
 const watchdogEnvVar = "DAEMON_IS_WATCHDOG"
 const workerEnvVar = "DAEMON_IS_WORKER"
 
+// Marks the detached process that actually performs a restart's stop+start,
+// so it isn't re-detached again. See handleRestart.
+const restartDetachedEnvVar = "DAEMON_RESTART_DETACHED"
+
 // set to true when watchdog in shutting down state
 var watchdogShuttingDown atomic.Bool
 
@@ -506,6 +510,23 @@ func handleStop(cfg *Config) bool {
 }
 
 func handleRestart(cfg *Config) {
+	if os.Getenv(restartDetachedEnvVar) != "1" {
+		exe, _ := filepath.Abs(mustExecutable())
+		cmd := exec.Command(exe, os.Args[1:]...)
+		cmd.Env = append(os.Environ(), restartDetachedEnvVar+"=1")
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // escape the terminal's session
+		cmd.Stdin = nil
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Start(); err != nil {
+			cfg.logger.Fatalf("%s: failed to launch detached restart: %v", cfg.AppName, err)
+		}
+		_ = cmd.Wait()
+		return
+	}
+	// Don't leak the marker into the restarted daemon or the target program.
+	os.Unsetenv(restartDetachedEnvVar)
+
 	_, mode, _ := readPID(cfg.pidFile)
 	if mode == "" {
 		mode = "start" // fallback

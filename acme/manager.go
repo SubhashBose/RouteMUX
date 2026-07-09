@@ -194,7 +194,7 @@ func (m *Manager) Start() error {
 	if len(needIssue) > 0 {
 		go func() {
 			for _, v := range needIssue {
-				log.Printf("acme: obtaining certificate for %v", v.Domains)
+				log.Printf("acme: obtaining certificate for %v from %s", v.Domains, v.AcmeSource)
 				if err := m.issueAndStore(m.ctx, v); err != nil {
 					log.Printf("acme: initial issuance for %v failed: %v (will retry)", v.Domains, err)
 				}

@@ -766,7 +766,7 @@ func printHelp() {
 
 Can be be fully configured via CLI options, or a YAML config file, or combining both.
 
-Command lineUsage:
+Command line Usage:
   routemux [global options] \
             --route PATH --dest URL [route options] \
            [--route PATH2 --dest URL [route options]] ...
