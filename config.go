@@ -97,6 +97,7 @@ type JWTAuth struct {
 // Config is the top-level runtime configuration structure.
 type Config struct {
 	Listen             string
+	SocketPerm         *SocketPerm // nil = leave Unix socket permissions as created (umask)
 	Port               int
 	GlobalTLSCert      string
 	GlobalTLSKey       string
@@ -248,6 +249,7 @@ type fileVHostTLS struct {
 
 type fileGlobal struct {
 	Listen             string               `yaml:"listen"`
+	SocketPerm         string               `yaml:"socket-perm"` // "mode[:user[:group]]" for unix: listeners
 	Port               int                  `yaml:"port"`
 	GlobalTLSCert      string               `yaml:"global-tls-cert"`
 	GlobalTLSKey       string               `yaml:"global-tls-key"`
@@ -481,6 +483,14 @@ func loadConfigFile(path string) (*Config, error) {
 	}
 	if cfg.Port == 0 {
 		cfg.Port = 8080
+	}
+
+	if fc.Global.SocketPerm != "" {
+		sp, err := parseSocketPerm(fc.Global.SocketPerm)
+		if err != nil {
+			return nil, err
+		}
+		cfg.SocketPerm = sp
 	}
 
 	if fc.Global.IPFilterCfg != nil {

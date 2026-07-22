@@ -118,6 +118,7 @@ RouteMUX looks for `config.yml` in this order:
 ```yaml
 global:
   listen:           # IP address, interface name (e.g. 192.168.1.10, eth0, lo), or unix://<path.sock>. Empty = all interfaces.
+  socket-perm:      # Unix socket permissions as mode[:user[:group]], each part optional (e.g. 0660, 0660:www-data:www, ::www-data)
   port: 8080        # Port to listen on (default: 8080)
   # global-tls-cert: /path/to/cert.pem
   # global-tls-key:  /path/to/key.pem
@@ -228,6 +229,7 @@ routemux [global options] \
 |------|-------------|
 | `--config PATH` | Config file path. Pass `""` to disable config file loading. |
 | `--listen ADDR` | IP address or interface name or Unix socket (unix://<socket-path>) to listen on (default: all interfaces) |
+| `--socket-perm SPEC` | Permissions for the Unix socket, as `mode[:user[:group]]` — each part optional (e.g. `660`, `0660:www-data:www`, `::www-data`). Default: created per the process umask |
 | `--port PORT` | Port to listen on (default: `8080`) |
 | `--global-tls-cert FILE` | TLS certificate file — enables HTTPS |
 | `--globl-tls-key FILE` | TLS key file — required when `--tls-cert` is set |
@@ -991,6 +993,35 @@ global:
 ```
 
 Both `unix:///path.sock` and `unix:/path.sock` forms are accepted. A stale socket file from an unclean shutdown is removed automatically before binding.
+
+#### Socket permissions
+
+By default the socket is created with whatever the process **umask** allows — the kernel applies `0777 &^ umask`. Connecting to a Unix socket requires **write** permission on the socket file, so a typical umask of `022` yields `0755`, which grants write only to the owner and owning group, which may be wider than intended. Use `socket-perm` to set it explicitly:
+
+```yaml
+global:
+  listen: unix:///var/run/routemux.sock
+  socket-perm: "0660::www-data"     # rw for owner and the www-data group, nothing for others
+```
+
+The value is `mode[:user[:group]]` and **every part is optional**:
+
+| Value | Effect |
+|-------|--------|
+| `660` or `0660` | Mode only; ownership unchanged (leading zero optional, always read as octal) |
+| `0660:www-data` | Mode and owning user |
+| `0660:www-data:www` | Mode, owning user and owning group |
+| `0660::www-data` | Mode and owning group; user unchanged |
+| `:www-data` | Owning user only; mode left to the umask |
+| `::www-data` | Owning group only |
+
+User and group may be given as names or numeric IDs. Anything omitted is left unchanged.
+
+> **Which bit matters:** connecting to a Unix socket requires the **write** bit, not the read bit. `0660` therefore lets the owner and the owning group connect and denies everyone else — the usual choice. Whereas `600` only let the owner connect. Similarly, commonly used `775`, though look permissive but due to write bit only owner+group can connect, while `755` only owner can connect.
+
+The permissions are applied immediately after the socket is created and before any connection is served, and ownership is changed before the mode so the socket is never briefly accessible to the wrong group. If applying them fails (for example, an unknown group, or changing owner without sufficient privileges) RouteMUX **exits with an error rather than serving on a socket with unintended permissions**. Note that changing the owning *user* generally requires root; setting only the group and mode is the usual pattern for granting a web server access.
+
+> `socket-perm` is applied once when the socket is created at startup, so changing it requires a restart — a config file change hot reload will warn and keep the running value.
 
 ### Upstreams over a Unix socket
 

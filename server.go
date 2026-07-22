@@ -802,6 +802,16 @@ func (s *server) run() error {
 			_ = os.Remove(sockPath)
 		}
 		ln, err = net.Listen("unix", sockPath)
+		if err == nil && state.cfg.SocketPerm.isSet() {
+			// Apply ownership/mode before serving: until this runs the socket
+			// carries whatever the umask allowed, so failing here must abort
+			// startup rather than serve on a wrongly-permissioned socket.
+			if perr := state.cfg.SocketPerm.apply(sockPath); perr != nil {
+				ln.Close()
+				return perr
+			}
+			log.Printf("Unix socket %s: %s", sockPath, state.cfg.SocketPerm)
+		}
 	} else {
 		ln, err = net.Listen("tcp", addr)
 	}
@@ -1116,6 +1126,12 @@ func (s *server) Reload(fileMod bool) {
 		log.Printf("Reload: Port or Listen address changes require a full restart. Reverting to current values: %s:%d", oldState.cfg.Listen, oldState.cfg.Port)
 		newCfg.Port = oldState.cfg.Port
 		newCfg.Listen = oldState.cfg.Listen
+	}
+	// socket-perm is applied once, right after the socket is created at
+	// startup, so a changed spec cannot take effect on reload.
+	if socketPermSpec(newCfg.SocketPerm) != socketPermSpec(oldState.cfg.SocketPerm) {
+		log.Printf("Reload: socket-perm changes require a full restart (the Unix socket is created and permissioned at startup). Reverting to the running value.")
+		newCfg.SocketPerm = oldState.cfg.SocketPerm
 	}
 	if newCfg.GlobalTLSCert != oldState.cfg.GlobalTLSCert || newCfg.GlobalTLSKey != oldState.cfg.GlobalTLSKey {
 		log.Printf("Reload: TLS cert/key path changes require a full restart (file contents at the existing paths are re-read on every reload, but paths cannot change). Reverting to current paths.")

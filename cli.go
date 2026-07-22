@@ -288,6 +288,16 @@ func applyCLI(cfg *Config, rawArgs []string) error {
 			}
 			cfg.Listen = args[i+1]
 			i += 2
+		case "--socket-perm":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--socket-perm requires a value")
+			}
+			sp, err := parseSocketPerm(args[i+1])
+			if err != nil {
+				return err
+			}
+			cfg.SocketPerm = sp
+			i += 2
 		case "--port":
 			if i+1 >= len(args) {
 				return fmt.Errorf("--port requires a value")
@@ -776,6 +786,8 @@ Global options:
                            ./config.yml or ~/.config/routemux/config.yml)
   --listen ADDR            IP address or interface name or Unix socket (unix://<socket-path>)
                            to listen on (default: all interfaces)
+  --socket-perm SPEC       Permissions for the Unix socket, as mode[:user[:group]]; each part
+                           optional, e.g. 660, 0660::www-data, ::www (default: as per umask)
   --port PORT              Port to listen on (default: 8080)
   --global-tls-cert FILE   Global TLS certificate file (enables HTTPS; fallback for SNI)
   --global-tls-key  FILE   Global TLS key file (enables HTTPS)
@@ -825,7 +837,8 @@ Vhosts (optional: this can be skipped if vhosts are not needed, can jump directl
                                If --tls-acme-source is specified, then --tls-cert/--tls-key
                                becomes storage paths for ACME, otherwise static cert/key is
                                served from these files.
-      --tls-acme-renewal DUR   renew this long before expiry (e.g. 30d)
+      --tls-acme-renewal DUR   renew this long before expiry (e.g. 30d). Default is when 1/3
+                               of the cert lifetime remains.
 
 Routes:
   --route PATH             Define a route (e.g. /api/) (repeatable under a vhost)
@@ -841,7 +854,10 @@ Routes:
              or STATUS_CODE    --dest STATUS <code> [text] is also supported, where a HTTP
                                response code is returned with optional static text body.
              or FILE           --dest FILE [code] <path> serves a static file. The HTTP response
-                               code is optional and defaults to 200 if omitted.
+                               code is optional and defaults to 200 if omitted. If <path> is a
+                               directory it will serve as file server, with dir listing disabled.
+             or FILE-BROWSE    --dest FILE-BROWSE <directory> also serves a file server, but with
+							   directory listing enabled.
       --load-balancer-mode     Load balancer mode, "round-robin" or "random", (default: random) 
       --noTLSverify            Skip TLS verification for upstream(s)
       --http-auth U:P          Per-route Basic HTTPAuth (overrides global-auth; "" disables auth)
@@ -891,6 +907,7 @@ Config file (config.yml) example:
   global:
     listen: ""
     port: 8080
+    socket-perm: 0660::www-data
     global-tls-cert: ""
     global-tls-key: ""
     global-http-auth: ["USER", "PASSWORD"]
