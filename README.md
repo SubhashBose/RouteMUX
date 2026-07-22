@@ -992,7 +992,16 @@ global:
   listen: unix:///var/run/routemux.sock
 ```
 
-Both `unix:///path.sock` and `unix:/path.sock` forms are accepted. A stale socket file from an unclean shutdown is removed automatically before binding.
+Both the `unix:<socket-path>` and `unix://<socket-path>` forms are accepted. A stale socket file from an unclean shutdown is removed automatically before binding. The path after the scheme is used **verbatim** — a leading `/` means an absolute path, its absence means a relative path:
+
+| Listen value | Socket path |
+|--------------|-------------|
+| `unix:/var/run/routemux.sock` | `/var/run/routemux.sock` (absolute) |
+| `unix:///var/run/routemux.sock` | `/var/run/routemux.sock` (absolute) |
+| `unix:routemux.sock` | `routemux.sock` (relative) |
+| `unix://routemux.sock` | `routemux.sock` (relative) |
+
+The same rule applies to Unix-socket upstreams (`unix://<socket-path>:<http-path>`)
 
 #### Socket permissions
 
@@ -1036,9 +1045,9 @@ routes:
     dest: unixs:///var/run/secure.sock:/api/     # TLS over the socket
 ```
 
-The format is `unix://<socket-path>:<http-path>`; the HTTP path defaults to `/` if omitted. Unix-socket upstreams can be mixed with TCP upstreams and used in load-balanced routes.
+The format is `unix://<socket-path>:<http-path>` (or `unix:<socket-path>:<http-path>`); the HTTP path defaults to `/` if omitted. Unix-socket upstreams can be mixed with TCP upstreams and used in load-balanced routes.
 
-**Note on TLS (`unixs://`):** because the connection targets a socket file rather than a hostname, the upstream certificate's hostname cannot be verified — the socket itself is the trust boundary. RouteMUX therefore skips hostname verification for `unixs://` upstreams.
+**Note on TLS (`unixs://` or `unixs:`):** because the connection targets a socket file rather than a hostname, the upstream certificate's hostname cannot be verified — the socket itself is the trust boundary. RouteMUX therefore skips hostname verification for `unixs://` upstreams.
 
 ### CLI
 

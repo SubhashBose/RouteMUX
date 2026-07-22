@@ -120,14 +120,22 @@ func isUnixListen(listen string) bool {
 }
 
 // unixSocketPath extracts the filesystem path from a unix: listen address.
-// "unix:/run/r.sock" → "/run/r.sock"; "unix:///run/r.sock" → "/run/r.sock".
+// The path after the scheme is used verbatim, so both relative and absolute
+// paths are preserved in either spelling:
+//
+//	unix:rel.sock       → rel.sock    (relative)
+//	unix:/abs.sock      → /abs.sock   (absolute)
+//	unix://rel.sock     → rel.sock    (relative)
+//	unix:///abs.sock    → /abs.sock   (absolute)
+//
+// In the "//" authority form the first path segment would normally be a host;
+// for Unix sockets there is no host, so "unix://" is simply a prefix and what
+// follows it is the path.
 func unixSocketPath(listen string) string {
 	p := strings.TrimPrefix(listen, "unix:")
-	// Collapse the "//" authority form: "///run/x" → "/run/x".
+	// Collapse the "//" authority form. What remains is the path exactly as
+	// written — a leading "/" means absolute, its absence means relative.
 	p = strings.TrimPrefix(p, "//")
-	if !strings.HasPrefix(p, "/") {
-		p = "/" + p
-	}
 	return p
 }
 

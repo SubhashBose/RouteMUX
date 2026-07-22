@@ -5070,10 +5070,18 @@ func TestJWT_Validation_JWKURLWithoutAud_OK(t *testing.T) {
 // ---- Unix socket support tests ----
 
 func TestUnix_ParseListenAddress(t *testing.T) {
+	// The path after the scheme is verbatim: a leading "/" is absolute, its
+	// absence is relative. Both the "unix:" and "unix://" spellings support
+	// each form.
 	cases := map[string]string{
+		// absolute
 		"unix:/run/r.sock":   "/run/r.sock",
 		"unix:///run/r.sock": "/run/r.sock",
-		"unix://run/r.sock":  "/run/r.sock",
+		// relative
+		"unix:r.sock":       "r.sock",
+		"unix://r.sock":     "r.sock",
+		"unix:sub/r.sock":   "sub/r.sock",
+		"unix://sub/r.sock": "sub/r.sock",
 	}
 	for in, want := range cases {
 		if !isUnixListen(in) {
@@ -7012,5 +7020,127 @@ vhosts:
 `), 0o644)
 	if _, err := loadConfigFile(oldRoute); err == nil {
 		t.Error("old per-route auth YAML key should be rejected by strict YAML")
+	}
+}
+
+func TestUnix_RelativeSocketPathsPreserved(t *testing.T) {
+	// Regression: relative socket paths were silently made absolute, so
+	// "unix:app.sock" bound /app.sock at the filesystem root instead of
+	// app.sock in the working directory.
+	for in, want := range map[string]string{
+		"unix:app.sock":     "app.sock",
+		"unix://app.sock":   "app.sock",
+		"unix:./app.sock":   "./app.sock",
+		"unix://./app.sock": "./app.sock",
+		"unix:/app.sock":    "/app.sock",
+		"unix:///app.sock":  "/app.sock",
+	} {
+		if got := unixSocketPath(in); got != want {
+			t.Errorf("unixSocketPath(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestUnix_UpstreamRelativeSocketPath(t *testing.T) {
+	// Relative upstream socket paths must survive parsing too.
+	_, sock, ok, err := parseUnixUpstream("unix://backend.sock:/api/")
+	if err != nil || !ok {
+		t.Fatalf("parse failed: ok=%v err=%v", ok, err)
+	}
+	if sock != "backend.sock" {
+		t.Errorf("socket = %q, want backend.sock (relative)", sock)
+	}
+	// Absolute still works.
+	_, sock, ok, err = parseUnixUpstream("unix:///var/run/backend.sock:/api/")
+	if err != nil || !ok {
+		t.Fatalf("parse failed: ok=%v err=%v", ok, err)
+	}
+	if sock != "/var/run/backend.sock" {
+		t.Errorf("socket = %q, want /var/run/backend.sock", sock)
+	}
+}
+
+// TestUnix_RelativeSocketActuallyBinds verifies end-to-end that a relative
+// path binds in the working directory, not at the filesystem root.
+func TestUnix_RelativeSocketActuallyBinds(t *testing.T) {
+	dir := t.TempDir()
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(oldWD)
+
+	path := unixSocketPath("unix:rel.sock")
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatalf("binding relative socket %q failed: %v", path, err)
+	}
+	defer ln.Close()
+
+	// It must exist inside the temp dir, not at /rel.sock.
+	if _, err := os.Stat(filepath.Join(dir, "rel.sock")); err != nil {
+		t.Errorf("socket should have been created in the working directory: %v", err)
+	}
+}
+
+func TestUnix_UpstreamAllSchemeSpellings(t *testing.T) {
+	// All four spellings must parse, with the socket path taken verbatim.
+	cases := []struct {
+		in         string
+		wantScheme string
+		wantSock   string
+		wantPath   string
+	}{
+		{"unix:///run/b.sock:/api/", "http", "/run/b.sock", "/api/"},
+		{"unix:/run/b.sock:/api/", "http", "/run/b.sock", "/api/"},
+		{"unixs:///run/b.sock:/api/", "https", "/run/b.sock", "/api/"},
+		{"unixs:/run/b.sock:/api/", "https", "/run/b.sock", "/api/"},
+		// relative forms
+		{"unix://b.sock:/api/", "http", "b.sock", "/api/"},
+		{"unix:b.sock:/api/", "http", "b.sock", "/api/"},
+		{"unixs://b.sock:/api/", "https", "b.sock", "/api/"},
+		{"unixs:b.sock:/api/", "https", "b.sock", "/api/"},
+		// no http path → defaults to /
+		{"unix:/run/b.sock", "http", "/run/b.sock", "/"},
+		{"unixs:/run/b.sock", "https", "/run/b.sock", "/"},
+	}
+	for _, tt := range cases {
+		u, sock, ok, err := parseUnixUpstream(tt.in)
+		if err != nil || !ok {
+			t.Errorf("%q: ok=%v err=%v", tt.in, ok, err)
+			continue
+		}
+		if u.Scheme != tt.wantScheme {
+			t.Errorf("%q: scheme = %q, want %q", tt.in, u.Scheme, tt.wantScheme)
+		}
+		if sock != tt.wantSock {
+			t.Errorf("%q: socket = %q, want %q", tt.in, sock, tt.wantSock)
+		}
+		if u.Path != tt.wantPath {
+			t.Errorf("%q: http path = %q, want %q", tt.in, u.Path, tt.wantPath)
+		}
+	}
+
+	// Ordering hazard: "unixs://x" also carries the prefix "unixs:", so if the
+	// bare case were tested first the leading "//" would survive into the path
+	// ("//b.sock" instead of "b.sock"). Same for unix:// vs unix:.
+	for _, in := range []string{"unixs://b.sock:/p", "unix://b.sock:/p"} {
+		if _, sock, ok, _ := parseUnixUpstream(in); !ok || sock != "b.sock" {
+			t.Errorf("%q: socket = %q, want b.sock (the // must not leak into the path)", in, sock)
+		}
+	}
+
+	// unixs and unix need no ordering care — the colon in "unix:" means a
+	// "unixs:" string never matches it — but assert the scheme mapping anyway.
+	if u, _, _, _ := parseUnixUpstream("unixs:/s.sock:/p"); u.Scheme != "https" {
+		t.Errorf("unixs: must map to https, got %q", u.Scheme)
+	}
+
+	// Non-unix upstreams still decline.
+	if _, _, ok, _ := parseUnixUpstream("http://example.com/"); ok {
+		t.Error("http:// should not be treated as a unix upstream")
 	}
 }

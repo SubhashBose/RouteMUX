@@ -709,8 +709,15 @@ func guessContentType(filename string) string {
 // parseUnixUpstream recognises a Unix-socket upstream and returns a synthetic
 // HTTP(S) URL plus the socket path. Format:
 //
-//	unix:///path/to.sock:/httppath    → plain HTTP over the socket
-//	unixs:///path/to.sock:/httppath   → TLS  over the socket
+//	unix:///path/to.sock:/httppath    → plain HTTP over the socket (absolute)
+//	unix:/path/to.sock:/httppath      → same, single-colon spelling
+//	unixs:///path/to.sock:/httppath   → TLS  over the socket (absolute)
+//	unixs:/path/to.sock:/httppath     → same, single-colon spelling
+//	unix://rel/to.sock:/httppath      → relative socket path
+//	unix:rel/to.sock:/httppath        → same, single-colon spelling
+//
+// As with the listen address, the socket path after the scheme is taken
+// verbatim: a leading "/" means absolute, its absence means relative.
 //
 // The socket path and the HTTP path are separated by the LAST colon (socket
 // paths do not normally contain colons). The returned url.URL uses a synthetic
@@ -719,11 +726,19 @@ func guessContentType(filename string) string {
 // Returns ok=false if s is not a unix upstream.
 func parseUnixUpstream(s string) (parsedURL *url.URL, socketPath string, ok bool, err error) {
 	var scheme, rest string
+	// Both spellings are accepted for each scheme: "unix://path" and
+	// "unix:path". The "//" is stripped when present, and what remains is the
+	// path verbatim — leading "/" means absolute, otherwise relative. Order
+	// matters.
 	switch {
 	case strings.HasPrefix(s, "unixs://"):
 		scheme, rest = "https", s[len("unixs://"):]
+	case strings.HasPrefix(s, "unixs:"):
+		scheme, rest = "https", s[len("unixs:"):]
 	case strings.HasPrefix(s, "unix://"):
 		scheme, rest = "http", s[len("unix://"):]
+	case strings.HasPrefix(s, "unix:"):
+		scheme, rest = "http", s[len("unix:"):]
 	default:
 		return nil, "", false, nil
 	}
@@ -738,9 +753,9 @@ func parseUnixUpstream(s string) (parsedURL *url.URL, socketPath string, ok bool
 	if socketPath == "" {
 		return nil, "", false, fmt.Errorf("unix upstream %q: empty socket path", s)
 	}
-	if !strings.HasPrefix(socketPath, "/") {
-		socketPath = "/" + socketPath
-	}
+	// The socket path is used exactly as written: "unix://rel.sock:/p" is a
+	// relative path, "unix:///abs.sock:/p" is absolute. Only the HTTP path is
+	// normalised, since an HTTP request path must be rooted.
 	if !strings.HasPrefix(httpPath, "/") {
 		httpPath = "/" + httpPath
 	}
