@@ -69,18 +69,27 @@ func applyDeleteHeaders(h http.Header, deleteList []string, hasWild bool) {
 
 // xffRoundTripper wraps an http.RoundTripper to fix X-Forwarded-For handling.
 //
-// Go's ReverseProxy always appends the client IP after the Director returns,
-// causing duplication. By the time RoundTrip is called, the fix is simple:
+// Go's ReverseProxy appends the client IP after the Director returns, causing
+// duplication. By the time RoundTrip is called, the fix is simple:
 //
 //   - 2+ IPs: Director built the chain, ReverseProxy appended one extra.
 //     Strip the last entry.
 //   - 1 IP:  Director deleted XFF (dest-del-header config), ReverseProxy
 //     re-added just the client IP. Delete it entirely.
+//
+// That append is conditional on ReverseProxy being able to parse a client IP
+// from RemoteAddr. On a Unix socket there is no peer address, the append never
+// happens, and stripping would silently delete a legitimate entry from the
+// front proxy's chain — so skipUnix disables the correction entirely.
 type xffRoundTripper struct {
-	base http.RoundTripper
+	base     http.RoundTripper
+	skipUnix bool // true when listening on a Unix socket: nothing was appended
 }
 
 func (t *xffRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.skipUnix {
+		return t.base.RoundTrip(req)
+	}
 	if vals, ok := req.Header["X-Forwarded-For"]; ok && len(vals) == 1 {
 		combined := vals[0]
 		if idx := strings.LastIndex(combined, ", "); idx >= 0 {

@@ -1,8 +1,9 @@
 global:
   listen: lo         # IP or interface (e.g. 192.168.1.10, eth0, lo) or unix socket (unix:///run/routemux.sock).
                      # Empty = all interfaces
-  #socket-perm: "0660::www-data"  # Unix socket permissions: mode[:user[:group]], each part optional (default: umask)
   port: ${env.HTTP_PORT:9090}  # HTTP listen Port value obtained from env variable, with optional default
+  #socket-perm: "0660::www-data"      # Unix socket permissions: mode[:user[:group]], each part optional (default: umask)
+  #socket-dummy-addr: "127.0.0.1:0"   # Mimic this IP:Port as the client address for unix socket connections
   #global-tls-cert: /path/to/cert.pem
   #global-tls-key:  /path/to/key.pem
   #acme:                              # Automatic TLS certificates (ACME / Let's Encrypt, ZeroSSL, ...)

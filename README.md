@@ -119,6 +119,7 @@ RouteMUX looks for `config.yml` in this order:
 global:
   listen:           # IP address, interface name (e.g. 192.168.1.10, eth0, lo), or unix://<path.sock>. Empty = all interfaces.
   socket-perm:      # Unix socket permissions as mode[:user[:group]], each part optional (e.g. 0660, 0660:www-data:www, ::www-data)
+  socket-dummy-addr: # Client address (IP:Port) reported for unix socket connections, e.g. 127.0.0.1:0 (default: none)
   port: 8080        # Port to listen on (default: 8080)
   # global-tls-cert: /path/to/cert.pem
   # global-tls-key:  /path/to/key.pem
@@ -230,6 +231,7 @@ routemux [global options] \
 | `--config PATH` | Config file path. Pass `""` to disable config file loading. |
 | `--listen ADDR` | IP address or interface name or Unix socket (unix://<socket-path>) to listen on (default: all interfaces) |
 | `--socket-perm SPEC` | Permissions for the Unix socket, as `mode[:user[:group]]` — each part optional (e.g. `660`, `0660:www-data:www`, `::www-data`). Default: created per the process umask |
+| `--socket-dummy-addr ADDR` | Client address (`IP:Port`) reported for Unix socket connections, e.g. `127.0.0.1:0`. Makes requests behave like TCP connections from that address. Default: no substitution |
 | `--port PORT` | Port to listen on (default: `8080`) |
 | `--global-tls-cert FILE` | TLS certificate file — enables HTTPS |
 | `--globl-tls-key FILE` | TLS key file — required when `--tls-cert` is set |
@@ -1002,6 +1004,38 @@ Both the `unix:<socket-path>` and `unix://<socket-path>` forms are accepted. A s
 | `unix://routemux.sock` | `routemux.sock` (relative) |
 
 The same rule applies to Unix-socket upstreams (`unix://<socket-path>:<http-path>`)
+
+#### Client identity on a Unix socket
+
+A Unix socket connection has **no peer IP address** — the client is necessarily a process on the same host, reached through the filesystem. RouteMUX therefore treats a Unix-socket listener as sitting behind a trusted front proxy:
+
+- **`X-Forwarded-For` is passed through untouched.** RouteMUX has no client IP to append, so the chain the front proxy sent reaches the upstream exactly as received. `${trusted_xff}` is evaluated against that same unmodified chain.
+- **`X-Forwarded-Host` and `X-Forwarded-Proto` are left as received** — the front proxy knows the real public host and scheme; RouteMUX does not.
+- **`${remote_addr}` and `${remote_port}` are empty**, since there is no peer address to report.
+- **`ip-filter` is rejected at startup.** There is no client IP to match, so logically every request would be denied by filter, so this combination would be rejected at startup. Use `socket-perm` to control who may connect to the socket; that is the meaningful access control at this transport.
+
+Because the incoming `X-Forwarded-*` headers are trusted, ensure only the intended front proxy can reach the socket — set `socket-perm` accordingly. Any local process able to connect can otherwise present whatever client IP it likes.
+
+#### Mimic a dummy client address instead: `socket-dummy-addr`
+
+If an upstream or a feature needs a real client address, or needs a drop in proxy replacement from local IP to unix socket connection, `socket-dummy-addr` supplies one:
+
+```yaml
+global:
+  listen: unix:///var/run/routemux.sock
+  socket-dummy-addr: "127.0.0.1:0"   # IP:Port reported as the client address
+```
+
+Setting it **replaces the [client identity](#client-identity-on-a-unix-socket) behaviour above entirely** — there is no hybrid. This internally mimics like a real connecting address and RouteMUX processes exactly as if it were a TCP connection from that address:
+
+- `ip-filter` matches against it (and is therefore no longer rejected at startup)
+- `trusted-proxies` evaluates it, so the `X-Forwarded-*` headers are trusted or overwritten by the normal rules rather than always passed through
+- `${remote_addr}` and `${remote_port}` resolve to it
+- it is appended to `X-Forwarded-For` as a normal proxy hop
+
+The value must be `IP:Port`; use port `0` if the port is irrelevant. It is only valid on a Unix socket listener.
+
+> The address is **synthetic** — every connection to the socket reports the same one, whoever made it. An `ip-filter` matching it therefore allows everything or nothing; it is not access control. Use `socket-perm` to control who may connect. Similarly, if you place the dummy address in `trusted-proxies`, every local process able to reach the socket is trusted to set `X-Forwarded-*`.
 
 #### Socket permissions
 

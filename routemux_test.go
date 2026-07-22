@@ -7144,3 +7144,404 @@ func TestUnix_UpstreamAllSchemeSpellings(t *testing.T) {
 		t.Error("http:// should not be treated as a unix upstream")
 	}
 }
+
+// ---- Unix socket listener: XFF, trust, and IP filter ----
+
+// unixTestServer starts srv.handler() on a temporary unix socket and returns a
+// client that dials it.
+func unixTestServer(t *testing.T, srv *server) (*http.Client, func()) {
+	t.Helper()
+	dir := t.TempDir()
+	sock := filepath.Join(dir, "rmx.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go http.Serve(ln, srv.handler()) //nolint:errcheck
+	c := &http.Client{Transport: &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", sock)
+		},
+	}}
+	return c, func() { ln.Close() }
+}
+
+func TestUnixListener_XFFChainPassedThrough(t *testing.T) {
+	// Regression: Go's ReverseProxy cannot parse a client IP from a unix
+	// socket, so it appends nothing. xffRoundTripper's duplicate-strip must be
+	// skipped, or it deletes a legitimate entry from the front proxy's chain
+	// (2-hop lost its last hop; 1-hop was deleted entirely).
+	type seen struct{ xff, xfh, xfp string }
+	ch := make(chan seen, 4)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		v := ""
+		if _, ok := r.Header["X-Forwarded-For"]; ok {
+			v = r.Header.Get("X-Forwarded-For")
+		}
+		ch <- seen{v, r.Header.Get("X-Forwarded-Host"), r.Header.Get("X-Forwarded-Proto")}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/r/": {Upstreams: []Upstream{mustUpstream(backend.URL+"/", 1)}},
+	})
+	cfg.Listen = "unix:/tmp/rmx-test.sock"
+	srv, err := newServer(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !srv.unixListener {
+		t.Fatal("expected unixListener to be true")
+	}
+	c, closeFn := unixTestServer(t, srv)
+	defer closeFn()
+
+	send := func(xff string) seen {
+		req, _ := http.NewRequest("GET", "http://front.example/r/", nil)
+		if xff != "" {
+			req.Header.Set("X-Forwarded-For", xff)
+		}
+		req.Header.Set("X-Forwarded-Host", "public.example")
+		req.Header.Set("X-Forwarded-Proto", "https")
+		resp, err := c.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, resp.Body) //nolint:errcheck
+		resp.Body.Close()
+		return <-ch
+	}
+
+	if got := send("203.0.113.9, 70.41.3.18"); got.xff != "203.0.113.9, 70.41.3.18" {
+		t.Errorf("multi-hop chain = %q, want it passed through untouched", got.xff)
+	}
+	if got := send("203.0.113.9"); got.xff != "203.0.113.9" {
+		t.Errorf("single-hop chain = %q, want 203.0.113.9 (must not be deleted)", got.xff)
+	}
+
+	// The front proxy owns X-Forwarded-Host/Proto — RouteMUX must not overwrite
+	// them with the socket-side values.
+	got := send("203.0.113.9")
+	if got.xfh != "public.example" || got.xfp != "https" {
+		t.Errorf("X-Forwarded-Host/Proto = %q / %q, want them left untouched", got.xfh, got.xfp)
+	}
+}
+
+func TestUnixListener_TrustedXFFVariable(t *testing.T) {
+	// ${trusted_xff} must evaluate against the unappended incoming chain.
+	var gotVar string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotVar = r.Header.Get("X-Real-Client")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/r/": {
+			Upstreams:        []Upstream{mustUpstream(backend.URL+"/", 1)},
+			ParsedAddHeaders: map[string]parsedHeaderValue{"X-Real-Client": compileHeaderValue("${trusted_xff}")},
+			AddHasVars:       true,
+			NeedsTrustedXFF:  true,
+		},
+	})
+	cfg.Listen = "unix:/tmp/rmx-test.sock"
+	cfg.TrustClientHeaders = true // evaluate the chain rather than the (absent) peer
+	srv, err := newServer(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, closeFn := unixTestServer(t, srv)
+	defer closeFn()
+
+	req, _ := http.NewRequest("GET", "http://front.example/r/", nil)
+	req.Header.Set("X-Forwarded-For", "203.0.113.9, 70.41.3.18")
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body) //nolint:errcheck
+	resp.Body.Close()
+	if gotVar == "" {
+		t.Error("${trusted_xff} should resolve from the incoming chain on a unix listener")
+	}
+	t.Logf("${trusted_xff} = %q", gotVar)
+}
+
+func TestUnixListener_IPFilterRejectedByValidate(t *testing.T) {
+	// An IP filter has no client IP to match on a unix socket, so every request
+	// would be silently closed. Fail at startup instead.
+	f, err := buildIPFilter(&IPFilterConfig{Allowed: []string{"127.0.0.1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/": {Upstreams: []Upstream{mustUpstream("http://localhost:1/", 1)}},
+	})
+	cfg.Listen = "unix:/tmp/rmx-test.sock"
+	cfg.IPFilter = f
+
+	// Rejected by validate(), so --validate catches it too (not just startup).
+	err = cfg.validate()
+	if err == nil {
+		t.Fatal("ip-filter with a unix listener must be rejected by validate()")
+	}
+	if !strings.Contains(err.Error(), "socket-perm") {
+		t.Errorf("error should point at socket-perm as the alternative, got: %v", err)
+	}
+
+	// The same filter on a TCP listener is fine.
+	cfg.Listen = ""
+	if err := cfg.validate(); err != nil {
+		t.Errorf("ip-filter on a TCP listener should be accepted, got %v", err)
+	}
+}
+
+// ---- socket-dummy-addr ----
+
+func TestSocketDummyAddr_Validate(t *testing.T) {
+	base := func() *Config {
+		c := makeConfig(8080, map[string]*RouteConfig{
+			"/": {Upstreams: []Upstream{mustUpstream("http://localhost:1/", 1)}},
+		})
+		c.Listen = "unix:/tmp/rmx-test.sock"
+		return c
+	}
+	// Valid forms.
+	for _, addr := range []string{"127.0.0.1:0", "10.0.0.5:8080", "[::1]:0"} {
+		c := base()
+		c.SocketDummyAddr = addr
+		if err := c.validate(); err != nil {
+			t.Errorf("socket-dummy-addr %q should be valid: %v", addr, err)
+		}
+	}
+	// Invalid forms.
+	for _, addr := range []string{"127.0.0.1", "notanip:0", "127.0.0.1:abc", ":0"} {
+		c := base()
+		c.SocketDummyAddr = addr
+		if err := c.validate(); err == nil {
+			t.Errorf("socket-dummy-addr %q should be rejected", addr)
+		}
+	}
+	// Only meaningful on a unix listener.
+	c := base()
+	c.Listen = ""
+	c.SocketDummyAddr = "127.0.0.1:0"
+	if err := c.validate(); err == nil {
+		t.Error("socket-dummy-addr on a TCP listener should be rejected")
+	}
+}
+
+func TestSocketDummyAddr_DisablesUnixSpecialCasing(t *testing.T) {
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/": {Upstreams: []Upstream{mustUpstream("http://localhost:1/", 1)}},
+	})
+	cfg.Listen = "unix:/tmp/rmx-test.sock"
+
+	srv, err := newServer(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !srv.unixListener {
+		t.Error("without socket-dummy-addr, unixListener must be true")
+	}
+
+	cfg.SocketDummyAddr = "127.0.0.1:0"
+	srv2, err := newServer(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if srv2.unixListener {
+		t.Error("socket-dummy-addr must disable the unix special-casing")
+	}
+	if srv2.socketDummyAddr != "127.0.0.1:0" {
+		t.Errorf("socketDummyAddr = %q", srv2.socketDummyAddr)
+	}
+}
+
+func TestSocketDummyAddr_IPFilterAllowedWithDummy(t *testing.T) {
+	// With a dummy address there IS an IP to match, so ip-filter is no longer
+	// rejected — the check only fires when nothing can supply an address.
+	f, err := buildIPFilter(&IPFilterConfig{Allowed: []string{"127.0.0.1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/": {Upstreams: []Upstream{mustUpstream("http://localhost:1/", 1)}},
+	})
+	cfg.Listen = "unix:/tmp/rmx-test.sock"
+	cfg.IPFilter = f
+	if err := cfg.validate(); err == nil {
+		t.Error("ip-filter without a dummy address must still be rejected")
+	}
+	cfg.SocketDummyAddr = "127.0.0.1:0"
+	if err := cfg.validate(); err != nil {
+		t.Errorf("ip-filter WITH a dummy address should be accepted: %v", err)
+	}
+}
+
+// TestSocketDummyAddr_BehavesLikeTCP is the substantive test: with a dummy
+// address, every subsystem that reads RemoteAddr must see it.
+func TestSocketDummyAddr_BehavesLikeTCP(t *testing.T) {
+	type seen struct{ xff, remote string }
+	ch := make(chan seen, 4)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		v := ""
+		if _, ok := r.Header["X-Forwarded-For"]; ok {
+			v = r.Header.Get("X-Forwarded-For")
+		}
+		ch <- seen{v, r.Header.Get("X-Seen-Remote")}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	f, err := buildIPFilter(&IPFilterConfig{Allowed: []string{"10.9.9.9"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/r/": {
+			Upstreams:        []Upstream{mustUpstream(backend.URL+"/", 1)},
+			ParsedAddHeaders: map[string]parsedHeaderValue{"X-Seen-Remote": compileHeaderValue("${remote_addr}")},
+			AddHasVars:       true,
+		},
+	})
+	cfg.Listen = "unix:/tmp/rmx-test.sock"
+	cfg.SocketDummyAddr = "10.9.9.9:4242"
+	cfg.IPFilter = f
+	if err := cfg.validate(); err != nil {
+		t.Fatal(err)
+	}
+	srv, err := newServer(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, closeFn := unixTestServer(t, srv)
+	defer closeFn()
+
+	req, _ := http.NewRequest("GET", "http://front.example/r/", nil)
+	req.Header.Set("X-Forwarded-For", "203.0.113.9")
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body) //nolint:errcheck
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d — the IP filter should have allowed the dummy address", resp.StatusCode)
+	}
+	got := <-ch
+
+	// ${remote_addr} resolves to the dummy IP.
+	if got.remote != "10.9.9.9" {
+		t.Errorf("${remote_addr} = %q, want 10.9.9.9", got.remote)
+	}
+	// Untrusted (dummy IP is not in trusted-proxies): the client's chain is
+	// discarded and replaced by the dummy IP — exactly the TCP behaviour.
+	if got.xff != "10.9.9.9" {
+		t.Errorf("X-Forwarded-For = %q, want 10.9.9.9 (untrusted TCP semantics: chain replaced, no duplicate)", got.xff)
+	}
+}
+
+func TestSocketDummyAddr_IPFilterCanDeny(t *testing.T) {
+	// A dummy address outside the allow-list is denied, like any TCP client.
+	f, err := buildIPFilter(&IPFilterConfig{Allowed: []string{"10.1.1.1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/r/": {Upstreams: []Upstream{mustUpstream("http://localhost:1/", 1)}},
+	})
+	cfg.Listen = "unix:/tmp/rmx-test.sock"
+	cfg.SocketDummyAddr = "10.9.9.9:0" // not in the allow-list
+	cfg.IPFilter = f
+	srv, err := newServer(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, closeFn := unixTestServer(t, srv)
+	defer closeFn()
+
+	_, err = c.Get("http://front.example/r/")
+	if err == nil {
+		t.Error("a dummy address outside the allow-list should be rejected (connection closed)")
+	}
+}
+
+func TestSocketDummyAddr_ConfigPlumbing(t *testing.T) {
+	// CLI
+	cfg, err := parseAll([]string{
+		"--listen", "unix:/tmp/x.sock", "--socket-dummy-addr", "127.0.0.1:0",
+		"--route", "/", "--dest", "http://x/",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SocketDummyAddr != "127.0.0.1:0" {
+		t.Errorf("CLI: SocketDummyAddr = %q", cfg.SocketDummyAddr)
+	}
+
+	// YAML
+	dir := t.TempDir()
+	p := filepath.Join(dir, "c.yml")
+	os.WriteFile(p, []byte(`
+global:
+  listen: unix:/tmp/x.sock
+  socket-dummy-addr: "10.0.0.7:1234"
+  port: 8080
+vhosts:
+  - domains: ["*"]
+    routes:
+      /: {dest: "http://localhost:1/"}
+`), 0o644) //nolint:errcheck
+	fcfg, err := loadConfigFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fcfg.SocketDummyAddr != "10.0.0.7:1234" {
+		t.Errorf("YAML: SocketDummyAddr = %q", fcfg.SocketDummyAddr)
+	}
+	if err := fcfg.validate(); err != nil {
+		t.Errorf("validate: %v", err)
+	}
+}
+
+func TestSocketDummyAddr_UnixTrustModelNotApplied(t *testing.T) {
+	// With a dummy address the unix "trust the front proxy" model must NOT
+	// apply: X-Forwarded-Host/Proto are overwritten as for any untrusted TCP
+	// client, rather than passed through.
+	ch := make(chan [2]string, 2)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ch <- [2]string{r.Header.Get("X-Forwarded-Host"), r.Header.Get("X-Forwarded-Proto")}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	cfg := makeConfig(8080, map[string]*RouteConfig{
+		"/r/": {Upstreams: []Upstream{mustUpstream(backend.URL+"/", 1)}},
+	})
+	cfg.Listen = "unix:/tmp/rmx-test.sock"
+	cfg.SocketDummyAddr = "10.9.9.9:0"
+	srv, err := newServer(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, closeFn := unixTestServer(t, srv)
+	defer closeFn()
+
+	req, _ := http.NewRequest("GET", "http://front.example/r/", nil)
+	req.Header.Set("X-Forwarded-Host", "public.example")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body) //nolint:errcheck
+	resp.Body.Close()
+
+	got := <-ch
+	if got[0] == "public.example" {
+		t.Error("with socket-dummy-addr the untrusted TCP model applies; X-Forwarded-Host should be overwritten, not passed through")
+	}
+	t.Logf("X-Forwarded-Host=%q X-Forwarded-Proto=%q (overwritten, as for an untrusted TCP client)", got[0], got[1])
+}

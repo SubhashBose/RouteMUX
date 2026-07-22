@@ -29,6 +29,23 @@ type server struct {
 	state  atomic.Pointer[serverState]
 	bindIP string // resolved from cfg.Listen (does not change on reload)
 
+	// unixListener is true when this server listens on a Unix domain socket
+	// AND no socket-dummy-addr is configured. Fixed at startup (Listen cannot
+	// change on reload). A Unix socket peer is necessarily a process on the
+	// same host and has no IP address at all, so this changes three things:
+	// the connection is treated as a trusted proxy hop (the front proxy owns
+	// the X-Forwarded-* headers), Go's ReverseProxy does not append a client IP
+	// (it cannot parse one), and the IP filter has nothing to match against.
+	//
+	// socket-dummy-addr opts out of all of that: RemoteAddr is replaced with
+	// the configured address, so the request is processed exactly like a TCP
+	// connection from that address and none of the special-casing applies.
+	unixListener bool
+
+	// socketDummyAddr, when set, replaces RemoteAddr for every request on a
+	// Unix listener. Empty means no substitution.
+	socketDummyAddr string
+
 	// tlsMgr manages all per-vhost TLS — static certificates and ACME
 	// auto-issuance — and answers SNI via GetCertificate. nil when no vhost
 	// configures TLS. It persists across reloads so renewals keep running.
@@ -71,7 +88,11 @@ func newServer(cfg *Config) (*server, error) {
 		return nil, err
 	}
 
-	s := &server{bindIP: bindIP}
+	s := &server{
+		bindIP:          bindIP,
+		unixListener:    isUnixListen(cfg.Listen) && cfg.SocketDummyAddr == "",
+		socketDummyAddr: cfg.SocketDummyAddr,
+	}
 	vhosts, singleMux, err := s.compileVHosts(cfg)
 	if err != nil {
 		return nil, err
@@ -490,7 +511,7 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 		// without this a dead upstream would hang on the OS default.
 		baseTransport.DialContext = dialer.DialContext
 	}
-	transport := &xffRoundTripper{base: baseTransport}
+	transport := &xffRoundTripper{base: baseTransport, skipUnix: s.unixListener}
 
 	// -- Timeout --
 	var clientTimeout time.Duration
@@ -570,13 +591,24 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 			//   X-Forwarded-For   → discard client chain, set to connecting IP only
 			//   X-Forwarded-Host  → set to original client Host
 			//   X-Forwarded-Proto → set from actual TLS state (never trust client)
-			// trusted: global flag OR connecting IP is in trusted-proxies list.
+			// trusted: global flag OR the connection arrived on a Unix socket
+			// OR the connecting IP is in trusted-proxies.
 			// clientIP is already parsed above — reuse it to avoid double SplitHostPort.
+			//
+			// A Unix socket is reachable only from the same host, through the
+			// filesystem, so the peer is by definition a local process — in the
+			// realistic topology, the front proxy that terminated the public
+			// connection. It already holds the authoritative X-Forwarded-*
+			// values, and RouteMUX has no client IP of its own to contribute
+			// (there is no peer address on a Unix socket). So the incoming
+			// chain is passed through untouched. Access to the socket is
+			// governed by its filesystem permissions (see socket-perm), which
+			// is the meaningful control at this transport.
 			var clientNetIP net.IP
 			if cfg.TrustedProxies != nil {
 				clientNetIP = net.ParseIP(clientIP)
 			}
-			trusted := cfg.TrustClientHeaders ||
+			trusted := cfg.TrustClientHeaders || s.unixListener ||
 				(clientNetIP != nil && cfg.TrustedProxies.Contains(clientNetIP))
 			if clientIP != "" {
 				if trusted {
@@ -909,6 +941,16 @@ func isCatchAll(domains []string) bool {
 // one catch-all vhost (singleMux), vhost dispatch is skipped.
 func (s *server) handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// socket-dummy-addr: a Unix socket connection has no peer address, so
+		// RemoteAddr is "@". Substituting the configured address here — before
+		// anything reads it — makes the rest of the pipeline behave exactly as
+		// it would for a TCP connection from that address: the IP filter
+		// matches it, trusted-proxies evaluates it, ${remote_addr} resolves to
+		// it, and Go's ReverseProxy appends it to X-Forwarded-For.
+		if s.socketDummyAddr != "" {
+			r.RemoteAddr = s.socketDummyAddr
+		}
+
 		// ACME HTTP-01 challenges must be served regardless of vhost, IP filter,
 		// or routing — the CA reaches /.well-known/acme-challenge/<token> on
 		// whatever port RouteMUX serves (directly or via a downstream proxy).

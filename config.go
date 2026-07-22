@@ -8,10 +8,12 @@ import (
 	"gopkg.in/yaml.v3"
 	"log"
 	"mime"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -98,6 +100,7 @@ type JWTAuth struct {
 type Config struct {
 	Listen             string
 	SocketPerm         *SocketPerm // nil = leave Unix socket permissions as created (umask)
+	SocketDummyAddr    string      // "IP:Port" substituted for RemoteAddr on a Unix listener; "" = no substitution
 	Port               int
 	GlobalTLSCert      string
 	GlobalTLSKey       string
@@ -208,6 +211,30 @@ func (c *Config) validate() error {
 	if (c.GlobalTLSCert == "") != (c.GlobalTLSKey == "") {
 		return fmt.Errorf("both global-tls-cert and global-tls-key must be provided together")
 	}
+	if c.SocketDummyAddr != "" {
+		if !isUnixListen(c.Listen) {
+			return fmt.Errorf("socket-dummy-addr only applies to a Unix socket listener; remove it or set listen to a unix: address")
+		}
+		host, port, err := net.SplitHostPort(c.SocketDummyAddr)
+		if err != nil {
+			return fmt.Errorf("invalid socket-dummy-addr %q: expected IP:Port (e.g. 127.0.0.1:0): %w", c.SocketDummyAddr, err)
+		}
+		if net.ParseIP(host) == nil {
+			return fmt.Errorf("invalid socket-dummy-addr %q: %q is not an IP address", c.SocketDummyAddr, host)
+		}
+		if _, err := strconv.Atoi(port); err != nil {
+			return fmt.Errorf("invalid socket-dummy-addr %q: %q is not a numeric port", c.SocketDummyAddr, port)
+		}
+	}
+
+	// An IP filter cannot work on a Unix socket: the connection has no peer
+	// address, so every request would be denied — and the denial is a silent
+	// connection close (nginx-style 444), making the server look broken rather
+	// than filtering. Access to a Unix socket is controlled by its filesystem
+	// permissions; see socket-perm.
+	if isUnixListen(c.Listen) && c.IPFilter != nil && c.SocketDummyAddr == "" {
+		return fmt.Errorf("ip-filter cannot be used when listening on a Unix socket (%s): a Unix socket connection has no client IP to match, so every request would be silently rejected. Remove the ip-filter block, or listen on a TCP address. To restrict who may connect to the socket, use socket-perm", c.Listen)
+	}
 	if c.JWTAuth != nil {
 		if c.JWTAuth.HeaderKey == "" && c.JWTAuth.CookieKey == "" {
 			return fmt.Errorf("jwt-authentication requires at least one of header-key or cookie-key")
@@ -249,7 +276,8 @@ type fileVHostTLS struct {
 
 type fileGlobal struct {
 	Listen             string               `yaml:"listen"`
-	SocketPerm         string               `yaml:"socket-perm"` // "mode[:user[:group]]" for unix: listeners
+	SocketPerm         string               `yaml:"socket-perm"`       // "mode[:user[:group]]" for unix: listeners
+	SocketDummyAddr    string               `yaml:"socket-dummy-addr"` // "IP:Port" reported as the client address on a unix: listener
 	Port               int                  `yaml:"port"`
 	GlobalTLSCert      string               `yaml:"global-tls-cert"`
 	GlobalTLSKey       string               `yaml:"global-tls-key"`
@@ -484,6 +512,8 @@ func loadConfigFile(path string) (*Config, error) {
 	if cfg.Port == 0 {
 		cfg.Port = 8080
 	}
+
+	cfg.SocketDummyAddr = fc.Global.SocketDummyAddr
 
 	if fc.Global.SocketPerm != "" {
 		sp, err := parseSocketPerm(fc.Global.SocketPerm)
