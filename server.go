@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -457,12 +459,15 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 	// Build a map of synthetic-host → unix socket path for any unix upstreams on
 	// this route, so the dialer can route those hosts to their sockets.
 	var unixHosts map[string]string
+	allUnix := true
 	for _, u := range rc.Upstreams {
 		if u.UnixSocket != "" {
 			if unixHosts == nil {
 				unixHosts = make(map[string]string)
 			}
 			unixHosts[u.ParsedURL.Host] = u.UnixSocket
+		} else {
+			allUnix = false
 		}
 	}
 
@@ -489,29 +494,41 @@ func (s *server) buildRouteHandler(routePath string, picker *upstreamPicker, rc 
 	}
 	dialer := &net.Dialer{Timeout: dialTimeout}
 
-	if unixHosts != nil {
-		// Custom dialer: if the target host is one of our synthetic unix hosts,
-		// dial the Unix socket instead of TCP. Other hosts dial normally.
-		baseTransport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-			host, _, _ := net.SplitHostPort(addr)
-			if sock, ok := unixHosts[host]; ok {
-				return dialer.DialContext(ctx, "unix", sock)
-			}
-			return dialer.DialContext(ctx, network, addr)
-		}
-		// For TLS over a Unix socket (unixs://), the synthetic host can never
-		// match a certificate SAN, so standard hostname verification cannot
-		// succeed. The local socket is itself the trust boundary, so skip
-		// hostname verification for unix-TLS upstreams (unless the operator has
-		// already enabled NoTLSVerify globally for the route).
-		baseTransport.TLSClientConfig.InsecureSkipVerify = true //nolint:gosec
-	} else {
-		// Plain TCP upstreams: use the timeout-bounded dialer too. A bare
-		// http.Transport{} does not inherit DefaultTransport's dial timeout, so
-		// without this a dead upstream would hang on the OS default.
-		baseTransport.DialContext = dialer.DialContext
-	}
+	// TCP upstreams use the timeout-bounded dialer too. A bare
+	// http.Transport{} does not inherit DefaultTransport's dial timeout, so
+	// without this a dead upstream would hang on the OS default.
+	baseTransport.DialContext = dialer.DialContext
 	transport := &xffRoundTripper{base: baseTransport, skipUnix: s.unixListener}
+
+	if unixHosts != nil {
+		// Unix upstreams get a transport of their own. Its dialer maps the
+		// synthetic unix host back to the socket path. For TLS over a Unix
+		// socket (unixs://) the synthetic host can never match a certificate
+		// SAN, so verification cannot succeed; the local socket is itself the
+		// trust boundary, so verification is skipped. Keeping this in a separate
+		// transport confines the skip to unix upstreams: TCP https upstreams on
+		// the same route are still verified unless the route sets NoTLSVerify.
+		unixTransport := &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: true, //nolint:gosec
+			},
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				host, _, _ := net.SplitHostPort(addr)
+				if sock, ok := unixHosts[host]; ok {
+					return dialer.DialContext(ctx, "unix", sock)
+				}
+				return dialer.DialContext(ctx, network, addr)
+			},
+		}
+		if allUnix {
+			// Unix upstreams only: no per-request transport selection needed.
+			transport.base = unixTransport
+		} else {
+			// Mixed route: xffRoundTripper selects the transport per request.
+			transport.unixBase = unixTransport
+			transport.unixHosts = unixHosts
+		}
+	}
 
 	// -- Timeout --
 	var clientTimeout time.Duration
@@ -1007,15 +1024,25 @@ func closeConnection(w http.ResponseWriter) {
 	w.WriteHeader(http.StatusBadRequest)
 }
 
+// basicAuthDigests holds SHA-256 digests of the configured Basic auth
+// credentials, computed once when the route handler is built.
+type basicAuthDigests struct {
+	user, pass [sha256.Size]byte
+}
+
 // requireBasicAuth wraps handler h with HTTP Basic HTTPAuth enforcement.
 // If auth is nil, h is returned unchanged.
 func requireBasicAuth(auth *HTTPAuth, h http.Handler) http.Handler {
 	if auth == nil {
 		return h
 	}
+	want := &basicAuthDigests{
+		user: sha256.Sum256([]byte(auth.User)),
+		pass: sha256.Sum256([]byte(auth.Password)),
+	}
 	inner := h
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !checkBasicAuth(w, r, auth) {
+		if !checkBasicAuth(w, r, want) {
 			return
 		}
 		inner.ServeHTTP(w, r)
@@ -1024,9 +1051,20 @@ func requireBasicAuth(auth *HTTPAuth, h http.Handler) http.Handler {
 
 // checkBasicAuth returns true if the request carries valid Basic HTTPAuth credentials.
 // Otherwise, it returns false and writes unauthorized response with WWW-Authenticate header.
-func checkBasicAuth(w http.ResponseWriter, r *http.Request, auth *HTTPAuth) bool {
+//
+// The comparison takes the same time however much of a guess is right, so
+// response timing cannot be used to recover the credentials byte by byte:
+// both sides are hashed to fixed-length digests (hiding length as well as
+// content), compared with subtle.ConstantTimeCompare, and the username and
+// password results are combined without short-circuiting (so timing does not
+// reveal whether the username alone was correct).
+func checkBasicAuth(w http.ResponseWriter, r *http.Request, want *basicAuthDigests) bool {
 	user, pass, ok := r.BasicAuth()
-	valid := ok && user == auth.User && pass == auth.Password
+	userHash := sha256.Sum256([]byte(user))
+	passHash := sha256.Sum256([]byte(pass))
+	match := subtle.ConstantTimeCompare(userHash[:], want.user[:]) &
+		subtle.ConstantTimeCompare(passHash[:], want.pass[:])
+	valid := ok && match == 1
 	if !valid {
 		w.Header().Set("WWW-Authenticate", `Basic realm="routemux"`)
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
@@ -1035,7 +1073,7 @@ func checkBasicAuth(w http.ResponseWriter, r *http.Request, auth *HTTPAuth) bool
 }
 
 // schemeOf returns the actual scheme of the incoming connection.
-// Used only for $scheme variable resolution in dest-dest-add-header values.
+// Used for ${scheme} resolution in dest-add-header and client-add-header values.
 // Does NOT trust X-Forwarded-Proto from the client — use trust-client-headers
 // if routemux is behind a trusted upstream proxy.
 func schemeOf(r *http.Request) string {

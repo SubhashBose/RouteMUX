@@ -10,6 +10,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"math/big"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
@@ -288,6 +289,51 @@ func TestDiscardAccount(t *testing.T) {
 	// Idempotent: discarding again is fine.
 	if err := discardAccount(dir); err != nil {
 		t.Errorf("second discard should not error: %v", err)
+	}
+}
+
+func TestACMERetryBackoff(t *testing.T) {
+	resp := func(code int, retryAfter string) *http.Response {
+		h := http.Header{}
+		if retryAfter != "" {
+			h.Set("Retry-After", retryAfter)
+		}
+		return &http.Response{StatusCode: code, Header: h}
+	}
+	cases := []struct {
+		name string
+		n    int
+		res  *http.Response
+		want time.Duration
+	}{
+		{"429 never retried", 1, resp(http.StatusTooManyRequests, "1"), 0},
+		{"5xx first retry", 1, resp(http.StatusServiceUnavailable, ""), time.Second},
+		{"5xx third retry", 3, resp(http.StatusServiceUnavailable, ""), 4 * time.Second},
+		{"5xx retries exhausted", maxACMERetries + 1, resp(http.StatusServiceUnavailable, ""), 0},
+		{"short Retry-After honoured", 1, resp(http.StatusServiceUnavailable, "5"), 5 * time.Second},
+		{"long Retry-After gives up", 1, resp(http.StatusServiceUnavailable, "3600"), 0},
+	}
+	for _, c := range cases {
+		if got := acmeRetryBackoff(c.n, nil, c.res); got != c.want {
+			t.Errorf("%s: got %s, want %s", c.name, got, c.want)
+		}
+	}
+}
+
+func TestCheckDirWritable(t *testing.T) {
+	dir := t.TempDir()
+	if err := checkDirWritable(filepath.Join(dir, "new", "sub")); err != nil {
+		t.Errorf("creatable directory: %v", err)
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root can write to read-only directories")
+	}
+	ro := filepath.Join(dir, "ro")
+	if err := os.Mkdir(ro, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkDirWritable(ro); err == nil {
+		t.Error("read-only directory reported as writable")
 	}
 }
 

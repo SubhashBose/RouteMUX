@@ -187,27 +187,12 @@ func (m *Manager) Start() error {
 		needIssue = append(needIssue, v)
 	}
 
-	// Issue missing certificates in the background. Doing this asynchronously is
-	// essential: the HTTP-01 challenge must be reachable on the listener, which
-	// is only serving after Start() returns. Until issuance completes, the
-	// bootstrap certificate keeps the listener functional.
-	if len(needIssue) > 0 {
-		go func() {
-			for _, v := range needIssue {
-				log.Printf("acme: obtaining certificate for %v from %s", v.Domains, v.AcmeSource)
-				if err := m.issueAndStore(m.ctx, v); err != nil {
-					log.Printf("acme: initial issuance for %v failed: %v (will retry)", v.Domains, err)
-				}
-			}
-		}()
-	}
-
-	// Launch the background renewal loop if any vhost uses ACME.
-	for i := range m.vhosts {
-		if m.vhosts[i].UsesACME() {
-			go m.renewLoop()
-			break
-		}
+	// Issue missing certificates and run renewals in the background. Doing this
+	// asynchronously is essential: the HTTP-01 challenge must be reachable on
+	// the listener, which is only serving after Start() returns. Until issuance
+	// completes, the bootstrap certificate keeps the listener functional.
+	if m.UsesACME() {
+		go m.renewLoop(needIssue)
 	}
 	return nil
 }
@@ -233,28 +218,30 @@ func (m *Manager) issueAndStore(ctx context.Context, v *VHostConfig) error {
 	if ok, wait := m.issueState.shouldAttempt(v.Domains); !ok {
 		return fmt.Errorf("issuance for %v skipped: backing off for %s after prior failure", v.Domains, wait.Round(time.Second))
 	}
-	err := m.doIssue(ctx, v)
-	if err == nil {
-		m.issueState.recordSuccess(v.Domains)
-		return nil
-	}
+	// Persist the attempt before contacting the CA, so a crash or restart
+	// mid-issuance cannot lead straight into another attempt.
+	m.issueState.recordAttempt(v.Domains)
 
-	// Retry once after a brief pause in case the failure was a transient fluke
-	// (network blip, momentary CA hiccup) — but only for non-permanent errors,
-	// so we don't waste an attempt on a config/policy problem. This mirrors
-	// Caddy's "retry once in case it was a fluke" before the long backoff.
-	if !isPermanentError(err) {
+	err := m.doIssue(ctx, v)
+
+	// Retry once after a brief pause in case the failure was a network blip.
+	// Only for transport-level errors: an ACME problem (failed validation, rate
+	// limit, policy) is the CA's verdict, and repeating the attempt would only
+	// count against its rate limits again.
+	if err != nil && isTransientError(err) {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(2 * time.Second):
 		}
-		if err2 := m.doIssue(ctx, v); err2 == nil {
-			m.issueState.recordSuccess(v.Domains)
-			return nil
-		} else {
-			err = err2
-		}
+		err = m.doIssue(ctx, v)
+	}
+	if err == nil {
+		m.issueState.recordSuccess(v.Domains)
+		return nil
+	}
+	if ctx.Err() != nil {
+		return ctx.Err() // shutting down; the attempt marker stays in place
 	}
 
 	backoff := m.issueState.recordFailure(v.Domains, err)
@@ -264,8 +251,16 @@ func (m *Manager) issueAndStore(ctx context.Context, v *VHostConfig) error {
 	return fmt.Errorf("%w (next attempt after %s)", err, backoff.Round(time.Second))
 }
 
+// issueTimeout bounds one issuance attempt end to end. The ACME client polls
+// authorizations and orders once a second until they settle, so without a
+// deadline a CA that never settles one would be polled indefinitely.
+const issueTimeout = 10 * time.Minute
+
 // doIssue performs the actual ACME issuance and certificate installation.
 func (m *Manager) doIssue(ctx context.Context, v *VHostConfig) error {
+	ctx, cancel := context.WithTimeout(ctx, issueTimeout)
+	defer cancel()
+
 	// Pre-flight: if a domain does not resolve in DNS at all, the CA cannot
 	// reach this server, so issuance is guaranteed to fail and would only burn
 	// the CA's failed-authorization rate-limit budget. Skip with a clear log
@@ -275,17 +270,32 @@ func (m *Manager) doIssue(ctx context.Context, v *VHostConfig) error {
 		return fmt.Errorf("skipping issuance: domain(s) %v do not resolve in DNS yet — check DNS before the CA is asked to validate (avoids rate-limit waste)", unresolved)
 	}
 
+	// Pre-flight: the issued certificate must be persisted, or the next check
+	// finds no usable certificate and issues again — every retry would then
+	// mint a real certificate and quickly hit the CA's duplicate-certificate
+	// limit. Verify the destination directories are writable before ordering.
+	certPath, keyPath := v.resolveCertPaths(m.global.CacheDir)
+	for _, dir := range []string{filepath.Dir(certPath), filepath.Dir(keyPath)} {
+		if err := checkDirWritable(dir); err != nil {
+			return fmt.Errorf("skipping issuance: certificate directory is not writable (%w)", err)
+		}
+	}
+
 	directoryURL, err := v.directoryURL(&m.global)
 	if err != nil {
 		return err
 	}
 
-	// Per-CA External Account Binding (ZeroSSL needs it; Let's Encrypt does not).
-	var eab *xacme.ExternalAccountBinding
+	// Per-CA External Account Binding (ZeroSSL needs it; Let's Encrypt does
+	// not). Only fetched when a new account must be registered.
+	var eabFn func(context.Context) (*xacme.ExternalAccountBinding, error)
 	if isZeroSSL(v.AcmeSource) {
-		eab, err = generateZeroSSLEAB(ctx, m.global.Email)
-		if err != nil {
-			return fmt.Errorf("zerossl EAB: %w", err)
+		eabFn = func(ctx context.Context) (*xacme.ExternalAccountBinding, error) {
+			eab, err := generateZeroSSLEAB(ctx, m.global.Email)
+			if err != nil {
+				return nil, fmt.Errorf("zerossl EAB: %w", err)
+			}
+			return eab, nil
 		}
 	}
 
@@ -294,7 +304,7 @@ func (m *Manager) doIssue(ctx context.Context, v *VHostConfig) error {
 		return err
 	}
 	accDir := m.accountDir(directoryURL)
-	client, err := ensureAccount(ctx, accDir, directoryURL, m.global.Email, eab, httpClient)
+	client, err := ensureAccount(ctx, accDir, directoryURL, m.global.Email, eabFn, httpClient)
 	if err != nil {
 		return err
 	}
@@ -316,7 +326,7 @@ func (m *Manager) doIssue(ctx context.Context, v *VHostConfig) error {
 			if derr := discardAccount(accDir); derr != nil {
 				return fmt.Errorf("discarding stale account: %w", derr)
 			}
-			client, err = ensureAccount(ctx, accDir, directoryURL, m.global.Email, eab, httpClient)
+			client, err = ensureAccount(ctx, accDir, directoryURL, m.global.Email, eabFn, httpClient)
 			if err != nil {
 				return err
 			}
@@ -329,7 +339,6 @@ func (m *Manager) doIssue(ctx context.Context, v *VHostConfig) error {
 	}
 
 	// Persist PEM files atomically at the configured/default paths.
-	certPath, keyPath := v.resolveCertPaths(m.global.CacheDir)
 	keyPEM, err := encodeKeyPEM(key)
 	if err != nil {
 		return err
@@ -356,7 +365,8 @@ func (m *Manager) doIssue(ctx context.Context, v *VHostConfig) error {
 
 // isZeroSSL reports whether the acme-source names ZeroSSL.
 func isZeroSSL(source string) bool {
-	return source == "zerossl"
+	// Case-insensitive, matching how directoryURL maps acme-source.
+	return strings.EqualFold(source, "zerossl")
 }
 
 // isAccountNotExist reports whether err indicates the CA does not recognise the

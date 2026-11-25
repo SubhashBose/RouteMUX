@@ -19,12 +19,34 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	gojwt "github.com/golang-jwt/jwt/v5"
 )
+
+// TestMain isolates the tests from config files on the developer's machine.
+// When --config is not given, parseAll auto-discovers config.yml in the
+// working directory and in ~/.config/routemux/, so a personal config.yml in
+// the repository root (it is gitignored) would otherwise be merged into every
+// CLI test. The tests therefore run from an empty temporary working directory,
+// with the home directory pointed at it as well.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "routemux-test-*")
+	if err != nil {
+		log.Fatalf("TestMain: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		log.Fatalf("TestMain: %v", err)
+	}
+	os.Setenv("HOME", dir)        // os.UserHomeDir on Unix
+	os.Setenv("USERPROFILE", dir) // os.UserHomeDir on Windows
+	code := m.Run()
+	os.RemoveAll(dir)
+	os.Exit(code)
+}
 
 // evalConst returns the constant value of a parsedHeaderValue for testing.
 // Panics if the value contains variables (use in tests that only test plain values).
@@ -422,6 +444,41 @@ func TestRouteHandler_GlobalAuth(t *testing.T) {
 	resp, _ = http.DefaultClient.Do(req)
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestRequireBasicAuth_Credentials(t *testing.T) {
+	h := requireBasicAuth(&HTTPAuth{"admin", "s3cr3t"}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	cases := []struct {
+		name       string
+		user, pass string
+		noHeader   bool
+		want       int
+	}{
+		{"correct", "admin", "s3cr3t", false, http.StatusOK},
+		{"wrong user", "root", "s3cr3t", false, http.StatusUnauthorized},
+		{"wrong password", "admin", "s3cr3x", false, http.StatusUnauthorized},
+		{"password prefix", "admin", "s3cr", false, http.StatusUnauthorized},
+		{"password with suffix", "admin", "s3cr3t!", false, http.StatusUnauthorized},
+		{"both empty", "", "", false, http.StatusUnauthorized},
+		{"colon moved into user", "admin:s3cr3t", "", false, http.StatusUnauthorized},
+		{"no header", "", "", true, http.StatusUnauthorized},
+	}
+	for _, c := range cases {
+		req := httptest.NewRequest("GET", "/", nil)
+		if !c.noHeader {
+			req.SetBasicAuth(c.user, c.pass)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != c.want {
+			t.Errorf("%s: status = %d, want %d", c.name, rec.Code, c.want)
+		}
+		if c.want == http.StatusUnauthorized && rec.Header().Get("WWW-Authenticate") == "" {
+			t.Errorf("%s: missing WWW-Authenticate header on 401", c.name)
+		}
 	}
 }
 
@@ -2233,6 +2290,35 @@ func TestVHost_CLI_VHostFlag(t *testing.T) {
 	}
 	if starVH.Routes["/"] == nil {
 		t.Error("catch-all vhost missing / route")
+	}
+}
+
+func TestVHost_CLI_DomainSeparators(t *testing.T) {
+	// --vhost takes a comma-separated list; "|" is still accepted.
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"aa.com,bb.com", []string{"aa.com", "bb.com"}},
+		{"aa.com|bb.com", []string{"aa.com", "bb.com"}},
+		{" aa.com , bb.com|cc.com ", []string{"aa.com", "bb.com", "cc.com"}},
+		{"aa.com,,bb.com,", []string{"aa.com", "bb.com"}},
+		{"aa.com", []string{"aa.com"}},
+		{"*", []string{"*"}},
+		{"", []string{"*"}},
+	}
+	for _, c := range cases {
+		cfg, err := parseAll([]string{
+			"--config", "",
+			"--vhost", c.in,
+			"--route", "/", "--dest", "http://localhost:3000/",
+		})
+		if err != nil {
+			t.Fatalf("--vhost %q: %v", c.in, err)
+		}
+		if got := cfg.VHosts[0].Domains; !reflect.DeepEqual(got, c.want) {
+			t.Errorf("--vhost %q: domains = %q, want %q", c.in, got, c.want)
+		}
 	}
 }
 
@@ -5432,6 +5518,63 @@ func TestUnix_SubtreeNoSlashRoute(t *testing.T) {
 	}
 	if !foundSub {
 		t.Errorf("subtree path mapping wrong; backend saw paths %v, want /v1/users among them", paths)
+	}
+}
+
+func TestUnix_MixedRouteTLSVerification(t *testing.T) {
+	// A route mixing a unixs:// upstream with a TCP https:// upstream: TLS
+	// verification is always skipped for the unix upstream (its synthetic host
+	// can never match a certificate), but must still apply to the TCP upstream
+	// unless the route sets noTLSverify. Both backends use self-signed certs.
+	dir, _ := os.MkdirTemp("", "routemux-unixtls-*")
+	defer os.RemoveAll(dir)
+	sockPath := filepath.Join(dir, "backend.sock")
+
+	unixLn, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unixBackend := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("unix"))
+	}))
+	unixBackend.Listener.Close()
+	unixBackend.Listener = unixLn
+	unixBackend.StartTLS()
+	defer unixBackend.Close()
+
+	tcpBackend := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("tcp"))
+	}))
+	defer tcpBackend.Close()
+
+	for _, tc := range []struct {
+		noTLSVerify bool
+		want        []string // round-robin: unix upstream first, then TCP
+	}{
+		{false, []string{"unix", "Bad Gateway"}},
+		{true, []string{"unix", "tcp"}},
+	} {
+		rc := &RouteConfig{LBMode: "round-robin", NoTLSVerify: tc.noTLSVerify}
+		if err := applyDestEntries(rc, []string{"unixs://" + sockPath + ":/", tcpBackend.URL + "/"}, "/"); err != nil {
+			t.Fatal(err)
+		}
+		srv, err := newServer(makeConfig(8080, map[string]*RouteConfig{"/": rc}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		ts := httptest.NewServer(srv.handler())
+		for i, want := range tc.want {
+			resp, err := http.Get(ts.URL + "/")
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if got := strings.TrimSpace(string(body)); got != want {
+				t.Errorf("noTLSverify=%v request %d: body = %q, want %q", tc.noTLSVerify, i+1, got, want)
+			}
+		}
+		ts.Close()
 	}
 }
 

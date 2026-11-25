@@ -233,8 +233,15 @@ routemux [global options] \
 | `--socket-perm SPEC` | Permissions for the Unix socket, as `mode[:user[:group]]` — each part optional (e.g. `660`, `0660:www-data:www`, `::www-data`). Default: created per the process umask |
 | `--socket-dummy-addr ADDR` | Client address (`IP:Port`) reported for Unix socket connections, e.g. `127.0.0.1:0`. Makes requests behave like TCP connections from that address. Default: no substitution |
 | `--port PORT` | Port to listen on (default: `8080`) |
-| `--global-tls-cert FILE` | TLS certificate file — enables HTTPS |
-| `--globl-tls-key FILE` | TLS key file — required when `--tls-cert` is set |
+| `--global-tls-cert FILE` | TLS certificate file — enables HTTPS (also the SNI fallback when vhosts have their own certificates) |
+| `--global-tls-key FILE` | TLS key file — required when `--global-tls-cert` is set |
+| `--acme-email EMAIL` | ACME account email (required for [automatic TLS](#automatic-tls-acme)) |
+| `--acme-cache-dir DIR` | ACME cache directory for account material and default certificate storage |
+| `--acme-challenge-mode MODE` | `http` (HTTP-01, default) or `https` (TLS-ALPN-01) |
+| `--acme-serve-port80` | Open a temporary port-80 listener during HTTP-01 challenges |
+| `--acme-directory-url URL` | Override the ACME directory endpoint (staging or private CA) |
+| `--acme-ca-root-file FILE` | Trust this CA for the ACME endpoint (test servers) |
+| `--acme-insecure-skip-verify` | Skip TLS verification of the ACME endpoint (**testing only**) |
 | `--jwt-header KEYWORD` | HTTP header containing the JWT token |
 | `--jwt-cookie KEYWORD` | Cookie containing the JWT token (fallback) |
 | `--jwt-claim-user KEY` | JWT claim to extract username from |
@@ -252,8 +259,19 @@ routemux [global options] \
 
 | Flag | Description |
 |------|-------------|
-| `--vhost DOMAINS` | Specify list of hostnames (e.g. `"domain.com\|www.domain.com"`) to group routes under it (repeatable). Default is `'*'` |
+| `--vhost DOMAINS` | Comma, or `\|` -separated list of hostnames (e.g. `domain.com,www.domain.com`) to group routes under it (repeatable). Default is `'*'` |
 | `--route PATH` | Define a route (e.g. `/api/`) (repeatable under a vhost). If no preceding `--vhost` specified, then the routes are applied to `'*'`, i.e., all hosts |
+
+### Vhost Options
+
+Following options must follow `--vhost` and apply to that vhost (the CLI equivalent of a vhost's [`tls:` block](#per-vhost-certificates)).
+
+| Flag | Description |
+|------|-------------|
+| `--tls-acme-source SOURCE` | Automatically obtain a certificate from `letsencrypt`, `letsencrypt-staging` or `zerossl` |
+| `--tls-cert FILE` | Certificate file: a static certificate, or the storage path for the ACME certificate when `--tls-acme-source` is set |
+| `--tls-key FILE` | Key file: a static key, or the storage path for the ACME key when `--tls-acme-source` is set |
+| `--tls-acme-renewal DURATION` | Renew this long before expiry (e.g. `30d`). Default: when one third of the certificate lifetime remains |
 
 ### Route Options
 
@@ -358,11 +376,16 @@ routemux \
 
 # Virtual hostname matching
 routemux \
-  --vhost 'example.com|www.example.com' \
+  --vhost example.com,www.example.com \
     --route /health/ --dest "STATUS 200 healthy" \
-    --route /app/ --dest --dest http://localhost:3000/ \
-  --vhost '[*]'
-    --route '/'  --dest http://localhost:3000/
+    --route /app/ --dest http://localhost:3000/ \
+  --vhost '*' \
+    --route / --dest http://localhost:3000/
+
+# Per-vhost automatic TLS (ACME)
+routemux --port 443 --acme-email admin@example.com \
+  --vhost example.com,www.example.com --tls-acme-source letsencrypt \
+    --route / --dest http://localhost:3000/
 ```
 
 ---
@@ -479,6 +502,27 @@ expiry — by default when one third of the certificate's lifetime remains
 per vhost with `acme-renewal` (e.g. `15d`). Renewals continue across config
 reloads. **Adding or removing ACME vhosts requires a restart** (like any TLS
 listener change).
+
+An `acme-renewal` is capped at two thirds of the certificate lifetime (60 days
+for a 90-day certificate), so a certificate is always kept for at least a third
+of its lifetime; a larger value is lowered and a warning is logged. This keeps a
+misconfigured value from renewing on every check.
+
+### Retries and CA rate limits
+
+RouteMUX is careful not to trip the CA's rate limits (for Let's Encrypt: 5
+failed validations per hostname per hour, 5 duplicate certificates per week):
+
+- A failed issuance or renewal is retried with exponential backoff: 5 minutes,
+  then 10, 20, 40 … up to 24 hours. If the CA reports a rate limit, its
+  `Retry-After` is honoured instead. No request is sent while backing off.
+- The backoff state is stored in `cache-dir/issue-state.json`, so it survives
+  restarts. An attempt is recorded before the CA is contacted, so if RouteMUX
+  is restarted while an issuance is in progress it waits up to 5 minutes
+  before trying again.
+- Issuance is skipped, without contacting the CA, when a domain does not
+  resolve in DNS or the certificate directory is not writable.
+- Each attempt is bounded to 10 minutes.
 
 ### Testing
 
@@ -660,11 +704,13 @@ Wildcard patterns use `*` as a glob character:
 ```yaml
 dest-del-header:
   - CF-*          # deletes CF-Ray, CF-Connecting-IP, CF-IPCountry, etc.
-  - *-Secret      # deletes X-Secret, Api-Secret, etc.
+  - "*-Secret"    # deletes X-Secret, Api-Secret, etc.
   - X-*-Internal  # deletes X-Foo-Internal, X-Bar-Internal, etc.
 ```
 
 Wildcard matching is **case-insensitive**.
+
+> In YAML, a pattern that **starts** with `*` must be quoted (`"*-Secret"`), otherwise YAML reads it as an alias and the config fails to load. On the command line, quote wildcard patterns so the shell does not expand them (`--dest-del-header '*-Secret'`).
 
 > **Performance note:** routes with no wildcards take a fast path (direct map lookup per pattern). The wildcard path (iterating the header map) is only taken when at least one delete pattern contains `*`, and this is determined once at startup — not per request.
 

@@ -1,7 +1,10 @@
 package acme
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"net"
 	"os"
 	"strings"
 	"sync"
@@ -50,8 +53,11 @@ func (s *issueState) withPersistence(path string) *issueState {
 	return s
 }
 
-// load reads persisted state from disk, dropping any entries whose backoff
-// window has already elapsed (so stale state never blocks a legitimate retry).
+// load reads persisted state from disk. Entries whose backoff window has
+// elapsed are kept (they no longer block an attempt, see shouldAttempt) so the
+// failure count survives a restart: otherwise a restarted process would drop
+// back to the minimum backoff and retry a persistently failing domain far more
+// often than intended. Only entries long past their window are discarded.
 func (s *issueState) load() {
 	if s.path == "" {
 		return
@@ -68,9 +74,7 @@ func (s *issueState) load() {
 	defer s.mu.Unlock()
 	now := time.Now()
 	for k, e := range stored {
-		// Keep only entries still within their backoff window; expired ones
-		// carry no useful information and shouldn't block fresh attempts.
-		if e != nil && now.Before(e.NextEligible) {
+		if e != nil && now.Before(e.NextEligible.Add(maxIssueBackoff)) {
 			s.entries[k] = e
 		}
 	}
@@ -110,6 +114,27 @@ func (s *issueState) shouldAttempt(domains []string) (bool, time.Duration) {
 	return true, 0
 }
 
+// recordAttempt marks an issuance attempt as started, before the CA is
+// contacted: it moves the next eligible time at least minIssueBackoff ahead and
+// persists it. If the process dies mid-attempt (crash, kill, watchdog or
+// container restart), the restarted process still waits out that window rather
+// than attempting again at once. The failure count is unchanged; the outcome
+// is recorded by recordSuccess or recordFailure.
+func (s *issueState) recordAttempt(domains []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := issueKey(domains)
+	e := s.entries[k]
+	if e == nil {
+		e = &issueEntry{}
+		s.entries[k] = e
+	}
+	if next := time.Now().Add(minIssueBackoff); next.After(e.NextEligible) {
+		e.NextEligible = next
+	}
+	s.saveLocked()
+}
+
 // recordSuccess clears the failure state for the domains.
 func (s *issueState) recordSuccess(domains []string) {
 	s.mu.Lock()
@@ -133,7 +158,7 @@ func (s *issueState) recordFailure(domains []string, err error) time.Duration {
 	e.Failures++
 
 	// Honor the CA's Retry-After for rate-limit errors.
-	if d, ok := xacme.RateLimit(err); ok && d > 0 {
+	if d, ok := rateLimitRetryAfter(err); ok && d > 0 {
 		e.NextEligible = time.Now().Add(d)
 		s.saveLocked()
 		return d
@@ -150,6 +175,37 @@ func (s *issueState) recordFailure(domains []string, err error) time.Duration {
 	e.NextEligible = time.Now().Add(backoff)
 	s.saveLocked()
 	return backoff
+}
+
+// rateLimitRetryAfter reports whether err is a CA rate-limit error, and its
+// Retry-After. xacme.RateLimit only recognises an unwrapped *xacme.Error, while
+// issuance errors arrive wrapped with context, so unwrap first.
+func rateLimitRetryAfter(err error) (time.Duration, bool) {
+	var ae *xacme.Error
+	if !errors.As(err, &ae) {
+		return 0, false
+	}
+	return xacme.RateLimit(ae)
+}
+
+// isTransientError reports whether err is a transport-level failure (network
+// error, connection reset, request timeout) that never produced a CA verdict,
+// so a single quick retry is harmless. ACME problem responses, failed
+// validations and a whole attempt running out of time are not transient.
+func isTransientError(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var (
+		ae *xacme.Error
+		az *xacme.AuthorizationError
+		oe *xacme.OrderError
+	)
+	if errors.As(err, &ae) || errors.As(err, &az) || errors.As(err, &oe) {
+		return false
+	}
+	var ne net.Error
+	return errors.As(err, &ne)
 }
 
 // isPermanentError reports whether an ACME error is one that retrying cannot

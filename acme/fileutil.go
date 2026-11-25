@@ -32,3 +32,18 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	}
 	return os.Rename(tmpName, path)
 }
+
+// checkDirWritable reports whether files can be created in dir (creating dir
+// if needed), by creating and removing a temporary file there.
+func checkDirWritable(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(dir, ".tmp-*")
+	if err != nil {
+		return err
+	}
+	name := f.Name()
+	f.Close()
+	return os.Remove(name)
+}

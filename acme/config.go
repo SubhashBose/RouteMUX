@@ -198,3 +198,11 @@ func defaultRenewBefore(notBefore, notAfter time.Time) time.Duration {
 	lifetime := notAfter.Sub(notBefore)
 	return lifetime / 3
 }
+
+// maxRenewBefore caps a configured renewal lead time at two thirds of the
+// certificate lifetime, so a certificate is always kept for at least a third
+// of its lifetime before being renewed (30 days for a 90-day certificate).
+func maxRenewBefore(notBefore, notAfter time.Time) time.Duration {
+	lifetime := notAfter.Sub(notBefore)
+	return lifetime * 2 / 3
+}

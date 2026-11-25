@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
+	"time"
 
 	xacme "golang.org/x/crypto/acme"
 )
@@ -90,11 +92,12 @@ func (s *accountStore) save(key *ecdsa.PrivateKey, acct *account) error {
 }
 
 // ensureAccount loads an existing account for the CA or registers a new one,
-// returning a ready-to-use acme.Client. eab, when non-nil, supplies External
-// Account Binding credentials (required by some CAs, e.g. ZeroSSL). httpClient,
-// when non-nil, is used for all ACME requests (needed for test CAs like Pebble
-// that present a self-signed directory endpoint).
-func ensureAccount(ctx context.Context, dir, directoryURL, email string, eab *xacme.ExternalAccountBinding, httpClient *http.Client) (*xacme.Client, error) {
+// returning a ready-to-use acme.Client. eabFn, when non-nil, supplies External
+// Account Binding credentials (required by some CAs, e.g. ZeroSSL); it is only
+// called when a new account is registered. httpClient, when non-nil, is used
+// for all ACME requests (needed for test CAs like Pebble that present a
+// self-signed directory endpoint).
+func ensureAccount(ctx context.Context, dir, directoryURL, email string, eabFn func(context.Context) (*xacme.ExternalAccountBinding, error), httpClient *http.Client) (*xacme.Client, error) {
 	store := newAccountStore(dir)
 	key, acct, err := store.load()
 	if err != nil {
@@ -103,7 +106,7 @@ func ensureAccount(ctx context.Context, dir, directoryURL, email string, eab *xa
 
 	if key != nil && acct != nil {
 		// Existing account — reuse it.
-		client := &xacme.Client{Key: key, DirectoryURL: directoryURL, HTTPClient: httpClient}
+		client := newACMEClient(key, directoryURL, httpClient)
 		client.KID = xacme.KeyID(acct.URI)
 		return client, nil
 	}
@@ -113,13 +116,17 @@ func ensureAccount(ctx context.Context, dir, directoryURL, email string, eab *xa
 	if err != nil {
 		return nil, err
 	}
-	client := &xacme.Client{Key: newKey, DirectoryURL: directoryURL, HTTPClient: httpClient}
+	client := newACMEClient(newKey, directoryURL, httpClient)
 
 	reg := &xacme.Account{}
 	if email != "" {
 		reg.Contact = []string{"mailto:" + email}
 	}
-	if eab != nil {
+	if eabFn != nil {
+		eab, err := eabFn(ctx)
+		if err != nil {
+			return nil, err
+		}
 		reg.ExternalAccountBinding = eab
 	}
 
@@ -136,4 +143,37 @@ func ensureAccount(ctx context.Context, dir, directoryURL, email string, eab *xa
 		return nil, fmt.Errorf("persisting account: %w", err)
 	}
 	return client, nil
+}
+
+// maxACMERetries caps how many times the ACME client re-sends one request after
+// a retriable response (5xx, bad nonce).
+const maxACMERetries = 3
+
+// newACMEClient returns an acme.Client with bounded request retries.
+func newACMEClient(key *ecdsa.PrivateKey, directoryURL string, httpClient *http.Client) *xacme.Client {
+	return &xacme.Client{
+		Key:          key,
+		DirectoryURL: directoryURL,
+		HTTPClient:   httpClient,
+		RetryBackoff: acmeRetryBackoff,
+	}
+}
+
+// acmeRetryBackoff replaces the acme package's default retry policy, which
+// retries 429 and 5xx responses without limit: against a rate-limited or
+// failing CA that means requests continue indefinitely. Here a 429 is never
+// retried, so the rate-limit error surfaces and the persisted issuance backoff
+// honours its Retry-After. Other retriable responses get at most
+// maxACMERetries quick retries (1s, 2s, 4s, or a short Retry-After).
+func acmeRetryBackoff(n int, _ *http.Request, res *http.Response) time.Duration {
+	if n > maxACMERetries || res == nil || res.StatusCode == http.StatusTooManyRequests {
+		return 0
+	}
+	if secs, err := strconv.Atoi(res.Header.Get("Retry-After")); err == nil && secs > 0 {
+		if d := time.Duration(secs) * time.Second; d <= time.Minute {
+			return d
+		}
+		return 0 // the CA asks for a long pause: leave it to the issuance backoff
+	}
+	return time.Duration(1<<uint(n-1)) * time.Second
 }

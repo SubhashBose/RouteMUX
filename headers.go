@@ -81,14 +81,28 @@ func applyDeleteHeaders(h http.Header, deleteList []string, hasWild bool) {
 // from RemoteAddr. On a Unix socket there is no peer address, the append never
 // happens, and stripping would silently delete a legitimate entry from the
 // front proxy's chain — so skipUnix disables the correction entirely.
+//
+// It also selects the transport on routes that mix Unix-socket and TCP
+// upstreams: requests to a unix upstream's synthetic host go to unixBase, all
+// others to base. unixHosts is nil on every other route, so they pay only a
+// nil check.
 type xffRoundTripper struct {
 	base     http.RoundTripper
 	skipUnix bool // true when listening on a Unix socket: nothing was appended
+
+	unixBase  http.RoundTripper // transport for unix upstreams on a mixed route
+	unixHosts map[string]string // synthetic unix hosts on a mixed route; nil otherwise
 }
 
 func (t *xffRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	base := t.base
+	if t.unixHosts != nil {
+		if _, ok := t.unixHosts[req.URL.Host]; ok {
+			base = t.unixBase
+		}
+	}
 	if t.skipUnix {
-		return t.base.RoundTrip(req)
+		return base.RoundTrip(req)
 	}
 	if vals, ok := req.Header["X-Forwarded-For"]; ok && len(vals) == 1 {
 		combined := vals[0]
@@ -100,13 +114,13 @@ func (t *xffRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 			req.Header.Del("X-Forwarded-For")
 		}
 	}
-	return t.base.RoundTrip(req)
+	return base.RoundTrip(req)
 }
 
 // ---- Parsed header value system ----
 //
-// dest-dest-add-header values are compiled once at config load time into a slice of
-// segments. At request time, evaluation is a simple linear scan with no
+// dest-add-header and client-add-header values are compiled once at config load
+// time into a slice of segments. At request time, evaluation is a simple linear scan with no
 // string parsing — just concatenation of literals and resolved variables.
 //
 // Syntax:  ${variable}       variable reference
@@ -114,11 +128,14 @@ func (t *xffRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 //          anything else     literal text (no quoting needed in YAML)
 //
 // Supported variables:
+//   ${host}           original client Host header
 //   ${remote_addr}    client IP (no port)
 //   ${remote_port}    client port
 //   ${scheme}         http or https
 //   ${request_uri}    full URI including query string
-//   ${header.Name}    value of Name from original client headers
+//   ${trusted_xff}    client IP after evaluating trusted proxies on X-Forwarded-For
+//   ${header.Name}    value of Name from original client headers (dest-add-header)
+//                     or from the upstream response headers (client-add-header)
 //   ${jwt_user}       the validated JWT's user claim (jwt-claim-user); empty
 //                     when JWT auth is off, skipped, or no claim configured
 //

@@ -478,13 +478,9 @@ func applyCLI(cfg *Config, rawArgs []string) error {
 				return flushErr
 			}
 			if i+1 >= len(args) {
-				return fmt.Errorf("--vhost requires a value (domain or domain1|domain2)")
+				return fmt.Errorf("--vhost requires a value (domain or domain1,domain2)")
 			}
-			// Split pipe-separated domains: domain.com|www.domain.com
-			curVHostDomains = strings.Split(args[i+1], "|")
-			for j, d := range curVHostDomains {
-				curVHostDomains[j] = strings.TrimSpace(d)
-			}
+			curVHostDomains = splitVHostDomains(args[i+1])
 			i += 2
 		case "--tls-acme-source":
 			if i+1 >= len(args) {
@@ -731,6 +727,25 @@ func applyCLI(cfg *Config, rawArgs []string) error {
 	return nil
 }
 
+// splitVHostDomains splits a --vhost value into its domains. Domains are
+// separated by commas ("aa.com,bb.com"), the same as other CLI lists such as
+// --auth-users. "|" is also accepted for backward compatibility; neither
+// character can appear in a domain name. Surrounding spaces and empty entries
+// are dropped. An empty value means all hosts ("*"), as an empty domain always
+// has.
+func splitVHostDomains(s string) []string {
+	var domains []string
+	for _, d := range strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == '|' }) {
+		if d = strings.TrimSpace(d); d != "" {
+			domains = append(domains, d)
+		}
+	}
+	if len(domains) == 0 {
+		return []string{"*"}
+	}
+	return domains
+}
+
 func parseHeaderString(s string) (name, value string, err error) {
 	idx := strings.Index(s, ":")
 	if idx < 0 {
@@ -842,8 +857,8 @@ Global JWT options:
                            unless set of users listed in --auth-users for that route.
 
 Vhosts (optional: this can be skipped if vhosts are not needed, can jump directly to routes):
-  --vhost DOMAINS          Specify list of hostnames (e.g. "domain.com|www.domain.com") to
-                           group routes under it (repeatable). Default is '*'
+  --vhost DOMAINS          Comma-separated list of hostnames (e.g. "domain.com,www.domain.com")
+                           to group routes under it (repeatable). Default is '*'
 
     Vhost options (must follow --vhost DOMAINS):
       --tls-acme-source SRC    Auto-issue TLS cert via letsencrypt|letsencrypt-staging|zerossl
@@ -883,11 +898,11 @@ Routes:
       --dest-add-header K:V    Add/overwrite a header on upstream request (repeatable)
                                Can be combination of variables and text
       --dest-del-header K      Delete a header from the upstream request (repeatable)
-                               Can take wildcards (e.g. --dest-del-header *cookie*)
+                               Can take wildcards (e.g. --dest-del-header '*cookie*')
       --client-add-header K:V  Add/overwrite a header on upstream response sent to client
                                (repeatable) Can be combination of variables and text
       --client-del-header K    Delete a header from the upstream response (repeatable)
-                               Can take wildcards (e.g. --client-del-header *cookie*)
+                               Can take wildcards (e.g. --client-del-header '*cookie*')
 `)
 	if daemon.DAEMONIZE_SUPPORTED {
 		fmt.Print(`
@@ -923,13 +938,13 @@ Config file (config.yml) example:
     listen: ""
     port: 8080
     socket-perm: "0660::www-data"
-	socket-dummy-addr: "127.0.0.1:80"
+    # socket-dummy-addr: "127.0.0.1:80"   # only with a unix: listen address
     global-tls-cert: ""
     global-tls-key: ""
     global-http-auth: ["USER", "PASSWORD"]
     trust-client-headers: false
-    trusted-proxy:
-	  - 192.168.0.0/16
+    trusted-proxies:
+      - 192.168.0.0/16
     ip-filter:
       blocked:
         - 10.0.0.0/8
@@ -968,7 +983,7 @@ Config file (config.yml) example:
              User-Agent: RouteMUX
              X-Built-URL: ${scheme}://${header.host}${request_uri}
            dest-del-header:
-             - *cookie*
+             - "*cookie*"
              - Authorization
            client-add-header:
              Served-By: RouteMUX

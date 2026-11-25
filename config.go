@@ -157,7 +157,7 @@ type HTTPAuth struct {
 type Upstream struct {
 	URL        string
 	ParsedURL  *url.URL // parsed once at startup, never nil for valid routes
-	Weight     int      // default 1; used for weighted load balancing (future)
+	Weight     int      // default 1; relative share in weighted load balancing
 	UnixSocket string   // non-empty: dial this Unix socket path instead of TCP
 }
 
@@ -174,7 +174,7 @@ type RouteConfig struct {
 	HTTPAuthExplicit  bool                         // true when auth was set explicitly (even as empty)
 	Timeout           string                       // e.g. "30s", "2m" (total request timeout; empty = unbounded)
 	DialTimeout       string                       // e.g. "5s" (upstream connect timeout; empty = default 5s)
-	ParsedAddHeaders  map[string]parsedHeaderValue // compiled dest-dest-add-header values (parsed at startup)
+	ParsedAddHeaders  map[string]parsedHeaderValue // compiled dest-add-header values (parsed at startup)
 	NeedsOriginal     bool                         // true if any header value references ${header.X}
 	AddHasVars        bool                         // true if any header value contains a variable (non-const)
 	DeleteHeaders     []string                     // headers to remove from upstream request

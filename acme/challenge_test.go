@@ -2,11 +2,17 @@ package acme
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	xacme "golang.org/x/crypto/acme"
 )
 
 func TestZeroSSLEAB_Success(t *testing.T) {
@@ -46,6 +52,31 @@ func TestZeroSSLEAB_Success(t *testing.T) {
 func TestZeroSSLEAB_RequiresEmail(t *testing.T) {
 	if _, err := generateZeroSSLEAB(context.Background(), ""); err == nil {
 		t.Error("expected error when email is empty")
+	}
+}
+
+// TestEnsureAccount_ExistingAccountSkipsEAB verifies EAB credentials are only
+// requested when a new account has to be registered.
+func TestEnsureAccount_ExistingAccountSkipsEAB(t *testing.T) {
+	dir := t.TempDir()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := newAccountStore(dir)
+	if err := store.save(key, &account{URI: "https://ca.example/acct/1"}); err != nil {
+		t.Fatal(err)
+	}
+	eabCalls := 0
+	eabFn := func(context.Context) (*xacme.ExternalAccountBinding, error) {
+		eabCalls++
+		return nil, errors.New("must not be called")
+	}
+	if _, err := ensureAccount(context.Background(), dir, "https://ca.example/dir", "a@b.com", eabFn, nil); err != nil {
+		t.Fatal(err)
+	}
+	if eabCalls != 0 {
+		t.Errorf("EAB requested %d times for an existing account, want 0", eabCalls)
 	}
 }
 
