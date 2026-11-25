@@ -340,3 +340,125 @@ func TestIsTransientError(t *testing.T) {
 		}
 	}
 }
+
+func TestIsNoVerdictError(t *testing.T) {
+	netErr := &net.OpError{Op: "dial", Err: errors.New("connection refused")}
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"network error", fmt.Errorf("creating order: %w", netErr), true},
+		{"CA 503", fmt.Errorf("creating order: %w", &xacme.Error{StatusCode: http.StatusServiceUnavailable}), true},
+		{"DNS pre-check", fmt.Errorf("%w: domain(s) [a.example] do not resolve", errPrecheck), true},
+		{"directory pre-check", fmt.Errorf("%w: certificate directory is not writable (%w)", errPrecheck, os.ErrPermission), true},
+		{"failed validation", fmt.Errorf("challenge validation: %w", &xacme.AuthorizationError{Identifier: "a.example"}), false},
+		{"rate limited", &xacme.Error{StatusCode: http.StatusTooManyRequests, ProblemType: "urn:ietf:params:acme:error:rateLimited"}, false},
+		{"ACME 4xx problem", &xacme.Error{StatusCode: http.StatusForbidden, ProblemType: "urn:ietf:params:acme:error:unauthorized"}, false},
+		{"invalid order", &xacme.OrderError{Status: xacme.StatusInvalid}, false},
+		{"attempt timed out", fmt.Errorf("waiting: %w", context.DeadlineExceeded), false},
+		{"unrecognised error", errors.New("order became invalid during finalization"), false},
+	}
+	for _, c := range cases {
+		if got := isNoVerdictError(c.err); got != c.want {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// TestRecordFailure_NoVerdict verifies a failure without a CA verdict is not
+// counted, retries 5 minutes later, writes nothing beyond the attempt marker,
+// and that a long Retry-After on a 5xx is honored and persisted.
+func TestRecordFailure_NoVerdict(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "issue-state.json")
+	domains := []string{"a.example"}
+	netErr := fmt.Errorf("creating order: %w", &net.OpError{Op: "dial", Err: errors.New("connection refused")})
+	verdict := fmt.Errorf("challenge validation: %w", &xacme.AuthorizationError{Identifier: "a.example"})
+
+	s := newIssueState().withPersistence(path)
+	s.recordFailure(domains, verdict) // an earlier CA verdict: Failures=1
+	s.entries[issueKey(domains)].NextEligible = time.Now().Add(-time.Minute)
+	s.recordAttempt(domains)
+	onDisk, _ := os.ReadFile(path)
+
+	if got := s.recordFailure(domains, netErr); got != minIssueBackoff {
+		t.Errorf("network failure: wait = %s, want %s", got, minIssueBackoff)
+	}
+	if f := s.entries[issueKey(domains)].Failures; f != 1 {
+		t.Errorf("network failure changed the verdict count: Failures = %d, want 1", f)
+	}
+	if after, _ := os.ReadFile(path); string(after) != string(onDisk) {
+		t.Errorf("network failure rewrote the state file:\nbefore %s\nafter  %s", onDisk, after)
+	}
+	// A restart waits at most 5 minutes (the attempt marker), not a backoff.
+	if ok, wait := newIssueState().withPersistence(path).shouldAttempt(domains); ok || wait > minIssueBackoff {
+		t.Errorf("restart after network failure: attempt allowed=%v wait=%s, want a wait of at most %s", ok, wait, minIssueBackoff)
+	}
+	// The next CA verdict continues from the earlier count (2nd failure: 10m).
+	if got := s.recordFailure(domains, verdict); got != 2*minIssueBackoff {
+		t.Errorf("verdict after network failure: backoff = %s, want %s", got, 2*minIssueBackoff)
+	}
+
+	// CA maintenance: 503 with a long Retry-After is honored and persisted.
+	h := http.Header{}
+	h.Set("Retry-After", "3600")
+	maint := fmt.Errorf("creating order: %w", &xacme.Error{StatusCode: http.StatusServiceUnavailable, Header: h})
+	other := []string{"b.example"}
+	if got := s.recordFailure(other, maint); got != time.Hour {
+		t.Errorf("503 with Retry-After 3600: wait = %s, want 1h0m0s", got)
+	}
+	if ok, wait := newIssueState().withPersistence(path).shouldAttempt(other); ok || wait < 59*time.Minute {
+		t.Errorf("restart after 503 Retry-After: attempt allowed=%v wait=%s, want ~1h", ok, wait)
+	}
+	if f := s.entries[issueKey(other)].Failures; f != 0 {
+		t.Errorf("503 counted as a verdict: Failures = %d, want 0", f)
+	}
+}
+
+// TestIssueAndStore_UnreachableCA verifies an attempt against an unreachable CA
+// is not counted as a failure and is retried 5 minutes later.
+func TestIssueAndStore_UnreachableCA(t *testing.T) {
+	srv := httptest.NewServer(http.NotFoundHandler())
+	unreachable := srv.URL + "/directory"
+	srv.Close() // connections are now refused
+
+	domains := []string{"localhost"} // must resolve for the DNS pre-check
+	mgr, err := NewManager(
+		GlobalConfig{Email: "a@b.com", CacheDir: t.TempDir(), DirectoryURL: unreachable},
+		[]VHostConfig{{Domains: domains, AcmeSource: "letsencrypt"}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.issueAndStore(context.Background(), &mgr.vhosts[0]); err == nil {
+		t.Fatal("expected issuance to fail against an unreachable CA")
+	}
+	e := mgr.issueState.entries[issueKey(domains)]
+	if e.Failures != 0 {
+		t.Errorf("unreachable CA counted as a CA verdict: Failures = %d, want 0", e.Failures)
+	}
+	if d := mgr.nextCheckDelay(); d > minIssueBackoff || d < minIssueBackoff-time.Minute {
+		t.Errorf("next check in %s, want ~%s", d, minIssueBackoff)
+	}
+}
+
+// TestRecordFailure_NoVerdictAfterLongAttempt verifies a network failure at the
+// end of an attempt that outlasted the 5-minute marker (e.g. timeouts) still
+// schedules a retry 5 minutes later, instead of leaving an elapsed time that
+// the renewal loop would skip until its next regular check.
+func TestRecordFailure_NoVerdictAfterLongAttempt(t *testing.T) {
+	domains := []string{"a.example"}
+	mgr, err := NewManager(
+		GlobalConfig{Email: "a@b.com", CacheDir: t.TempDir()},
+		[]VHostConfig{{Domains: domains, AcmeSource: "letsencrypt"}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr.issueState.recordAttempt(domains)
+	mgr.issueState.entries[issueKey(domains)].NextEligible = time.Now().Add(-time.Minute) // attempt ran 6 minutes
+	mgr.issueState.recordFailure(domains, fmt.Errorf("fetching: %w", &net.OpError{Op: "read", Err: errors.New("i/o timeout")}))
+	if d := mgr.nextCheckDelay(); d > minIssueBackoff || d < minIssueBackoff-time.Minute {
+		t.Errorf("next check in %s, want ~%s", d, minIssueBackoff)
+	}
+}

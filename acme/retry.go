@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -30,6 +32,14 @@ const (
 // reset the backoff and allow a crash-loop to burn through the CA's rate
 // limits. This mirrors Caddy's guidance that in-memory rate state is reset on
 // exit and is dangerous under supervisors.
+//
+// Failures are handled in two classes:
+//   - a CA verdict (failed validation, rejected order, rate limit, or anything
+//     unrecognised) counts as a failure: exponential backoff, persisted.
+//   - a failure that produced no verdict (network error, CA 5xx, local
+//     pre-check) is not counted: the next attempt is minIssueBackoff later, or
+//     after the CA's Retry-After if longer. Such failures do not use up the
+//     CA's rate limits, so growing the backoff would only delay recovery.
 type issueState struct {
 	mu      sync.Mutex
 	entries map[string]*issueEntry
@@ -143,9 +153,20 @@ func (s *issueState) recordSuccess(domains []string) {
 	s.saveLocked()
 }
 
-// recordFailure increments the failure count and computes the next eligible
-// retry time. If err is a CA rate-limit error carrying a Retry-After, that
-// duration is honored exactly (it takes precedence over exponential backoff).
+// recordFailure records a failed attempt and returns the wait until the next
+// one.
+//
+// A CA verdict increments the failure count and backs off exponentially; a
+// rate-limit error's Retry-After is honored exactly instead. Both are
+// persisted.
+//
+// A failure with no verdict (see isNoVerdictError) leaves the failure count
+// alone: the next attempt is minIssueBackoff after this one ended. That is kept
+// in memory only — the entry recordAttempt persisted before the attempt already
+// limits a restarted process to waiting at most minIssueBackoff, while the
+// in-memory time covers attempts that ran longer than minIssueBackoff (network
+// timeouts). A CA Retry-After longer than minIssueBackoff (e.g. a 503 during
+// maintenance) is honored and persisted.
 func (s *issueState) recordFailure(domains []string, err error) time.Duration {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -155,6 +176,17 @@ func (s *issueState) recordFailure(domains []string, err error) time.Duration {
 		e = &issueEntry{}
 		s.entries[k] = e
 	}
+
+	if isNoVerdictError(err) {
+		if d, ok := retryAfter(err); ok && d > minIssueBackoff {
+			e.NextEligible = time.Now().Add(d)
+			s.saveLocked()
+			return d
+		}
+		e.NextEligible = time.Now().Add(minIssueBackoff)
+		return minIssueBackoff
+	}
+
 	e.Failures++
 
 	// Honor the CA's Retry-After for rate-limit errors.
@@ -186,6 +218,43 @@ func rateLimitRetryAfter(err error) (time.Duration, bool) {
 		return 0, false
 	}
 	return xacme.RateLimit(ae)
+}
+
+// retryAfter returns the Retry-After of a CA error response, if it carried one
+// (seconds or an HTTP date).
+func retryAfter(err error) (time.Duration, bool) {
+	var ae *xacme.Error
+	if !errors.As(err, &ae) || ae.Header == nil {
+		return 0, false
+	}
+	v := ae.Header.Get("Retry-After")
+	if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
+		return time.Duration(secs) * time.Second, true
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		if d := time.Until(t); d > 0 {
+			return d, true
+		}
+	}
+	return 0, false
+}
+
+// errPrecheck marks issuance skipped by a local pre-check (domain does not
+// resolve, certificate directory not writable) before the CA was contacted.
+var errPrecheck = errors.New("skipping issuance")
+
+// isNoVerdictError reports whether a failed attempt produced no verdict from
+// the CA: a transport error, a CA server error (5xx), or a local pre-check.
+// None of these count against the CA's rate limits. Everything else — ACME
+// problems, failed validations, rate limits, an attempt running out of time,
+// and unrecognised errors — is treated as a verdict, which errs on the safe
+// side.
+func isNoVerdictError(err error) bool {
+	if errors.Is(err, errPrecheck) || isTransientError(err) {
+		return true
+	}
+	var ae *xacme.Error
+	return errors.As(err, &ae) && ae.StatusCode >= 500
 }
 
 // isTransientError reports whether err is a transport-level failure (network

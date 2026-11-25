@@ -267,7 +267,7 @@ func (m *Manager) doIssue(ctx context.Context, v *VHostConfig) error {
 	// rather than attempting. (This is a weak resolve-check, not a "points at
 	// me" check, so proxied/CDN setups are not false-rejected.)
 	if unresolved := preflightDomains(ctx, v.Domains); len(unresolved) > 0 {
-		return fmt.Errorf("skipping issuance: domain(s) %v do not resolve in DNS yet — check DNS before the CA is asked to validate (avoids rate-limit waste)", unresolved)
+		return fmt.Errorf("%w: domain(s) %v do not resolve in DNS yet — check DNS before the CA is asked to validate (avoids rate-limit waste)", errPrecheck, unresolved)
 	}
 
 	// Pre-flight: the issued certificate must be persisted, or the next check
@@ -277,7 +277,7 @@ func (m *Manager) doIssue(ctx context.Context, v *VHostConfig) error {
 	certPath, keyPath := v.resolveCertPaths(m.global.CacheDir)
 	for _, dir := range []string{filepath.Dir(certPath), filepath.Dir(keyPath)} {
 		if err := checkDirWritable(dir); err != nil {
-			return fmt.Errorf("skipping issuance: certificate directory is not writable (%w)", err)
+			return fmt.Errorf("%w: certificate directory is not writable (%w)", errPrecheck, err)
 		}
 	}
 

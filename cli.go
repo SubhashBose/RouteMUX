@@ -879,15 +879,15 @@ Routes:
 
     Route options (must follow --route PATH):
       --dest URL               Upstream destination URL (repeatable).
-                               Repeated --dest <URL> [weight=<N>] per route forms load-balancer,
+                               Repeated --dest '<URL> [weight=<N>]' per route forms load-balancer,
                                where weight is optional, default is 1.
-             or STATUS_CODE    --dest STATUS <code> [text] is also supported, where a HTTP
+          or 'STATUS ...'      --dest 'STATUS <code> [text]' is also supported, where a HTTP
                                response code is returned with optional static text body.
-             or FILE           --dest FILE [code] <path> serves a static file. The HTTP response
+          or 'FILE ...'        --dest 'FILE [code] <path>' serves a static file. The HTTP response
                                code is optional and defaults to 200 if omitted. If <path> is a
                                directory it will serve as file server, with dir listing disabled.
-             or FILE-BROWSE    --dest FILE-BROWSE <directory> also serves a file server, but with
-                               directory listing enabled.
+          or 'FILE-BROWSE ...' --dest 'FILE-BROWSE <directory>' also serves a file server, but
+                               with directory listing enabled.
       --load-balancer-mode     Load balancer mode, "round-robin" or "random", (default: random) 
       --noTLSverify            Skip TLS verification for upstream(s)
       --http-auth U:P          Per-route Basic HTTPAuth (overrides global-auth; "" disables auth)

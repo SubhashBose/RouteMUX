@@ -513,15 +513,21 @@ misconfigured value from renewing on every check.
 RouteMUX is careful not to trip the CA's rate limits (for Let's Encrypt: 5
 failed validations per hostname per hour, 5 duplicate certificates per week):
 
-- A failed issuance or renewal is retried with exponential backoff: 5 minutes,
-  then 10, 20, 40 … up to 24 hours. If the CA reports a rate limit, its
-  `Retry-After` is honoured instead. No request is sent while backing off.
-- The backoff state is stored in `cache-dir/issue-state.json`, so it survives
-  restarts. An attempt is recorded before the CA is contacted, so if RouteMUX
-  is restarted while an issuance is in progress it waits up to 5 minutes
-  before trying again.
-- Issuance is skipped, without contacting the CA, when a domain does not
-  resolve in DNS or the certificate directory is not writable.
+- When the CA rejects an attempt (for example a failed challenge validation),
+  it is retried with exponential backoff: 5 minutes, then 10, 20, 40 … up to
+  24 hours. If the CA reports a rate limit, its `Retry-After` is honoured
+  instead. No request is sent while backing off.
+- A failure that never got an answer from the CA — a network error, a CA
+  server error (5xx), or a local check (the domain does not resolve in DNS, or
+  the certificate directory is not writable, in which case the CA is not
+  contacted at all) — uses up none of the CA's limits. It is not counted and is
+  simply retried every 5 minutes, so renewal recovers soon after the network
+  does. A longer `Retry-After` from the CA (e.g. during maintenance) is
+  honoured.
+- The backoff state is stored in `cache-dir/issue-state.json`, so CA
+  rejections keep their backoff across restarts. Every attempt is also recorded
+  before the CA is contacted, so a restart (or a crash loop) never starts more
+  than one attempt per 5 minutes.
 - Each attempt is bounded to 10 minutes.
 
 ### Testing
